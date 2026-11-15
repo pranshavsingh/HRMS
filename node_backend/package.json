@@ -13,7 +13,7 @@
     "test:concurrency": "node --test tests/concurrency/attendance_concurrency.test.js",
     "test:pagination": "node --test tests/pagination/pagination.test.js",
     "test:performance": "node --test tests/performance/load_simulation.test.js",
-    "test:phase2": "node --test tests/concurrency/attendance_concurrency.test.js tests/pagination/pagination.test.js tests/performance/load_simulation.test.js",
+    "test:phase2": "node tests/run_phase2.js",
     "test:all": "npm run test:security && npm run test:phase2",
     "check": "node --check src/server.js && node --check src/worker.js",
     "db:init:mysql": "node scripts/init-mysql.js",
