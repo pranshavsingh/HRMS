@@ -74,21 +74,35 @@ export const db = {
   },
 
   /**
-   * Execute code block in a transaction.
-   * @param {function(object): Promise<any>} fn - Callback to execute. Recieves the database connection (tx).
+   * Execute code block in a transaction with automatic retry on deadlocks.
+   * @param {function(object): Promise<any>} fn - Callback to execute. Receives the database connection (tx).
+   * @param {number} maxRetries - Maximum retries on deadlock (default: 3).
    */
-  async transaction(fn) {
-    const connection = await pool.getConnection();
-    try {
-      await connection.beginTransaction();
-      const result = await fn(connection);
-      await connection.commit();
-      return result;
-    } catch (err) {
-      await connection.rollback();
-      throw err;
-    } finally {
-      connection.release();
+  async transaction(fn, maxRetries = 3) {
+    let attempts = 0;
+    while (attempts < maxRetries) {
+      attempts++;
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const result = await fn(connection);
+        await connection.commit();
+        return result;
+      } catch (err) {
+        await connection.rollback();
+        const isDeadlock =
+          err.errno === 1213 ||
+          err.code === "ER_LOCK_DEADLOCK" ||
+          (err.message && err.message.includes("Deadlock found"));
+        if (isDeadlock && attempts < maxRetries) {
+          const delay = Math.floor(Math.random() * 50) + 20;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        throw err;
+      } finally {
+        connection.release();
+      }
     }
   }
 };

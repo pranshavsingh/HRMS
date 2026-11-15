@@ -306,14 +306,14 @@ export const attendanceService = {
           throw new AppError("Cannot punch in while punch out is pending approval", 400);
         }
 
-        // 4. Check for existing open attendance under lock
-        const open = await attendanceRepository.findOpenAttendance(userId, tx, true);
+        // 4. Check for existing open attendance under serialized user lock
+        const open = await attendanceRepository.findOpenAttendance(userId, tx, false);
         if (open) {
           throw new AppError("Already punched in", 400);
         }
 
         const punchInOutside = await isOutsideAllottedArea(userId, latitude, longitude, tx);
-        const reviewers = await approvalRouteForUser(userId, tx);
+        const reviewers = punchInOutside ? await approvalRouteForUser(userId) : [];
         const needsApproval = punchInOutside && reviewers.length > 0;
 
         const punchInStatus = needsApproval ? "pending" : "approved";
@@ -396,14 +396,14 @@ export const attendanceService = {
           throw new AppError("User not found", 404);
         }
 
-        // 2. Lock open attendance record
-        const att = await attendanceRepository.findOpenAttendance(userId, tx, true);
+        // 2. Locate open attendance record
+        const att = await attendanceRepository.findOpenAttendance(userId, tx, false);
         if (!att) {
           throw new AppError("Punch in first", 400);
         }
 
         const punchOutOutside = await isOutsideAllottedArea(userId, latitude, longitude, tx);
-        const reviewers = await approvalRouteForUser(userId, tx);
+        const reviewers = punchOutOutside ? await approvalRouteForUser(userId) : [];
         const needsApproval = punchOutOutside && reviewers.length > 0;
 
         const punchOutStatus = needsApproval ? "pending" : "approved";
