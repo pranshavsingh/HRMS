@@ -102,7 +102,7 @@ jobs:
           cd node_backend
           npm run test:security
 
-      - name: Run Phase 2 Concurrency, Pagination & Performance Suite
+      - name: Run Phase 2 Concurrency Tests
         env:
           NODE_ENV: test
           JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
@@ -120,7 +120,47 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
         run: |
           cd node_backend
-          npm run test:phase2
+          node --test tests/concurrency/attendance_concurrency.test.js
+
+      - name: Run Phase 2 Pagination Tests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          cd node_backend
+          node --test tests/pagination/pagination.test.js
+
+      - name: Run Phase 2 Load Simulation Tests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          cd node_backend
+          node --test tests/performance/load_simulation.test.js
 
   frontend-build:
     name: Frontend Build Verification
