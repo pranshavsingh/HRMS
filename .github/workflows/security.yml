@@ -316,7 +316,7 @@ jobs:
           OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
         run: |
           cd node_backend
-          node --test tests/phase3/realtime_pubsub.test.js
+          node --test --test-timeout=30000 tests/phase3/realtime_pubsub.test.js
 
       - name: Run Phase 3 Production Observability & Prometheus Metrics Tests
         env:
@@ -338,7 +338,7 @@ jobs:
           OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
         run: |
           cd node_backend
-          node --test tests/phase3/observability.test.js
+          node --test --test-timeout=30000 tests/phase3/observability.test.js
 
   frontend-build:
     name: Frontend Build Verification

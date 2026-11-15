@@ -172,13 +172,13 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
 
     const redisUrl = config.redisUrl || "redis://127.0.0.1:6379";
 
-    // Setup Instance A
+    // Setup Instance A with lazyConnect so connect() is safely explicit
     const srvA = http.createServer();
     await new Promise((r) => srvA.listen(0, r));
     const portA = srvA.address().port;
 
     const ioA = new SocketIOServer(srvA, { transports: ["websocket"] });
-    const pubA = new Redis(redisUrl);
+    const pubA = new Redis(redisUrl, { lazyConnect: true });
     const subA = pubA.duplicate();
     await Promise.all([pubA.connect(), subA.connect()]);
     ioA.adapter(createAdapter(pubA, subA));
@@ -187,15 +187,17 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
       socket.user = jwt.verify(socket.handshake.auth.token, config.jwtSecret);
       next();
     });
-    ioA.on("connection", (socket) => socket.join(`user:${socket.user.id}`));
+    ioA.on("connection", async (socket) => {
+      await socket.join(`user:${socket.user.id}`);
+    });
 
-    // Setup Instance B
+    // Setup Instance B with lazyConnect
     const srvB = http.createServer();
     await new Promise((r) => srvB.listen(0, r));
     const portB = srvB.address().port;
 
     const ioB = new SocketIOServer(srvB, { transports: ["websocket"] });
-    const pubB = new Redis(redisUrl);
+    const pubB = new Redis(redisUrl, { lazyConnect: true });
     const subB = pubB.duplicate();
     await Promise.all([pubB.connect(), subB.connect()]);
     ioB.adapter(createAdapter(pubB, subB));
@@ -207,9 +209,16 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
     });
     await new Promise((r) => clientA.on("connect", r));
 
-    // Instance B broadcasts to room 'user:7001'
-    const eventReceivedPromise = new Promise((resolve) => {
-      clientA.on("CROSS_INSTANCE_EVENT", (data) => resolve(data));
+    // Allow Redis Pub/Sub room subscription to register across nodes
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Instance B broadcasts to room 'user:7001' with bounded timeout
+    const eventReceivedPromise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Timeout (5000ms) waiting for cross-instance event")), 5000);
+      clientA.on("CROSS_INSTANCE_EVENT", (data) => {
+        clearTimeout(timer);
+        resolve(data);
+      });
     });
 
     // Emitted on Server B!
