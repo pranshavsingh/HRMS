@@ -8,7 +8,7 @@ import { config } from "./config/env.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import attendanceRoutes from "./routes/attendance.routes.js";
 import leaveRoutes from "./routes/leave.routes.js";
-import { errorHandler } from "./middleware/errorHandler.js";
+import { errorHandler, AppError } from "./middleware/errorHandler.js";
 import { authenticate } from "./middleware/auth.js";
 import { getDocumentDetailRedirect } from "./controllers/accounts.controller.js";
 import { createApiLimiter, createLoginLimiter } from "./middleware/rateLimiter.js";
@@ -33,18 +33,44 @@ export function createApp() {
   // 3. Tiered High-Throughput API Limiter
   app.use(createApiLimiter());
 
-  // 3. Enterprise CORS Configuration
+  // 3. Enterprise CORS Configuration (Strict Production Allowlist)
   const isProduction = process.env.NODE_ENV === "production";
-  app.use(
-    cors({
-      origin: config.corsOrigin === "*" 
-        ? (isProduction ? true : true) 
-        : config.corsOrigin.split(",").map((s) => s.trim()),
-      credentials: true,
-      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-    })
-  );
+  const allowedOrigins = config.corsOrigin && config.corsOrigin !== "*"
+    ? config.corsOrigin.split(",").map((s) => s.trim().toLowerCase())
+    : [];
+
+  const corsOptions = {
+    origin: (origin, callback) => {
+      // Allow requests with no origin (mobile native apps, curl, server-to-server)
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      const normalizedOrigin = origin.trim().toLowerCase();
+
+      if (isProduction) {
+        if (allowedOrigins.length > 0 && allowedOrigins.includes(normalizedOrigin)) {
+          return callback(null, true);
+        }
+        return callback(new AppError(`Origin '${origin}' is not permitted by CORS policy`, 403));
+      } else {
+        if (
+          config.corsOrigin === "*" ||
+          allowedOrigins.includes(normalizedOrigin) ||
+          normalizedOrigin.includes("localhost") ||
+          normalizedOrigin.includes("127.0.0.1")
+        ) {
+          return callback(null, true);
+        }
+        return callback(new AppError(`Origin '${origin}' is not permitted by CORS policy`, 403));
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    maxAge: 86400,
+  };
+  app.use(cors(corsOptions));
 
   // 4. Request Logger (Morgan)
   app.use(morgan("combined"));
@@ -64,7 +90,10 @@ export function createApp() {
   // Secure documents signed URL direct access route
   app.get("/api/documents/:id", authenticate, getDocumentDetailRedirect);
 
-  // Media files server
+  // Protected Media files server: Prohibit public static access to confidential employee documents
+  app.use("/media/documents", (_req, res) => {
+    return res.status(403).json({ error: "Direct access to private employee documents is forbidden. Use authenticated document routes." });
+  });
   app.use("/media", express.static(path.resolve(process.cwd(), config.mediaRoot)));
 
   // Versioned API v1 Routes
@@ -114,9 +143,15 @@ export function createApp() {
         checks.dependencies.redis = { status: "connected", latency_ms: Date.now() - start };
       } else {
         checks.dependencies.redis = { status: "offline", mode: "in-memory fallback" };
+        if (isProduction) {
+          isHealthy = false;
+        }
       }
     } catch (err) {
       checks.dependencies.redis = { status: "error", error: err.message };
+      if (isProduction) {
+        isHealthy = false;
+      }
     }
 
     checks.status = isHealthy ? "ready" : "degraded";

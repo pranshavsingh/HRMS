@@ -2,6 +2,7 @@ import auditRepository from "../repositories/audit.repository.js";
 import logger from "../utils/logger.js";
 import { db } from "../db/index.js";
 import { realtimeManager } from "../utils/realtime.js";
+import { AppError } from "../middleware/errorHandler.js";
 
 export const auditService = {
   /**
@@ -90,6 +91,9 @@ export const auditService = {
       }
     } catch (err) {
       logger.error(`Audit Log Fail: ${err.message}`);
+      if (finalTx || severity === "CRITICAL") {
+        throw new AppError(`Durable audit logging failed: ${err.message}`, 500);
+      }
     }
   }
 };

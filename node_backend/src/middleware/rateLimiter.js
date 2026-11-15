@@ -9,7 +9,7 @@ import redisService from "../services/redis.service.js";
  */
 
 export function createApiLimiter() {
-  const store = redisService.client
+  const store = redisService.isReady()
     ? new RedisStore({
         sendCommand: (...args) => redisService.client.call(...args),
         prefix: "rl:api:",
@@ -21,6 +21,7 @@ export function createApiLimiter() {
     max: 1200, // 20 requests/second burst ceiling per user
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { keyGeneratorIpFallback: false },
     store,
     keyGenerator: (req) => {
       const auth = req.headers.authorization;
@@ -35,7 +36,7 @@ export function createApiLimiter() {
 }
 
 export function createLoginLimiter() {
-  const store = redisService.client
+  const store = redisService.isReady()
     ? new RedisStore({
         sendCommand: (...args) => redisService.client.call(...args),
         prefix: "rl:login:",
@@ -47,6 +48,7 @@ export function createLoginLimiter() {
     max: 30, // 30 attempts per IP per 15 minutes
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { keyGeneratorIpFallback: false },
     store,
     keyGenerator: (req) => req.ip || "unknown",
     message: { error: "Too many login attempts from this IP. Please try again in 15 minutes." },

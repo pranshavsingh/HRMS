@@ -12,6 +12,7 @@
     "test:security": "node tests/security/run_all.js",
     "check": "node --check src/server.js && node --check src/worker.js",
     "db:init:mysql": "node scripts/init-mysql.js",
+    "db:migrate": "node scripts/run-migrations.js",
     "db:migrate:sqlite-to-mysql": "node scripts/migrate-sqlite-to-mysql.js"
   },
   "dependencies": {

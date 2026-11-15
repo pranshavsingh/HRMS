@@ -60,11 +60,11 @@ export const verifyPasswordResetOtp = asyncHandler(async (req, res) => {
 });
 
 /**
- * Reset password using verified OTP.
+ * Reset password using verified cryptographic reset token.
  */
 export const resetPasswordWithOtp = asyncHandler(async (req, res) => {
-  const { email, otp, new_password, reset_token } = req.body;
-  const result = await accountsService.resetPasswordWithOtp(email, otp, new_password, reset_token);
+  const { email, reset_token, new_password } = req.body;
+  const result = await accountsService.resetPasswordWithOtp(email, reset_token, new_password);
   res.json(result);
 });
 

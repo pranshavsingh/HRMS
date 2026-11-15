@@ -142,14 +142,14 @@ export const verifyOtpSchema = z.object({
   })
 });
 
-// 4. Reset Password
+// 4. Reset Password (Strict Cryptographic Reset Token Required)
 export const resetPasswordSchema = z.object({
   body: z.object({
-    email: z.string({ required_error: "Email, OTP and new password are required" }).min(1, "Email, OTP and new password are required"),
-    otp: z.string({ required_error: "Email, OTP and new password are required" }).min(1, "Email, OTP and new password are required"),
-    reset_token: z.string().optional(),
-    new_password: z.string({ required_error: "Email, OTP and new password are required" })
-      .min(1, "Email, OTP and new password are required")
+    email: z.string({ required_error: "Email is required" }).min(1, "Email is required"),
+    reset_token: z.string({ required_error: "Cryptographic reset token is required" })
+      .min(32, "Reset token must be a valid cryptographic token")
+      .max(128, "Invalid reset token length"),
+    new_password: z.string({ required_error: "New password is required" })
       .min(12, "Password must be at least 12 characters")
       .max(128, "Password must not exceed 128 characters")
   })

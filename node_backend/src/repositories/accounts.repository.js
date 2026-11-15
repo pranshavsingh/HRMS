@@ -340,20 +340,54 @@ export const accountsRepository = {
 
   async incrementOtpAttempts(email, tx = null) {
     await ensureOtpTable();
-    await db.run(
+    const res = await db.run(
       "UPDATE password_reset_otp SET attempts = attempts + 1, updated_at = NOW() WHERE lower(email)=lower(?)",
       [email],
       tx
     );
+    return res?.changes || 0;
   },
 
   async verifyOtp(email, resetTokenHash = null, tx = null) {
     await ensureOtpTable();
-    await db.run(
+    const res = await db.run(
       "UPDATE password_reset_otp SET verified = 1, reset_token_hash = ?, verified_at = NOW(), updated_at = NOW() WHERE lower(email)=lower(?)",
       [resetTokenHash, email],
       tx
     );
+    return res?.changes || 0;
+  },
+
+  async atomicVerifyOtp(email, expectedOtpHash, resetTokenHash, tx = null) {
+    await ensureOtpTable();
+    const result = await db.run(
+      `UPDATE password_reset_otp 
+       SET verified = 1, reset_token_hash = ?, verified_at = NOW(), updated_at = NOW() 
+       WHERE lower(email) = lower(?) 
+         AND otp_hash = ? 
+         AND verified = 0 
+         AND attempts < 5 
+         AND expires_at > NOW()`,
+      [resetTokenHash, email, expectedOtpHash],
+      tx
+    );
+    return (result?.changes || 0) > 0;
+  },
+
+  async atomicConsumeResetToken(email, resetTokenHash, tx = null) {
+    await ensureOtpTable();
+    const result = await db.run(
+      `UPDATE password_reset_otp 
+       SET consumed_at = NOW(), updated_at = NOW() 
+       WHERE lower(email) = lower(?) 
+         AND reset_token_hash = ? 
+         AND verified = 1 
+         AND consumed_at IS NULL 
+         AND expires_at > NOW()`,
+      [email, resetTokenHash],
+      tx
+    );
+    return (result?.changes || 0) > 0;
   },
 
   async consumeOtp(email, tx = null) {

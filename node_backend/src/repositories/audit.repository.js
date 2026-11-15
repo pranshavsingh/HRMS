@@ -1,5 +1,6 @@
 import { db } from "../db/index.js";
 import { config } from "../config/env.js";
+import logger from "../utils/logger.js";
 
 let auditTableReady = false;
 
@@ -33,7 +34,9 @@ async function ensureAuditTable() {
       }
     }
   } catch (err) {
-    // Suppress schema alteration error
+    if (!err.message?.includes("duplicate column") && err.code !== "ER_DUP_FIELDNAME") {
+      logger.warn(`Audit table schema alteration warning: ${err.message}`);
+    }
   }
   auditTableReady = true;
 }

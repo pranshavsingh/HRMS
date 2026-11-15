@@ -1,0 +1,126 @@
+name: HRMS Security Hardening CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+  pull_request:
+    branches:
+      - main
+      - 'feat/**'
+
+jobs:
+  backend-security:
+    name: Backend Security, Migrations & Tests
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: --health-cmd="redis-cli ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: node_backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: |
+          cd node_backend
+          npm ci
+
+      - name: Syntax & Structure Verification (npm run check)
+        run: |
+          cd node_backend
+          npm run check
+
+      - name: Dependency Vulnerability Audit
+        run: |
+          cd node_backend
+          npm audit --audit-level=high
+
+      - name: Initialize MySQL Schema on Disposable Database
+        env:
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          DB_CLIENT: mysql
+        run: |
+          cd node_backend
+          npm run db:init:mysql
+
+      - name: Validate & Execute Database Migrations
+        env:
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          DB_CLIENT: mysql
+        run: |
+          cd node_backend
+          npm run db:migrate
+
+      - name: Run Automated Security Test Suite
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          ENFORCE_ALL_SECURITY_TESTS: "true"
+        run: |
+          cd node_backend
+          npm run test:security
+
+  frontend-build:
+    name: Frontend Build Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: hrms_saas/package-lock.json
+
+      - name: Install frontend dependencies
+        run: |
+          cd hrms_saas
+          npm ci
+
+      - name: Build React + Vite Web App
+        run: |
+          cd hrms_saas
+          npm run build

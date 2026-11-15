@@ -121,6 +121,39 @@ describe("P1.2 — JWT & Refresh Token Security Suite", () => {
       }
     });
 
+    it("should safely handle concurrent refresh requests during grace window and NOT return revoked refresh token", async () => {
+      const userId = 1;
+      const familyId = crypto.randomUUID();
+      const initialRefresh = jwt.sign(
+        { userId, role: "admin", type: "refresh", familyId },
+        config.jwtSecret,
+        { expiresIn: "30d", algorithm: "HS256", jwtid: crypto.randomUUID() }
+      );
+      const initialHash = crypto.createHash("sha256").update(initialRefresh).digest("hex");
+      const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+      // Seed refresh token in repository
+      await accountsRepository.insertRefreshToken(userId, initialHash, expires, { platform: "test" }, familyId);
+
+      // Request 1: Rotates the token
+      const res1 = await accountsService.refreshSession(initialRefresh, { platform: "test" });
+      assert.ok(res1.access);
+      assert.ok(res1.refresh);
+
+      // Request 2: Concurrent request with the same old token (within grace window)
+      const res2 = await accountsService.refreshSession(initialRefresh, { platform: "test" });
+      assert.ok(res2.access, "Should return a valid access token during grace window");
+      assert.equal(res2.refresh, null, "Must NOT return the revoked refresh token during grace window");
+      assert.equal(res2.concurrent_refresh, true, "Must flag concurrent_refresh: true");
+
+      // Cleanup
+      await accountsRepository.deleteRefreshTokenByHash(initialHash);
+      if (res1.refresh) {
+        const h = crypto.createHash("sha256").update(res1.refresh).digest("hex");
+        await accountsRepository.deleteRefreshTokenByHash(h);
+      }
+    });
+
     it("should detect reuse of a revoked token and revoke the entire family", async () => {
       const userId = 1; // existing active user
       const familyId = crypto.randomUUID();

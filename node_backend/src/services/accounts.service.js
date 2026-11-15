@@ -158,7 +158,7 @@ export const accountsService = {
       const nowTime = Date.now();
       if (nowTime - lastActivity < 15000 && tokenRecord.replaced_by_hash) {
         // Concurrency grace window: token was rotated just moments ago (likely concurrent request).
-        // Find user and return response without revoking family
+        // Return valid new access token and refresh: null (do not return the dead/revoked refresh token)
         const user = await accountsRepository.findById(payload.userId);
         if (user && user.is_active) {
           const resolvedRole = (user.is_superuser === 1 || user.is_superuser === true) ? "superadmin" : user.role;
@@ -170,7 +170,8 @@ export const accountsService = {
           );
           return {
             access,
-            refresh: refreshToken,
+            refresh: null,
+            concurrent_refresh: true,
             user: {
               id: user.id,
               username: user.username,
@@ -334,62 +335,22 @@ export const accountsService = {
       throw new AppError("Too many invalid attempts. Request new OTP.", 400);
     }
 
-    const matches = safeCompare(row.otp_hash, hashOtp(email, otp));
-    if (!matches) {
-      await accountsRepository.incrementOtpAttempts(email);
-      throw new AppError("Invalid OTP", 400);
-    }
-
     const resetToken = crypto.randomBytes(32).toString("hex");
     const resetTokenHash = crypto.createHash("sha256").update(resetToken).digest("hex");
+    const expectedOtpHash = hashOtp(email, otp);
 
-    await accountsRepository.verifyOtp(email, resetTokenHash);
+    const verified = await accountsRepository.atomicVerifyOtp(email, expectedOtpHash, resetTokenHash);
+    if (!verified) {
+      await accountsRepository.incrementOtpAttempts(email);
+      throw new AppError("Invalid OTP, expired, or already verified", 400);
+    }
+
     return { message: "OTP verified", reset_token: resetToken };
   },
 
-  async resetPasswordWithOtp(email, otp, newPassword, resetToken = null) {
-    const row = await accountsRepository.findOtpByEmail(email);
-    if (!row) {
-      throw new AppError("Invalid or expired OTP", 400);
-    }
-
-    const now = new Date();
-    if (new Date(row.expires_at) < now) {
-      await accountsRepository.deleteOtpByEmail(email);
-      throw new AppError("OTP expired. Request a new one.", 400);
-    }
-
-    if (Number(row.attempts || 0) >= 5) {
-      throw new AppError("Too many invalid attempts. Request new OTP.", 400);
-    }
-
-    // Critical VULN-02 fix: Require verified state
-    if (Number(row.verified) !== 1) {
-      await accountsRepository.incrementOtpAttempts(email);
-      throw new AppError("OTP must be verified before resetting password", 400);
-    }
-
-    if (row.consumed_at) {
-      throw new AppError("OTP has already been used. Request a new one.", 400);
-    }
-
-    // Validate reset challenge (either reset_token or matching otp)
-    let challengePassed = false;
-    if (resetToken && row.reset_token_hash) {
-      const computedHash = crypto.createHash("sha256").update(resetToken).digest("hex");
-      challengePassed = safeCompare(computedHash, row.reset_token_hash);
-    } else if (otp) {
-      challengePassed = safeCompare(row.otp_hash, hashOtp(email, otp));
-    }
-
-    if (!challengePassed) {
-      await accountsRepository.incrementOtpAttempts(email);
-      throw new AppError("Invalid reset challenge or OTP", 400);
-    }
-
-    const user = await accountsRepository.findByEmail(email);
-    if (!user) {
-      throw new AppError("User not found", 400);
+  async resetPasswordWithOtp(email, resetToken, newPassword) {
+    if (!resetToken || typeof resetToken !== "string" || resetToken.length < 32) {
+      throw new AppError("Cryptographic reset token is required to reset password", 400);
     }
 
     if (!newPassword || newPassword.length < 12) {
@@ -399,10 +360,20 @@ export const accountsService = {
       throw new AppError("Password must not exceed 128 characters", 400);
     }
 
+    const user = await accountsRepository.findByEmail(email);
+    if (!user) {
+      throw new AppError("User not found", 400);
+    }
+
+    const resetTokenHash = crypto.createHash("sha256").update(resetToken).digest("hex");
     const passwordHash = await hashPassword(newPassword);
+
     await db.transaction(async (tx) => {
+      const consumed = await accountsRepository.atomicConsumeResetToken(email, resetTokenHash, tx);
+      if (!consumed) {
+        throw new AppError("Invalid, expired, unverified, or already consumed reset token", 400);
+      }
       await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [passwordHash, user.id], tx);
-      await accountsRepository.consumeOtp(email, tx);
       await accountsRepository.deleteRefreshTokensByUserId(user.id, tx);
     });
 

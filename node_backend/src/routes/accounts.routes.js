@@ -65,7 +65,8 @@ const signatureLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 20, // Limit to 20 uploads per hour per user
   message: { error: "Signature request limit exceeded. Max 20 uploads per hour." },
-  keyGenerator: (req) => (req.user ? String(req.user.id) : req.ip),
+  validate: { keyGeneratorIpFallback: false },
+  keyGenerator: (req) => (req.user ? String(req.user.id) : (req.ip || "unknown")),
 });
 
 r.get("/cloudinary/signature/", authenticate, signatureLimiter, c.getCloudinarySignature);
