@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 | version | name | checksum | applied_at |
 | :--- | :--- | :--- | :--- |
 | `001` | `001_phase1_security_hardening.sql` | `76407d903f0b2f693cb7462fa11d6199df4824bb8ba243553257ad6d877f052d` | `2026-11-15 16:51:35` |
-| `002` | `002_phase2_performance_indexes.sql` | `49dea50ba759d57aee90d7945d8b7ea844c8325a7a7263b8c63a6977df76f2fd` | `2026-11-15 16:51:38` |
+| `002` | `002_phase2_performance_indexes.sql` | `7035757188967e21e4295d16e2d1c0700a650f2ba5391ec01a28b9f0ba4505e9` | `2026-11-15 16:51:38` |
 
 ---
 

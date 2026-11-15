@@ -17,13 +17,15 @@ function computeChecksum(content) {
 function parseSqlStatements(content) {
   // Strip comments (-- ...) and split statements by semicolon
   const lines = content.split("\n");
-  const filtered = lines.map((line) => {
-    const commentIdx = line.indexOf("--");
-    if (commentIdx >= 0) {
-      return line.substring(0, commentIdx);
-    }
-    return line;
-  }).join("\n");
+  const filtered = lines
+    .map((line) => {
+      const commentIdx = line.indexOf("--");
+      if (commentIdx >= 0) {
+        return line.substring(0, commentIdx);
+      }
+      return line;
+    })
+    .join("\n");
 
   return filtered
     .split(";")
@@ -108,6 +110,32 @@ async function runMigrations() {
         return rows.length > 0;
       }
 
+      // Helper to safely execute a SQL statement on MySQL
+      async function executeStatementMysql(rawStmt) {
+        let stmt = rawStmt.trim();
+        const indexMatch = stmt.match(/CREATE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([`\w]+)\s+ON\s+([`\w]+)/i);
+        if (indexMatch) {
+          const [, indexName, tableName] = indexMatch;
+          const cleanTable = tableName.replace(/`/g, "");
+          const cleanIndex = indexName.replace(/`/g, "");
+          if (await indexExists(cleanTable, cleanIndex)) {
+            console.log(`  - Index ${cleanIndex} already exists on ${cleanTable} (skipped)`);
+            return;
+          }
+          stmt = stmt.replace(/CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS/i, "CREATE INDEX");
+        }
+
+        try {
+          await conn.query(stmt);
+        } catch (err) {
+          if (err.errno === 1061 || err.code === "ER_DUP_KEYNAME") {
+            console.log("  - Index already exists (skipped duplicate)");
+          } else {
+            throw err;
+          }
+        }
+      }
+
       // 4. Process each migration file
       for (const file of migrationFiles) {
         const version = file.split("_")[0];
@@ -132,7 +160,6 @@ async function runMigrations() {
           // Check if Phase 1 was previously applied procedurally
           const hasFamilyId = await columnExists("accounts_refreshtoken", "family_id");
           if (!hasFamilyId) {
-            // Apply columns
             await conn.query("ALTER TABLE accounts_refreshtoken ADD COLUMN family_id VARCHAR(64) NULL AFTER user_id");
             await conn.query("ALTER TABLE accounts_refreshtoken ADD COLUMN is_revoked BOOLEAN NOT NULL DEFAULT 0 AFTER expires_at");
             await conn.query("ALTER TABLE accounts_refreshtoken ADD COLUMN replaced_by_hash VARCHAR(255) NULL AFTER is_revoked");
@@ -157,26 +184,11 @@ async function runMigrations() {
           if (await columnExists("audit_logs", "id") && !(await columnExists("audit_logs", "severity"))) {
             await conn.query("ALTER TABLE audit_logs ADD COLUMN severity VARCHAR(20) NOT NULL DEFAULT 'INFO'");
           }
-        } else if (file.startsWith("002_")) {
-          // Phase 2 indexes
-          const statements = parseSqlStatements(content);
-          for (const statement of statements) {
-            try {
-              await conn.query(statement);
-            } catch (err) {
-              // Ignore duplicate key name errors
-              if (err.errno === 1061 || err.code === "ER_DUP_KEYNAME") {
-                console.log(`  - Index already exists (skipped duplicate)`);
-              } else {
-                throw err;
-              }
-            }
-          }
         } else {
-          // Generic migration
+          // Parse and safely execute each statement
           const statements = parseSqlStatements(content);
           for (const statement of statements) {
-            await conn.query(statement);
+            await executeStatementMysql(statement);
           }
         }
 
@@ -270,14 +282,13 @@ async function runMigrations() {
             await sqliteDb.run("ALTER TABLE password_reset_otp ADD COLUMN consumed_at DATETIME NULL");
           }
           await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_otp_email_verified ON password_reset_otp(email, verified)");
-        } else if (file.startsWith("002_")) {
-          const statements = parseSqlStatements(content);
-          for (const statement of statements) {
-            await sqliteDb.run(statement);
-          }
         } else {
           const statements = parseSqlStatements(content);
-          for (const statement of statements) {
+          for (let statement of statements) {
+            // For SQLite, ensure CREATE INDEX statements use IF NOT EXISTS
+            if (statement.toUpperCase().startsWith("CREATE INDEX") && !statement.toUpperCase().includes("IF NOT EXISTS")) {
+              statement = statement.replace(/CREATE\s+INDEX/i, "CREATE INDEX IF NOT EXISTS");
+            }
             await sqliteDb.run(statement);
           }
         }
