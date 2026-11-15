@@ -23,7 +23,7 @@ jobs:
           MYSQL_DATABASE: hrms_ci_test
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+        options: --health-cmd="mysqladmin ping -proot_ci_password_strong_123" --health-interval=10s --health-timeout=5s --health-retries=10
 
       redis:
         image: redis:7-alpine
@@ -95,6 +95,7 @@ jobs:
           DB_CLIENT: mysql
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
           ENFORCE_ALL_SECURITY_TESTS: "true"
         run: |
           cd node_backend

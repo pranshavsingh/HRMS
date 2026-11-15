@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS password_reset_otp (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Enterprise Scale Performance Indexes
-CREATE INDEX IF NOT EXISTS idx_user_role_active ON accounts_user(role, is_active, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_user_role_active ON accounts_user(role, is_active);
 CREATE INDEX IF NOT EXISTS idx_profile_manager ON accounts_employeeprofile(manager_id, is_active_employee);
 CREATE INDEX IF NOT EXISTS idx_loc_user_primary ON accounts_employeelocation(user_id, is_primary);
 CREATE INDEX IF NOT EXISTS idx_refresh_user_expiry ON accounts_refreshtoken(user_id, expires_at);
