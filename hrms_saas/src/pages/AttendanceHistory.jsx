@@ -121,7 +121,7 @@ export default function AttendanceHistory() {
       }
 
       const res = await API.get("/attendance/history/", { params });
-      setRecords(Array.isArray(res.data) ? res.data : []);
+      setRecords(Array.isArray(res.data) ? res.data : (res.data?.data || res.data?.records || []));
     } catch (err) {
       console.error("Attendance history error:", err.response?.data || err.message);
       showPopup("Unable to load attendance history", "error");

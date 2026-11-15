@@ -1,8 +1,13 @@
 import { db } from "../db/index.js";
 
 export const attendanceRepository = {
-  async findOpenAttendance(userId, tx = null) {
-    return db.get("SELECT * FROM attendance_attendance WHERE user_id=? AND punch_out_time IS NULL AND punch_in_status <> 'rejected' ORDER BY punch_in_time DESC LIMIT 1", [userId], tx);
+  async findOpenAttendance(userId, tx = null, forUpdate = false) {
+    const lockClause = forUpdate ? " FOR UPDATE" : "";
+    return db.get(
+      `SELECT * FROM attendance_attendance WHERE user_id=? AND punch_out_time IS NULL AND punch_in_status NOT IN ('rejected', 'leave') AND status <> 'leave' ORDER BY punch_in_time DESC LIMIT 1${lockClause}`,
+      [userId],
+      tx
+    );
   },
 
   async findLatestAttendance(userId, tx = null) {
@@ -46,7 +51,7 @@ export const attendanceRepository = {
     return db.get("SELECT * FROM attendance_attendance WHERE id=?", [id], tx);
   },
 
-  async updateAttendance(id, data, tx = null) {
+  async updateAttendance(id, data, tx = null, extraCondition = null) {
     const fields = [];
     const params = [];
     
@@ -56,8 +61,9 @@ export const attendanceRepository = {
     }
     
     params.push(id);
-    const sql = `UPDATE attendance_attendance SET ${fields.join(", ")} WHERE id=?`;
-    await db.run(sql, params, tx);
+    const extraSql = extraCondition ? ` AND ${extraCondition}` : "";
+    const sql = `UPDATE attendance_attendance SET ${fields.join(", ")} WHERE id=?${extraSql}`;
+    return db.run(sql, params, tx);
   },
 
   async insertApproval(data, tx = null) {
@@ -148,19 +154,20 @@ export const attendanceRepository = {
     );
   },
 
-  async findApprovalById(approvalId, tx = null) {
+  async findApprovalById(approvalId, tx = null, forUpdate = false) {
+    const lockClause = forUpdate ? " FOR UPDATE" : "";
     return db.get(
       `SELECT aa.id, aa.role, aa.status, aa.comment, aa.created_at, aa.approved_by_id, aa.attendance_id, aa.type, aa.action_at,
               a.punch_in_status, a.punch_out_status, a.status as attendance_status, a.punch_out_time, a.user_id as employee_id
        FROM attendance_attendanceapproval aa
        JOIN attendance_attendance a ON a.id=aa.attendance_id
-       WHERE aa.id=?`,
+       WHERE aa.id=?${lockClause}`,
       [approvalId],
       tx
     );
   },
 
-  async updateApproval(id, data, tx = null) {
+  async updateApproval(id, data, tx = null, onlyPending = true) {
     const fields = [];
     const params = [];
     
@@ -170,8 +177,9 @@ export const attendanceRepository = {
     }
     
     params.push(id);
-    const sql = `UPDATE attendance_attendanceapproval SET ${fields.join(", ")} WHERE id=?`;
-    await db.run(sql, params, tx);
+    const pendingSql = onlyPending ? " AND status='pending'" : "";
+    const sql = `UPDATE attendance_attendanceapproval SET ${fields.join(", ")} WHERE id=?${pendingSql}`;
+    return db.run(sql, params, tx);
   },
 
   async updatePendingApprovalsForAttendanceExcept(attendanceId, type, status, comment, actionByUserId, approvedByIdToExclude, tx = null) {

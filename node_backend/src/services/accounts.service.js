@@ -14,6 +14,7 @@ import { fullName, makeNodePassword, verifyDjangoPassword, hashPassword, verifyP
 import { sendOtpEmail } from "../utils/mailer.js";
 import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
+import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
 
 function makeOtp() {
   return crypto.randomInt(100000, 1000000).toString();
@@ -512,40 +513,98 @@ export const accountsService = {
     }
   },
 
-  async getManagers() {
-    const rows = await accountsRepository.findActiveManagers();
-    return rows.map((m) => ({
+  serializeStaffMembersBatch(rows, docCountMap, locMap) {
+    return rows.map((r) => {
+      const uid = Number(r.id);
+      const docCount = docCountMap.get(uid) || 0;
+      const locations = locMap.get(uid) || [];
+      const managerName = r.manager_username
+        ? `${r.manager_first_name || ""} ${r.manager_last_name || ""}`.trim() || r.manager_username
+        : null;
+      const userFullName = `${r.first_name || ""} ${r.last_name || ""}`.trim() || r.username;
+
+      return {
+        id: r.id,
+        username: r.username,
+        first_name: r.first_name,
+        last_name: r.last_name,
+        name: userFullName,
+        email: r.email,
+        role: r.role,
+        manager: r.manager_username || null,
+        manager_id: r.manager_id || null,
+        team_name: r.team_name || null,
+        joining_date: r.joining_date || null,
+        leave_allotted: r.leave_allotted || 0,
+        document_count: docCount,
+        is_active_employee: Boolean(r.is_active && (r.is_active_employee === null || r.is_active_employee === 1 || r.is_active_employee === true)),
+        latitude: r.latitude ?? null,
+        longitude: r.longitude ?? null,
+        allowed_radius: r.allowed_radius ?? 100,
+        designation: r.designation ?? null,
+        locations: locations.map((l) => ({
+          id: l.id,
+          user_id: l.user_id,
+          latitude: l.latitude,
+          longitude: l.longitude,
+          allowed_radius: l.allowed_radius,
+          is_primary: Boolean(l.is_primary),
+        })),
+      };
+    });
+  },
+
+  async getManagers(query = {}) {
+    const { page, limit, offset } = parsePagination(query, 50, 100);
+    const [total, rows] = await Promise.all([
+      accountsRepository.countActiveManagers(),
+      accountsRepository.findActiveManagersPaged({ limit, offset })
+    ]);
+
+    const managers = rows.map((m) => ({
       id: m.id,
       username: m.username,
       email: m.email,
       name: fullName(m),
       team_name: m.team_name
     }));
+
+    return formatPaginationResponse(managers, total, page, limit, { records: managers });
   },
 
-  async getEmployees() {
-    const users = await accountsRepository.findAllEmployees();
-    const out = [];
-    for (const u of users) {
-      out.push(await this.serializeStaffMember(u));
-    }
-    return out;
+  async getEmployees(query = {}) {
+    const { page, limit, offset } = parsePagination(query, 50, 100);
+    const [total, rows] = await Promise.all([
+      accountsRepository.countEmployees(query),
+      accountsRepository.findEmployeesPaged({ ...query, limit, offset })
+    ]);
+
+    const userIds = rows.map((r) => r.id);
+    const [docCountMap, locMap] = await Promise.all([
+      accountsRepository.findDocumentCountsByUserIds(userIds),
+      accountsRepository.findLocationsByUserIds(userIds)
+    ]);
+
+    const data = this.serializeStaffMembersBatch(rows, docCountMap, locMap);
+    return formatPaginationResponse(data, total, page, limit, { records: data });
   },
 
   async getAdminSummary() {
     const [
-      staff,
-      managers,
-      employeesOnly,
-      hrCount,
+      userRoleCounts,
       pendingAttendance,
       pendingLeave,
       presentToday,
     ] = await Promise.all([
-      db.get("SELECT COUNT(*) c FROM accounts_user WHERE role IN ('employee','manager','hr') AND is_active=1 AND deleted_at IS NULL"),
-      db.get("SELECT COUNT(*) c FROM accounts_user WHERE role='manager' AND deleted_at IS NULL"),
-      db.get("SELECT COUNT(*) c FROM accounts_user WHERE role='employee' AND deleted_at IS NULL"),
-      db.get("SELECT COUNT(*) c FROM accounts_user WHERE role='hr' AND deleted_at IS NULL"),
+      db.get(`
+        SELECT 
+          COUNT(CASE WHEN role IN ('employee','manager','hr') AND is_active=1 THEN 1 END) AS staff,
+          COUNT(CASE WHEN role = 'manager' THEN 1 END) AS managers,
+          COUNT(CASE WHEN role = 'employee' THEN 1 END) AS employees,
+          COUNT(CASE WHEN role = 'hr' THEN 1 END) AS hr
+        FROM accounts_user 
+        WHERE deleted_at IS NULL
+      `),
       db.get("SELECT COUNT(*) c FROM attendance_attendanceapproval WHERE status='pending'"),
       db.get("SELECT COUNT(*) c FROM leave_leave WHERE status='pending'"),
       db.get(
@@ -565,7 +624,7 @@ export const accountsService = {
       ),
     ]);
 
-    const staffCount = Number(staff?.c || 0);
+    const staffCount = Number(userRoleCounts?.staff || 0);
     const todayPresentCount = Number(presentToday?.c || 0);
     const absentTodayCount = Math.max(0, staffCount - todayPresentCount);
 
@@ -591,9 +650,9 @@ export const accountsService = {
 
     return {
       staff: staffCount,
-      managers: Number(managers?.c || 0),
-      employees: Number(employeesOnly?.c || 0),
-      hr: Number(hrCount?.c || 0),
+      managers: Number(userRoleCounts?.managers || 0),
+      employees: Number(userRoleCounts?.employees || 0),
+      hr: Number(userRoleCounts?.hr || 0),
       pending_attendance_approvals: Number(pendingAttendance?.c || 0),
       pending_leave_requests: Number(pendingLeave?.c || 0),
       present_today: todayPresentCount,
@@ -912,17 +971,26 @@ export const accountsService = {
     return fileUrl;
   },
 
-  async getMyDocuments(userId) {
+  async getMyDocuments(userId, query = {}) {
     const docs = await accountsRepository.findDocumentsByUserId(userId);
-    return docs.map((d) => ({
+    const items = docs.map((d) => ({
       id: d.id,
       title: d.title,
       file: storageService.getUrl(d.file),
       uploaded_at: d.uploaded_at
     }));
+
+    if (query && (query.page || query.limit)) {
+      const { page, limit } = parsePagination(query, 50, 100);
+      const start = (page - 1) * limit;
+      const sliced = items.slice(start, start + limit);
+      return formatPaginationResponse(sliced, items.length, page, limit, { records: sliced });
+    }
+
+    return items;
   },
 
-  async getEmployeeDocuments(employeeId, actor) {
+  async getEmployeeDocuments(employeeId, actor, query = {}) {
     if (actor) {
       const isOwner = Number(actor.id) === Number(employeeId);
       const isGlobalViewer = ["admin", "hr", "superadmin"].includes(actor.role);
@@ -940,12 +1008,21 @@ export const accountsService = {
     }
 
     const docs = await accountsRepository.findDocumentsByUserId(employeeId);
-    return docs.map((d) => ({
+    const items = docs.map((d) => ({
       id: d.id,
       title: d.title,
       file: storageService.getUrl(d.file),
       uploaded_at: d.uploaded_at
     }));
+
+    if (query && (query.page || query.limit)) {
+      const { page, limit } = parsePagination(query, 50, 100);
+      const start = (page - 1) * limit;
+      const sliced = items.slice(start, start + limit);
+      return formatPaginationResponse(sliced, items.length, page, limit, { records: sliced });
+    }
+
+    return items;
   },
 
   async getAuditLogs(actor, query) {
@@ -1007,13 +1084,19 @@ export const accountsService = {
 
     const uniqueActions = await db.all("SELECT DISTINCT action FROM audit_logs ORDER BY action ASC");
 
+    const totalPages = Math.ceil(total / limit) || 1;
+
     return {
+      data: serializedLogs,
       logs: serializedLogs,
       pagination: {
-        total,
         page,
         limit,
-        pages: Math.ceil(total / limit)
+        total,
+        totalPages,
+        pages: totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
       },
       availableActions: uniqueActions.map(r => r.action)
     };

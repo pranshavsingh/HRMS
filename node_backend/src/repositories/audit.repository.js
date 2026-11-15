@@ -48,6 +48,11 @@ export const auditRepository = {
   async log(userId, username, action, targetId = null, details = null, ipAddress = null, severity = "INFO", tx = null) {
     await ensureAuditTable();
     const detailsStr = details ? JSON.stringify(details) : null;
+    const cleanUserId = userId !== undefined ? userId : null;
+    const cleanUsername = username !== undefined ? username : null;
+    const cleanTargetId = targetId !== undefined ? targetId : null;
+    const cleanIpAddress = ipAddress !== undefined ? ipAddress : null;
+    const cleanSeverity = severity !== undefined ? severity : "INFO";
     
     // SQLite/MySQL standard query
     const insertSql = config.dbClient === "mysql"
@@ -56,7 +61,7 @@ export const auditRepository = {
 
     await db.run(
       insertSql,
-      [userId, username, action, targetId, detailsStr, ipAddress, severity],
+      [cleanUserId, cleanUsername, action, cleanTargetId, detailsStr, cleanIpAddress, cleanSeverity],
       tx
     );
   },

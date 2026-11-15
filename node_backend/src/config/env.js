@@ -10,7 +10,9 @@ export const config = {
   mysqlUser: process.env.MYSQL_USER || "",
   mysqlPassword: process.env.MYSQL_PASSWORD || "",
   mysqlDatabase: process.env.MYSQL_DATABASE || "",
-  mysqlConnectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 30),
+  mysqlConnectionLimit: Number(
+    process.env.MYSQL_CONNECTION_LIMIT || (process.env.IS_WORKER === "true" ? 5 : 15)
+  ),
   redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
   smtpHost: process.env.SMTP_HOST || "smtp.hostinger.com",
   smtpPort: Number(process.env.SMTP_PORT || 465),

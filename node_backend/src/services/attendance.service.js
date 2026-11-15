@@ -9,6 +9,7 @@ import { config } from "../config/env.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
+import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
 
 const APPROVAL_CLOSED_STATUS = "closed";
 const REVIEW_ROLES_BY_REQUESTOR = {
@@ -270,26 +271,6 @@ export const attendanceService = {
   },
 
   async punchIn(userId, latitude, longitude, file, actor, directPath = null) {
-    const todayStr = getLocalDateString();
-    const onLeave = await db.get(
-      "SELECT to_date FROM leave_leave WHERE user_id=? AND status='approved' AND ? BETWEEN from_date AND to_date LIMIT 1",
-      [userId, todayStr]
-    );
-    if (onLeave) {
-      const lastDate = getYYYYMMDD(onLeave.to_date);
-      throw new AppError(`You cannot punch in today as you are on approved leave. You can punch in after ${lastDate}`, 400);
-    }
-
-    const latest = await attendanceRepository.findLatestAttendance(userId);
-    if (latest && latest.punch_out_status === "pending") {
-      throw new AppError("Cannot punch in while punch out is pending approval", 400);
-    }
-
-    const open = await attendanceRepository.findOpenAttendance(userId);
-    if (open) {
-      throw new AppError("Already punched in", 400);
-    }
-
     const relativePath = directPath || (file ? await storageService.store(file, "attendance") : null);
     if (!relativePath) {
       throw new AppError("Photo is required for attendance punch", 400);
@@ -297,6 +278,40 @@ export const attendanceService = {
 
     try {
       const result = await db.transaction(async (tx) => {
+        // 1. Acquire exclusive lock on the user record in accounts_user to serialize all attendance operations
+        const user = await db.get("SELECT id, is_active FROM accounts_user WHERE id = ? FOR UPDATE", [userId], tx);
+        if (!user || !user.is_active) {
+          throw new AppError("Active user account required", 400);
+        }
+
+        // 2. Check approved leave under lock
+        const todayStr = getLocalDateString();
+        const onLeave = await db.get(
+          "SELECT to_date FROM leave_leave WHERE user_id=? AND status='approved' AND ? BETWEEN from_date AND to_date LIMIT 1",
+          [userId, todayStr],
+          tx
+        );
+        if (onLeave) {
+          const lastDate = getYYYYMMDD(onLeave.to_date);
+          throw new AppError(`You cannot punch in today as you are on approved leave. You can punch in after ${lastDate}`, 400);
+        }
+
+        // 3. Check latest attendance for pending punch-out under lock
+        const latest = await db.get(
+          "SELECT punch_out_status FROM attendance_attendance WHERE user_id=? ORDER BY date DESC, punch_in_time DESC LIMIT 1",
+          [userId],
+          tx
+        );
+        if (latest && latest.punch_out_status === "pending") {
+          throw new AppError("Cannot punch in while punch out is pending approval", 400);
+        }
+
+        // 4. Check for existing open attendance under lock
+        const open = await attendanceRepository.findOpenAttendance(userId, tx, true);
+        if (open) {
+          throw new AppError("Already punched in", 400);
+        }
+
         const punchInOutside = await isOutsideAllottedArea(userId, latitude, longitude, tx);
         const reviewers = await approvalRouteForUser(userId, tx);
         const needsApproval = punchInOutside && reviewers.length > 0;
@@ -368,11 +383,6 @@ export const attendanceService = {
   },
 
   async punchOut(userId, latitude, longitude, file, actor, directPath = null) {
-    const att = await attendanceRepository.findOpenAttendance(userId);
-    if (!att) {
-      throw new AppError("Punch in first", 400);
-    }
-
     const relativePath = directPath || (file ? await storageService.store(file, "attendance") : null);
     if (!relativePath) {
       throw new AppError("Photo is required for attendance punch", 400);
@@ -380,6 +390,18 @@ export const attendanceService = {
 
     try {
       const result = await db.transaction(async (tx) => {
+        // 1. Acquire exclusive lock on the user record in accounts_user to serialize attendance operations
+        const user = await db.get("SELECT id FROM accounts_user WHERE id = ? FOR UPDATE", [userId], tx);
+        if (!user) {
+          throw new AppError("User not found", 404);
+        }
+
+        // 2. Lock open attendance record
+        const att = await attendanceRepository.findOpenAttendance(userId, tx, true);
+        if (!att) {
+          throw new AppError("Punch in first", 400);
+        }
+
         const punchOutOutside = await isOutsideAllottedArea(userId, latitude, longitude, tx);
         const reviewers = await approvalRouteForUser(userId, tx);
         const needsApproval = punchOutOutside && reviewers.length > 0;
@@ -392,7 +414,8 @@ export const attendanceService = {
         const finalStatus = overallAttendanceStatus(nextAttendance);
         const now = new Date();
 
-        await attendanceRepository.updateAttendance(att.id, {
+        // 3. Atomic conditional update: punch_out_time must still be NULL
+        const updateResult = await attendanceRepository.updateAttendance(att.id, {
           punch_out_time: now,
           punch_out_photo: relativePath,
           punch_out_lat: Number(latitude),
@@ -401,7 +424,11 @@ export const attendanceService = {
           punch_out_status: punchOutStatus,
           status: finalStatus,
           is_outside_location: Number(Boolean(att.punch_in_outside) || punchOutOutside)
-        }, tx);
+        }, tx, "punch_out_time IS NULL");
+
+        if (updateResult.changes === 0) {
+          throw new AppError("Punch in first", 400);
+        }
 
         if (needsApproval) {
           const approvalRows = reviewers.map((reviewer) => ({
@@ -448,9 +475,9 @@ export const attendanceService = {
     }
   },
 
-  async approvals(userId, role) {
+  async approvals(userId, role, query = {}) {
     if (!["manager", "hr", "admin", "superadmin"].includes(role)) {
-      return [];
+      return formatPaginationResponse([], 0, 1, 50, { records: [], summary: {} });
     }
 
     const rows = await attendanceRepository.findApprovalsForReviewer(userId, role);
@@ -515,7 +542,13 @@ export const attendanceService = {
     }
     const uniqueRecords = [...uniqueMap.values()];
 
-    return {
+    const { page, limit, offset } = parsePagination(query, 50, 100);
+    const total = uniqueRecords.length;
+    const paginatedRecords = uniqueRecords.slice(offset, offset + limit);
+
+    return formatPaginationResponse(paginatedRecords, total, page, limit, {
+      records: paginatedRecords,
+      all_records: uniqueRecords,
       summary: {
         scope_label: role === "manager"
           ? "Direct-report attendance exceptions"
@@ -529,39 +562,43 @@ export const attendanceService = {
         closed_items: uniqueRecords.filter((r) => r.approval_status === APPROVAL_CLOSED_STATUS).length,
         actionable_items: uniqueRecords.filter((r) => r.can_approve).length,
       },
-      records: uniqueRecords,
-    };
+    });
   },
 
   async approvalAction(approvalId, status, comment = "", actor) {
-    const ap = await attendanceRepository.findApprovalById(approvalId);
-    if (!ap) {
-      throw new AppError("Approval not found", 404);
-    }
-    if (actor.role === "superadmin") {
-      if (Number(ap.employee_id) === Number(actor.id)) {
-        throw new AppError("You cannot approve your own exception request", 403);
-      }
-    } else {
-      if (Number(ap.approved_by_id) !== Number(actor.id)) {
-        throw new AppError("This approval is not assigned to you", 403);
-      }
-    }
-    if (ap.status !== "pending") {
-      throw new AppError("This approval item is already closed", 400);
-    }
-
-    const now = new Date();
-
     const response = await db.transaction(async (tx) => {
-      // 1. Update this specific approval row
-      await attendanceRepository.updateApproval(ap.id, {
+      // 1. Lock the approval row to serialize concurrent reviews
+      const ap = await attendanceRepository.findApprovalById(approvalId, tx, true);
+      if (!ap) {
+        throw new AppError("Approval not found", 404);
+      }
+      if (actor.role === "superadmin") {
+        if (Number(ap.employee_id) === Number(actor.id)) {
+          throw new AppError("You cannot approve your own exception request", 403);
+        }
+      } else {
+        if (Number(ap.approved_by_id) !== Number(actor.id)) {
+          throw new AppError("This approval is not assigned to you", 403);
+        }
+      }
+      if (ap.status !== "pending") {
+        throw new AppError("This approval item is already closed", 400);
+      }
+
+      const now = new Date();
+
+      // 2. Update this specific approval row atomically (verifying pending)
+      const updateResult = await attendanceRepository.updateApproval(ap.id, {
         status,
         comment,
         action_at: now
-      }, tx);
+      }, tx, true);
 
-      // 2. Log administrative action
+      if (updateResult.changes === 0) {
+        throw new AppError("This approval item is already closed", 400);
+      }
+
+      // 3. Log administrative action
       await auditService.log(
         actor,
         `attendance_approval_${status}`,
@@ -571,7 +608,7 @@ export const attendanceService = {
         tx
       );
 
-      // 3. Handle rejection flow (reverts punch but keeps approval records)
+      // 4. Handle rejection flow (reverts punch but keeps approval records)
       if (status === "rejected") {
         if (ap.type === "in") {
           // Rejecting punch in: update status to rejected and close others instead of deleting
@@ -636,7 +673,7 @@ export const attendanceService = {
         }
       }
 
-      // 4. Handle approved flow
+      // 5. Handle approved flow
       if (ap.type === "in") {
         await attendanceRepository.updateAttendance(ap.attendance_id, { punch_in_status: status }, tx);
       } else {
@@ -1205,10 +1242,45 @@ export const attendanceService = {
     return { rows, totalHours: Number(totalHours.toFixed(2)), daily };
   },
 
-  async getHistory(userId) {
-    const fromDate = "1970-01-01";
-    const summary = await this.attendanceStatusSummary(userId, fromDate);
-    return summary.daily;
+  async getHistory(userId, query = {}) {
+    const { page, limit, offset } = parsePagination(query, 50, 100);
+    const countRow = await db.get(
+      "SELECT COUNT(*) as c FROM attendance_attendance WHERE user_id=? AND status <> 'rejected'",
+      [userId]
+    );
+    const total = Number(countRow?.c || 0);
+
+    const rows = await db.all(
+      `SELECT * FROM attendance_attendance 
+       WHERE user_id=? AND status <> 'rejected' 
+       ORDER BY date DESC, punch_in_time DESC 
+       LIMIT ? OFFSET ?`,
+      [userId, limit, offset]
+    );
+
+    const daily = rows.map((att) => {
+      const punchInIso = dbTimeToIso(att.punch_in_time);
+      const punchOutIso = dbTimeToIso(att.punch_out_time);
+      const workHours = toHours(punchInIso, punchOutIso, att.status);
+      return {
+        id: att.id,
+        date: att.date,
+        punch_in: att.punch_in_status === "pending"
+          ? "Pending"
+          : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : null),
+        punch_out: att.punch_out_status === "pending"
+          ? "Pending"
+          : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : (att.punch_in_time ? "Pending" : null)),
+        work_hours: workHours,
+        status: att.status,
+        punch_in_outside: Boolean(att.punch_in_outside),
+        punch_out_outside: Boolean(att.punch_out_outside),
+        punch_in_photo: storageService.getUrl(att.punch_in_photo),
+        punch_out_photo: storageService.getUrl(att.punch_out_photo),
+      };
+    });
+
+    return formatPaginationResponse(daily, total, page, limit, { records: daily });
   }
 };
 

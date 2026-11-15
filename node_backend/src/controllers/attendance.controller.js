@@ -41,7 +41,7 @@ export const status = asyncHandler(async (req, res) => {
  * Retrieve actionable/visible punch approvals list.
  */
 export const approvals = asyncHandler(async (req, res) => {
-  const result = await attendanceService.approvals(req.user.id, req.user.role);
+  const result = await attendanceService.approvals(req.user.id, req.user.role, req.query);
   res.json(result);
 });
 
@@ -109,6 +109,6 @@ export const teamAttendance = asyncHandler(async (req, res) => {
  * Retrieve personal punch history logs.
  */
 export const history = asyncHandler(async (req, res) => {
-  const result = await attendanceService.getHistory(req.user.id);
+  const result = await attendanceService.getHistory(req.user.id, req.query);
   res.json(result);
 });

@@ -55,7 +55,7 @@ export default function MyDocumentsScreen() {
     if (showLoader) setLoading(true);
     try {
       const res = await api.get("/auth/documents/my/");
-      setDocuments(Array.isArray(res.data) ? res.data : []);
+      setDocuments(Array.isArray(res.data) ? res.data : (res.data?.data || []));
     } catch (err) {
       console.error("Failed to load documents:", err);
       Alert.alert("Error", "Unable to load documents list");

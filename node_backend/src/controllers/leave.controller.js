@@ -14,7 +14,7 @@ export const applyLeave = asyncHandler(async (req, res) => {
  * Get leave history of the logged-in employee.
  */
 export const myLeaves = asyncHandler(async (req, res) => {
-  const result = await leaveService.myLeaves(req.user.id);
+  const result = await leaveService.myLeaves(req.user.id, req.query);
   res.json(result);
 });
 
@@ -22,7 +22,7 @@ export const myLeaves = asyncHandler(async (req, res) => {
  * List leave approvals actionable or visible to the user based on role.
  */
 export const approvals = asyncHandler(async (req, res) => {
-  const result = await leaveService.approvals(req.user.role, req.user.id);
+  const result = await leaveService.approvals(req.user.role, req.user.id, req.query);
   res.json(result);
 });
 

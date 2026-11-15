@@ -5,6 +5,7 @@ import { realtimeManager } from "../utils/realtime.js";
 import auditService from "./audit.service.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { db } from "../db/index.js";
+import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
 
 function fullName(user) {
   const name = `${user.first_name || ""} ${user.last_name || ""}`.trim();
@@ -71,19 +72,32 @@ function serializeLeave(leave, requestor, profile, manager, viewer = null) {
 
 export const leaveService = {
   async applyLeave(userId, leaveType, fromDate, toDate, reason) {
-    const overlapping = await leaveRepository.findOverlappingApprovedLeaves(userId, fromDate, toDate);
-    if (overlapping && overlapping.length > 0) {
-      throw new AppError("You already have an approved leave during this date range", 400);
-    }
+    await db.transaction(async (tx) => {
+      const user = await db.get("SELECT id, is_active FROM accounts_user WHERE id = ? FOR UPDATE", [userId], tx);
+      if (!user || !user.is_active) {
+        throw new AppError("Active user account required", 400);
+      }
 
-    await leaveRepository.insertLeave(userId, leaveType, fromDate, toDate, reason);
+      const overlapping = await leaveRepository.findOverlappingApprovedLeaves(userId, fromDate, toDate, tx);
+      if (overlapping && overlapping.length > 0) {
+        throw new AppError("You already have an approved leave during this date range", 400);
+      }
+
+      await leaveRepository.insertLeave(userId, leaveType, fromDate, toDate, reason, tx);
+    });
     realtimeManager.broadcast("leave_update", { actorId: userId });
     return { message: "Leave applied" };
   },
 
-  async myLeaves(userId) {
-    const leaves = await leaveRepository.findLeavesByUserId(userId);
-    const approvedDays = leaves.filter((l) => l.status === "approved").reduce((sum, l) => sum + leaveDays(l.from_date, l.to_date), 0);
+  async myLeaves(userId, query = {}) {
+    const { page, limit, offset } = parsePagination(query, 50, 100);
+    const [total, leaves, allLeaves] = await Promise.all([
+      leaveRepository.countLeavesByUserId(userId),
+      leaveRepository.findLeavesPagedByUserId(userId, { limit, offset }),
+      leaveRepository.findLeavesByUserId(userId)
+    ]);
+
+    const approvedDays = allLeaves.filter((l) => l.status === "approved").reduce((sum, l) => sum + leaveDays(l.from_date, l.to_date), 0);
     const profile = await accountsRepository.findProfileByUserId(userId);
     const leaveAllotted = Number(profile?.leave_allotted || 0);
 
@@ -122,26 +136,31 @@ export const leaveService = {
       };
     });
 
-    return {
+    return formatPaginationResponse(records, total, page, limit, {
       records,
       summary: {
         leave_allotted: leaveAllotted,
         leaves_taken: approvedDays,
         leave_balance: Math.max(leaveAllotted - approvedDays, 0),
-        total_requests: leaves.length,
-        approved_requests: leaves.filter((l) => l.status === "approved").length,
-        pending_requests: leaves.filter((l) => l.status === "pending").length,
-        rejected_requests: leaves.filter((l) => l.status === "rejected").length,
+        total_requests: total,
+        approved_requests: allLeaves.filter((l) => l.status === "approved").length,
+        pending_requests: allLeaves.filter((l) => l.status === "pending").length,
+        rejected_requests: allLeaves.filter((l) => l.status === "rejected").length,
       },
-    };
+    });
   },
 
-  async approvals(role, viewerUserId) {
+  async approvals(role, viewerUserId, query = {}) {
     if (!["manager", "hr", "admin", "superadmin"].includes(role)) {
-      return [];
+      return formatPaginationResponse([], 0, 1, 50, { records: [], summary: {} });
     }
 
-    const leaves = await leaveRepository.findLeavesForApprovals(role, viewerUserId);
+    const { page, limit, offset } = parsePagination(query, 50, 100);
+    const [total, leaves, allApprovals] = await Promise.all([
+      leaveRepository.countLeavesForApprovals(role, viewerUserId),
+      leaveRepository.findLeavesForApprovalsPaged(role, viewerUserId, { limit, offset }),
+      leaveRepository.findLeavesForApprovals(role, viewerUserId)
+    ]);
 
     const roleLabels = {
       manager: "Manager",
@@ -175,43 +194,53 @@ export const leaveService = {
           ? "Employee, manager, and HR leave requests"
           : "All leave requests in the system";
 
-    return {
+    return formatPaginationResponse(records, total, page, limit, {
+      records,
       summary: {
         scope_label: scopeLabel,
-        total_requests: records.length,
-        pending_requests: records.filter((r) => r.status === "pending").length,
-        approved_requests: records.filter((r) => r.status === "approved").length,
-        rejected_requests: records.filter((r) => r.status === "rejected").length,
-        actionable_requests: records.filter((r) => r.can_approve).length,
+        total_requests: total,
+        pending_requests: allApprovals.filter((r) => r.status === "pending").length,
+        approved_requests: allApprovals.filter((r) => r.status === "approved").length,
+        rejected_requests: allApprovals.filter((r) => r.status === "rejected").length,
+        actionable_requests: allApprovals.filter((r) => r.status === "pending" && Number(r.user_id_ref) !== Number(viewerUserId)).length,
       },
-      records,
-    };
+    });
   },
 
   async action(leaveId, status, actor) {
-    const leave = await leaveRepository.findLeaveById(leaveId);
-    if (!leave) {
-      throw new AppError("Leave request not found", 404);
-    }
-
-    const requestor = { id: leave.requestor_id, role: leave.requestor_role };
-    const canApprove = canReview(actor, leave, requestor, leave.manager_id);
-    
-    if (!canApprove) {
-      if (leave.status !== "pending") {
-        const actionName = leave.action_by_username
-          ? `${leave.action_by_first_name || ""} ${leave.action_by_last_name || ""}`.trim() || leave.action_by_username
-          : "another reviewer";
-        throw new AppError(`Leave already ${leave.status} by ${actionName}`, 400);
-      }
-      throw new AppError("Not allowed", 403);
-    }
-
     await db.transaction(async (tx) => {
-      await leaveRepository.updateLeave(leaveId, {
+      // 1. Lock the leave request row to prevent race conditions during concurrent approval
+      const leave = await leaveRepository.findLeaveById(leaveId, tx, true);
+      if (!leave) {
+        throw new AppError("Leave request not found", 404);
+      }
+
+      const requestor = { id: leave.requestor_id, role: leave.requestor_role };
+      const canApprove = canReview(actor, leave, requestor, leave.manager_id);
+      
+      if (!canApprove) {
+        if (leave.status !== "pending") {
+          const actionName = leave.action_by_username
+            ? `${leave.action_by_first_name || ""} ${leave.action_by_last_name || ""}`.trim() || leave.action_by_username
+            : "another reviewer";
+          throw new AppError(`Leave already ${leave.status} by ${actionName}`, 400);
+        }
+        throw new AppError("Not allowed", 403);
+      }
+
+      if (leave.status !== "pending") {
+        throw new AppError(`Leave already ${leave.status}`, 400);
+      }
+
+      // 2. Atomic conditional update: status must be pending
+      const updateResult = await leaveRepository.updateLeave(leaveId, {
         status,
         action_by_id: actor.id
-      }, tx);
+      }, tx, true);
+
+      if (updateResult.changes === 0) {
+        throw new AppError("Leave request is already processed", 400);
+      }
 
       if (status === "approved") {
         const parseDate = (val) => {

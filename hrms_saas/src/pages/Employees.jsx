@@ -74,8 +74,8 @@ export default function Employees() {
         API.get("/auth/managers/"),
         API.get("/auth/employees/"),
       ]);
-      setManagers(Array.isArray(managerRes.data) ? managerRes.data : []);
-      setEmployees(Array.isArray(employeeRes.data) ? employeeRes.data : []);
+      setManagers(Array.isArray(managerRes.data) ? managerRes.data : (managerRes.data?.data || []));
+      setEmployees(Array.isArray(employeeRes.data) ? employeeRes.data : (employeeRes.data?.data || []));
     } catch (err) {
       console.log(err);
       showPopup("Unable to load employee setup data");

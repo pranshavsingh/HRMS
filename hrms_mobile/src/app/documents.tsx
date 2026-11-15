@@ -50,7 +50,7 @@ export default function DocumentUploadScreen() {
   const fetchEmployees = async () => {
     try {
       const res = await api.get("/auth/employees/");
-      setEmployees(Array.isArray(res.data) ? res.data : []);
+      setEmployees(Array.isArray(res.data) ? res.data : (res.data?.data || []));
     } catch (err) {
       console.error("Failed to load employees:", err);
       Alert.alert("Error", "Unable to load employees list");

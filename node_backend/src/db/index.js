@@ -1,5 +1,27 @@
 import mysql from "mysql2/promise";
+import { performance } from "perf_hooks";
 import { config } from "../config/env.js";
+import logger from "../utils/logger.js";
+
+const SLOW_QUERY_THRESHOLD_MS = 200;
+
+function sanitizeSqlForLogging(sql) {
+  return String(sql).replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+async function measureQuery(fn, sql) {
+  const start = performance.now();
+  try {
+    return await fn();
+  } finally {
+    const duration = performance.now() - start;
+    if (duration > SLOW_QUERY_THRESHOLD_MS) {
+      logger.warn(
+        `[SLOW QUERY DETECTED] Duration: ${duration.toFixed(2)}ms | SQL: ${sanitizeSqlForLogging(sql)}`
+      );
+    }
+  }
+}
 
 const pool = mysql.createPool({
   host: config.mysqlHost,
@@ -9,7 +31,8 @@ const pool = mysql.createPool({
   database: config.mysqlDatabase,
   waitForConnections: true,
   connectionLimit: config.mysqlConnectionLimit,
-  queueLimit: 200,
+  queueLimit: 0,
+  connectTimeout: 10000,
   enableKeepAlive: true,
   keepAliveInitialDelay: 10000,
   multipleStatements: false,
@@ -22,8 +45,10 @@ export const db = {
    */
   async get(sql, params = [], tx = null) {
     const executor = tx || pool;
-    const [rows] = await executor.execute(sql, params);
-    return rows[0] || undefined;
+    return measureQuery(async () => {
+      const [rows] = await executor.execute(sql, params);
+      return rows[0] || undefined;
+    }, sql);
   },
 
   /**
@@ -31,8 +56,10 @@ export const db = {
    */
   async all(sql, params = [], tx = null) {
     const executor = tx || pool;
-    const [rows] = await executor.execute(sql, params);
-    return rows;
+    return measureQuery(async () => {
+      const [rows] = await executor.execute(sql, params);
+      return rows;
+    }, sql);
   },
 
   /**
@@ -40,8 +67,10 @@ export const db = {
    */
   async run(sql, params = [], tx = null) {
     const executor = tx || pool;
-    const [result] = await executor.execute(sql, params);
-    return { lastID: result.insertId, changes: result.affectedRows };
+    return measureQuery(async () => {
+      const [result] = await executor.execute(sql, params);
+      return { lastID: result.insertId, changes: result.affectedRows };
+    }, sql);
   },
 
   /**
@@ -79,5 +108,6 @@ export function dbInfo() {
     port: config.mysqlPort,
     database: config.mysqlDatabase,
     user: config.mysqlUser,
+    connectionLimit: config.mysqlConnectionLimit,
   };
 }

@@ -262,6 +262,25 @@ export const accountsRepository = {
     );
   },
 
+  async findActiveManagersPaged({ limit = 50, offset = 0 } = {}, tx = null) {
+    await ensureAccountsSchema();
+    return db.all(
+      "SELECT u.*, p.team_name FROM accounts_user u JOIN accounts_employeeprofile p ON p.user_id=u.id WHERE u.role='manager' AND u.is_active=1 AND u.deleted_at IS NULL ORDER BY u.first_name, u.username LIMIT ? OFFSET ?",
+      [limit, offset],
+      tx
+    );
+  },
+
+  async countActiveManagers(tx = null) {
+    await ensureAccountsSchema();
+    const row = await db.get(
+      "SELECT COUNT(*) as c FROM accounts_user u JOIN accounts_employeeprofile p ON p.user_id=u.id WHERE u.role='manager' AND u.is_active=1 AND u.deleted_at IS NULL",
+      [],
+      tx
+    );
+    return Number(row?.c || 0);
+  },
+
   async findAllEmployees(tx = null) {
     await ensureAccountsSchema();
     return db.all(
@@ -269,6 +288,125 @@ export const accountsRepository = {
       [],
       tx
     );
+  },
+
+  async findEmployeesPaged({ limit = 50, offset = 0, role = null, search = "", status = null } = {}, tx = null) {
+    await ensureAccountsSchema();
+    const whereConditions = ["u.deleted_at IS NULL", "u.role IN ('employee','manager','hr','admin','superadmin')"];
+    const params = [];
+
+    if (role) {
+      whereConditions.push("u.role = ?");
+      params.push(role);
+    }
+
+    if (status === "active") {
+      whereConditions.push("u.is_active = 1");
+    } else if (status === "inactive") {
+      whereConditions.push("u.is_active = 0");
+    }
+
+    if (search && search.trim()) {
+      const term = `%${search.trim().toLowerCase()}%`;
+      whereConditions.push("(LOWER(u.username) LIKE ? OR LOWER(u.first_name) LIKE ? OR LOWER(u.last_name) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(ep.team_name) LIKE ?)");
+      params.push(term, term, term, term, term);
+    }
+
+    const whereClause = whereConditions.join(" AND ");
+
+    const sql = `
+      SELECT 
+        u.id, u.username, u.first_name, u.last_name, u.email, u.role, u.is_active, u.is_staff, u.is_superuser, u.date_joined,
+        ep.manager_id, ep.team_name, ep.joining_date, ep.leave_allotted, ep.is_active_employee,
+        ep.latitude, ep.longitude, ep.allowed_radius, ep.designation,
+        m.username as manager_username, m.first_name as manager_first_name, m.last_name as manager_last_name
+      FROM accounts_user u
+      LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id
+      LEFT JOIN accounts_user m ON m.id = ep.manager_id
+      WHERE ${whereClause}
+      ORDER BY u.id DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    params.push(limit, offset);
+    return db.all(sql, params, tx);
+  },
+
+  async countEmployees({ role = null, search = "", status = null } = {}, tx = null) {
+    await ensureAccountsSchema();
+    const whereConditions = ["u.deleted_at IS NULL", "u.role IN ('employee','manager','hr','admin','superadmin')"];
+    const params = [];
+
+    if (role) {
+      whereConditions.push("u.role = ?");
+      params.push(role);
+    }
+
+    if (status === "active") {
+      whereConditions.push("u.is_active = 1");
+    } else if (status === "inactive") {
+      whereConditions.push("u.is_active = 0");
+    }
+
+    if (search && search.trim()) {
+      const term = `%${search.trim().toLowerCase()}%`;
+      whereConditions.push("(LOWER(u.username) LIKE ? OR LOWER(u.first_name) LIKE ? OR LOWER(u.last_name) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(ep.team_name) LIKE ?)");
+      params.push(term, term, term, term, term);
+    }
+
+    const whereClause = whereConditions.join(" AND ");
+    const row = await db.get(
+      `SELECT COUNT(*) as c 
+       FROM accounts_user u 
+       LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
+       WHERE ${whereClause}`,
+      params,
+      tx
+    );
+    return Number(row?.c || 0);
+  },
+
+  async findDocumentCountsByUserIds(userIds = [], tx = null) {
+    if (!userIds || userIds.length === 0) return new Map();
+    const placeholders = userIds.map(() => "?").join(",");
+    const rows = await db.all(
+      `SELECT user_id, COUNT(*) as count FROM accounts_employeedocument WHERE user_id IN (${placeholders}) GROUP BY user_id`,
+      userIds,
+      tx
+    );
+    const countMap = new Map();
+    for (const r of rows) {
+      countMap.set(Number(r.user_id), Number(r.count || 0));
+    }
+    return countMap;
+  },
+
+  async findLocationsByUserIds(userIds = [], tx = null) {
+    if (!userIds || userIds.length === 0) return new Map();
+    const placeholders = userIds.map(() => "?").join(",");
+    const rows = await db.all(
+      `SELECT id, user_id, latitude, longitude, allowed_radius, is_primary FROM accounts_employeelocation WHERE user_id IN (${placeholders})`,
+      userIds,
+      tx
+    );
+    const locMap = new Map();
+    for (const r of rows) {
+      const uid = Number(r.user_id);
+      let list = locMap.get(uid);
+      if (!list) {
+        list = [];
+        locMap.set(uid, list);
+      }
+      list.push({
+        id: r.id,
+        user_id: r.user_id,
+        latitude: r.latitude,
+        longitude: r.longitude,
+        allowed_radius: r.allowed_radius,
+        is_primary: Boolean(r.is_primary)
+      });
+    }
+    return locMap;
   },
 
   async updateUser(userId, data, tx = null) {
@@ -401,6 +539,15 @@ export const accountsRepository = {
 
   async findDocumentsByUserId(userId, tx = null) {
     return db.all("SELECT * FROM accounts_employeedocument WHERE user_id=? ORDER BY uploaded_at DESC", [userId], tx);
+  },
+
+  async findDocumentsPagedByUserId(userId, { limit = 50, offset = 0 } = {}, tx = null) {
+    return db.all("SELECT * FROM accounts_employeedocument WHERE user_id=? ORDER BY uploaded_at DESC LIMIT ? OFFSET ?", [userId, limit, offset], tx);
+  },
+
+  async countDocumentsByUserId(userId, tx = null) {
+    const row = await db.get("SELECT COUNT(*) as c FROM accounts_employeedocument WHERE user_id=?", [userId], tx);
+    return Number(row?.c || 0);
   },
 
   async findDocumentById(id, tx = null) {

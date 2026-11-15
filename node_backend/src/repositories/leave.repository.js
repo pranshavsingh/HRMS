@@ -22,6 +22,25 @@ export const leaveRepository = {
     );
   },
 
+  async findLeavesPagedByUserId(userId, { limit = 50, offset = 0 } = {}, tx = null) {
+    return db.all(
+      `SELECT l.*, 
+              ab.username as action_by_username, ab.first_name as action_by_first_name, ab.last_name as action_by_last_name, ab.role as action_by_role
+       FROM leave_leave l
+       LEFT JOIN accounts_user ab ON ab.id=l.action_by_id
+       WHERE l.user_id=? 
+       ORDER BY l.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [userId, limit, offset],
+      tx
+    );
+  },
+
+  async countLeavesByUserId(userId, tx = null) {
+    const row = await db.get("SELECT COUNT(*) as c FROM leave_leave WHERE user_id=?", [userId], tx);
+    return Number(row?.c || 0);
+  },
+
   async findLeavesForApprovals(role, viewerUserId, tx = null) {
     let where = "";
     const params = [];
@@ -54,7 +73,70 @@ export const leaveRepository = {
     );
   },
 
-  async findLeaveById(leaveId, tx = null) {
+  async findLeavesForApprovalsPaged(role, viewerUserId, { limit = 50, offset = 0 } = {}, tx = null) {
+    let where = "";
+    const params = [];
+    
+    if (role === "superadmin") {
+      where = "";
+    } else if (role === "admin") {
+      where = "WHERE u.role IN ('employee', 'manager', 'hr')";
+    } else if (role === "hr") {
+      where = "WHERE u.role IN ('employee', 'manager')";
+    } else {
+      where = "WHERE u.role='employee' AND ep.manager_id=?";
+      params.push(viewerUserId);
+    }
+
+    params.push(limit, offset);
+
+    return db.all(
+      `SELECT l.*, u.id as user_id_ref, u.username, u.first_name, u.last_name, u.email, u.role,
+              ep.team_name, ep.manager_id,
+              m.username as manager_username, m.first_name as manager_first_name, m.last_name as manager_last_name,
+              ab.username as action_by_username, ab.first_name as action_by_first_name, ab.last_name as action_by_last_name, ab.role as action_by_role
+       FROM leave_leave l
+       JOIN accounts_user u ON u.id=l.user_id
+       LEFT JOIN accounts_employeeprofile ep ON ep.user_id=u.id
+       LEFT JOIN accounts_user m ON m.id=ep.manager_id
+       LEFT JOIN accounts_user ab ON ab.id=l.action_by_id
+       ${where}
+       ORDER BY l.created_at DESC
+       LIMIT ? OFFSET ?`,
+      params,
+      tx
+    );
+  },
+
+  async countLeavesForApprovals(role, viewerUserId, tx = null) {
+    let where = "";
+    const params = [];
+    
+    if (role === "superadmin") {
+      where = "";
+    } else if (role === "admin") {
+      where = "WHERE u.role IN ('employee', 'manager', 'hr')";
+    } else if (role === "hr") {
+      where = "WHERE u.role IN ('employee', 'manager')";
+    } else {
+      where = "WHERE u.role='employee' AND ep.manager_id=?";
+      params.push(viewerUserId);
+    }
+
+    const row = await db.get(
+      `SELECT COUNT(*) as c 
+       FROM leave_leave l
+       JOIN accounts_user u ON u.id=l.user_id
+       LEFT JOIN accounts_employeeprofile ep ON ep.user_id=u.id
+       ${where}`,
+      params,
+      tx
+    );
+    return Number(row?.c || 0);
+  },
+
+  async findLeaveById(leaveId, tx = null, forUpdate = false) {
+    const lock = forUpdate ? " FOR UPDATE" : "";
     return db.get(
       `SELECT l.*, u.id as requestor_id, u.role as requestor_role, ep.manager_id,
               ab.username as action_by_username, ab.first_name as action_by_first_name, ab.last_name as action_by_last_name
@@ -62,13 +144,13 @@ export const leaveRepository = {
        JOIN accounts_user u ON u.id=l.user_id
        LEFT JOIN accounts_employeeprofile ep ON ep.user_id=u.id
        LEFT JOIN accounts_user ab ON ab.id=l.action_by_id
-       WHERE l.id=?`,
+       WHERE l.id=?${lock}`,
       [leaveId],
       tx
     );
   },
 
-  async updateLeave(leaveId, data, tx = null) {
+  async updateLeave(leaveId, data, tx = null, onlyPending = true) {
     const fields = [];
     const params = [];
     
@@ -78,9 +160,9 @@ export const leaveRepository = {
     }
     
     params.push(leaveId);
-    
-    await db.run(
-      `UPDATE leave_leave SET ${fields.join(", ")}, action_at=NOW() WHERE id=?`, 
+    const pendingClause = onlyPending ? " AND status='pending'" : "";
+    return db.run(
+      `UPDATE leave_leave SET ${fields.join(", ")}, action_at=NOW() WHERE id=?${pendingClause}`, 
       params, 
       tx
     );

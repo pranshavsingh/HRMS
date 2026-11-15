@@ -101,6 +101,25 @@ jobs:
           cd node_backend
           npm run test:security
 
+      - name: Run Phase 2 Concurrency, Pagination & Performance Suite
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          cd node_backend
+          npm run test:phase2
+
   frontend-build:
     name: Frontend Build Verification
     runs-on: ubuntu-latest

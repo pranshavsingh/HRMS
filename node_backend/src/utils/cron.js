@@ -3,47 +3,83 @@ import logger from "./logger.js";
 import { db } from "../db/index.js";
 import storageService from "../services/storage.service.js";
 import { runDatabaseBackup } from "./backup.js";
+import redisService from "../services/redis.service.js";
+
+/**
+ * Execute a scheduled task protected by a distributed Redis advisory lock.
+ * Prevents multiple PM2 worker processes or clustered servers from executing
+ * the same scheduled job simultaneously.
+ */
+async function runWithLock(jobName, ttlSeconds, fn) {
+  const lockKey = `hrms:cron:lock:${jobName}`;
+  let lockAcquired = false;
+
+  if (redisService.isReady()) {
+    try {
+      const res = await redisService.client.set(lockKey, process.pid, "NX", "EX", ttlSeconds);
+      if (res !== "OK") {
+        logger.info(`[CRON] Job '${jobName}' is already executing in another worker process. Skipping.`);
+        return;
+      }
+      lockAcquired = true;
+    } catch (err) {
+      logger.warn(`[CRON] Redis lock failed for '${jobName}': ${err.message}. Proceeding with cautious execution.`);
+    }
+  }
+
+  try {
+    await fn();
+  } catch (err) {
+    logger.error(`[CRON ERROR] '${jobName}' execution failed: %s`, err.message);
+  } finally {
+    if (lockAcquired && redisService.isReady()) {
+      try {
+        await redisService.client.del(lockKey);
+      } catch (err) {
+        logger.warn(`[CRON] Failed to release lock for '${jobName}': %s`, err.message);
+      }
+    }
+  }
+}
 
 /**
  * Initialize all scheduled background tasks.
  */
 export function initCron() {
-  logger.info("Initializing scheduled background cron jobs...");
+  logger.info("Initializing scheduled background cron jobs with distributed locking...");
 
-  // Job 1: Auto-close open attendance cards daily at 11:59 PM
+  // Job 1: Auto-close open attendance cards daily at 11:59 PM (Safe 16-hour threshold)
   cron.schedule("59 23 * * *", async () => {
-    logger.info("CRON: Executing unclosed attendance cleanup...");
-    try {
-      // Set punch_out_time to NOW() for any card that was left open
+    await runWithLock("attendance_cleanup", 600, async () => {
+      logger.info("CRON: Executing unclosed attendance cleanup (16-hour threshold)...");
+      // Only auto-close sessions open for > 16 hours to protect legitimate overnight shifts
       const result = await db.run(
-        "UPDATE attendance_attendance SET punch_out_time=NOW(), punch_out_status='approved', status='approved' WHERE punch_out_time IS NULL"
+        `UPDATE attendance_attendance 
+         SET punch_out_time = NOW(), punch_out_status = 'approved', status = 'approved' 
+         WHERE punch_out_time IS NULL 
+           AND punch_in_time < DATE_SUB(NOW(), INTERVAL 16 HOUR)`
       );
-      logger.info("CRON: Auto-closed %d attendance records", result.changes);
-    } catch (err) {
-      logger.error("CRON ERROR (attendance cleanup): %s", err.message);
-    }
+      logger.info("CRON: Auto-closed %d abandoned attendance records", result.changes);
+    });
   });
 
   // Job 2: Expired OTP cleanup hourly
   cron.schedule("0 * * * *", async () => {
-    logger.info("CRON: Cleaning up expired password reset OTPs...");
-    try {
+    await runWithLock("otp_cleanup", 300, async () => {
+      logger.info("CRON: Cleaning up expired password reset OTPs...");
       const result = await db.run("DELETE FROM password_reset_otp WHERE expires_at < NOW()");
       logger.info("CRON: Purged %d expired OTP tokens", result.changes);
-    } catch (err) {
-      logger.error("CRON ERROR (OTP cleanup): %s", err.message);
-    }
+    });
   });
 
   // Job 3: Daily cleanup of attendance photos older than 3 months
   cron.schedule("0 0 * * *", async () => {
-    logger.info("CRON: Starting daily attendance photo cleanup...");
-    try {
+    await runWithLock("photo_cleanup", 1800, async () => {
+      logger.info("CRON: Starting daily attendance photo cleanup...");
       let processedCount = 0;
       let deletedPhotosCount = 0;
 
       while (true) {
-        // Fetch a batch of 100 records older than 3 months with photos
         const batch = await db.all(
           `SELECT id, punch_in_photo, punch_out_photo 
            FROM attendance_attendance 
@@ -56,14 +92,13 @@ export function initCron() {
           break;
         }
 
-        logger.info(`CRON: Processing cleanup batch of ${batch.length} records...`);
+        logger.info(`CRON: Processing photo cleanup batch of ${batch.length} records...`);
 
         for (const row of batch) {
           const photosToDelete = [];
           if (row.punch_in_photo) photosToDelete.push(row.punch_in_photo);
           if (row.punch_out_photo) photosToDelete.push(row.punch_out_photo);
 
-          // Update database row in a transaction to set photo fields to NULL first
           try {
             await db.transaction(async (tx) => {
               await db.run(
@@ -75,7 +110,6 @@ export function initCron() {
               );
             });
 
-            // Once DB is updated successfully, delete the actual files from storage
             for (const photoPath of photosToDelete) {
               try {
                 await storageService.delete(photoPath);
@@ -92,16 +126,20 @@ export function initCron() {
         processedCount += batch.length;
       }
 
-      logger.info("CRON: Finished cleanup. Processed %d records, deleted %d photos.", processedCount, deletedPhotosCount);
-    } catch (err) {
-      logger.error("CRON ERROR (daily cleanup): %s", err.message);
-    }
+      logger.info(
+        "CRON: Finished photo cleanup. Processed %d records, deleted %d photos.",
+        processedCount,
+        deletedPhotosCount
+      );
+    });
   });
 
   // Job 4: Daily automated compressed database backup at 2:00 AM (30-day retention)
   cron.schedule("0 2 * * *", async () => {
-    logger.info("CRON: Initiating scheduled daily database backup...");
-    await runDatabaseBackup();
+    await runWithLock("db_backup", 3600, async () => {
+      logger.info("CRON: Initiating scheduled daily database backup...");
+      await runDatabaseBackup();
+    });
   });
 
   logger.info("Background cron jobs scheduled successfully.");

@@ -35,7 +35,7 @@ export default function UploadDocuments() {
   const loadEmployees = async () => {
     try {
       const res = await API.get("/auth/employees/");
-      setEmployees(Array.isArray(res.data) ? res.data : []);
+      setEmployees(Array.isArray(res.data) ? res.data : (res.data?.data || []));
     } catch (err) {
       console.log(err);
       showPopup("Unable to load employees", "error");

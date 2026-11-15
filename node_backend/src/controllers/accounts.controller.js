@@ -89,7 +89,7 @@ export const createEmployee = asyncHandler(async (req, res) => {
  * List active managers.
  */
 export const managers = asyncHandler(async (req, res) => {
-  const result = await accountsService.getManagers();
+  const result = await accountsService.getManagers(req.query);
   res.json(result);
 });
 
@@ -97,7 +97,7 @@ export const managers = asyncHandler(async (req, res) => {
  * List all active employees.
  */
 export const employees = asyncHandler(async (req, res) => {
-  const result = await accountsService.getEmployees();
+  const result = await accountsService.getEmployees(req.query);
   res.json(result);
 });
 
@@ -137,7 +137,7 @@ export const uploadDocument = asyncHandler(async (req, res) => {
  * Get current employee's documents.
  */
 export const myDocuments = asyncHandler(async (req, res) => {
-  const result = await accountsService.getMyDocuments(req.user.id);
+  const result = await accountsService.getMyDocuments(req.user.id, req.query);
   res.json(result);
 });
 
@@ -145,7 +145,7 @@ export const myDocuments = asyncHandler(async (req, res) => {
  * Get targeted employee's documents (admin/hr/manager only).
  */
 export const employeeDocuments = asyncHandler(async (req, res) => {
-  const result = await accountsService.getEmployeeDocuments(req.params.user_id, req.user);
+  const result = await accountsService.getEmployeeDocuments(req.params.user_id, req.user, req.query);
   res.json(result);
 });
 
