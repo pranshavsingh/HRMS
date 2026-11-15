@@ -164,7 +164,7 @@ jobs:
           cd node_backend
           node --test tests/performance/load_simulation.test.js
 
-      - name: Run Phase 3 Distributed Queue & Outbox Tests
+      - name: Run Phase 3 Outbox Repository & Dispatcher Tests
         env:
           NODE_ENV: test
           JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
@@ -184,7 +184,73 @@ jobs:
           OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
         run: |
           cd node_backend
-          npm run test:phase3
+          node --test tests/phase3/outbox.test.js
+
+      - name: Run Phase 3 BullMQ Queue Tests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+          QUEUE_REDIS_URL: redis://127.0.0.1:6379
+          OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
+        run: |
+          cd node_backend
+          node --test tests/phase3/queue.test.js
+
+      - name: Run Phase 3 OTP Outbox & Encryption Tests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+          QUEUE_REDIS_URL: redis://127.0.0.1:6379
+          OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
+        run: |
+          cd node_backend
+          node --test tests/phase3/otp_outbox.test.js
+
+      - name: Run Phase 3 Failure Injection Tests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+          QUEUE_REDIS_URL: redis://127.0.0.1:6379
+          OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
+        run: |
+          cd node_backend
+          node --test tests/phase3/failure_injection.test.js
 
   frontend-build:
     name: Frontend Build Verification

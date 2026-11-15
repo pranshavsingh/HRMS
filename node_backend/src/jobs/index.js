@@ -1,19 +1,11 @@
 import { Worker } from "bullmq";
-import { QUEUE_NAMES, createQueueConnection, queueConfig } from "../config/queue.js";
+import { QUEUE_NAMES, getRedisConnectionOptions, queueConfig } from "../config/queue.js";
 import { sendOtpEmailHandler } from "./handlers/send-otp-email.handler.js";
 import logger from "../utils/logger.js";
 
 class QueueWorkerManager {
   constructor() {
     this.workers = new Map();
-    this.connection = null;
-  }
-
-  getConnection() {
-    if (!this.connection) {
-      this.connection = createQueueConnection("worker");
-    }
-    return this.connection;
   }
 
   /**
@@ -25,7 +17,6 @@ class QueueWorkerManager {
       return;
     }
 
-    const conn = this.getConnection();
     const concurrency = Number(process.env.QUEUE_CONCURRENCY || 5);
 
     // 1. Email Notifications Worker
@@ -39,7 +30,7 @@ class QueueWorkerManager {
         return { unhandled: true };
       },
       {
-        connection: conn,
+        connection: getRedisConnectionOptions(),
         prefix: queueConfig.prefix,
         concurrency
       }
@@ -87,15 +78,6 @@ class QueueWorkerManager {
       }
     }
     this.workers.clear();
-
-    if (this.connection) {
-      try {
-        await this.connection.quit();
-      } catch {
-        this.connection.disconnect();
-      }
-      this.connection = null;
-    }
   }
 }
 

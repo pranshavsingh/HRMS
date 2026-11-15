@@ -1,18 +1,10 @@
 import { Queue } from "bullmq";
-import { QUEUE_NAMES, createQueueConnection, defaultJobOptions, queueConfig } from "../config/queue.js";
+import { QUEUE_NAMES, getRedisConnectionOptions, defaultJobOptions, queueConfig } from "../config/queue.js";
 import logger from "../utils/logger.js";
 
 class QueueProducerService {
   constructor() {
     this.queues = new Map();
-    this.connection = null;
-  }
-
-  getConnection() {
-    if (!this.connection) {
-      this.connection = createQueueConnection("producer");
-    }
-    return this.connection;
   }
 
   /**
@@ -22,9 +14,8 @@ class QueueProducerService {
    */
   getQueue(queueName) {
     if (!this.queues.has(queueName)) {
-      const conn = this.getConnection();
       const queue = new Queue(queueName, {
-        connection: conn,
+        connection: getRedisConnectionOptions(),
         prefix: queueConfig.prefix,
         defaultJobOptions
       });
@@ -73,15 +64,6 @@ class QueueProducerService {
       }
     }
     this.queues.clear();
-
-    if (this.connection) {
-      try {
-        await this.connection.quit();
-      } catch {
-        this.connection.disconnect();
-      }
-      this.connection = null;
-    }
   }
 }
 
