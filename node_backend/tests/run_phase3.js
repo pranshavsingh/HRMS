@@ -12,7 +12,8 @@ const suites = [
   "phase3/outbox.test.js",
   "phase3/queue.test.js",
   "phase3/otp_outbox.test.js",
-  "phase3/failure_injection.test.js"
+  "phase3/failure_injection.test.js",
+  "phase3/worker_lifecycle.test.js"
 ];
 
 let totalPassed = 0;

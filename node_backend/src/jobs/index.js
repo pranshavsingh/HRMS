@@ -74,6 +74,22 @@ class QueueWorkerManager {
   }
 
   /**
+   * Check if BullMQ workers are active and accepting jobs.
+   * @returns {boolean}
+   */
+  isRunning() {
+    return this.workers.size > 0 && Array.from(this.workers.values()).some((w) => !w.closing);
+  }
+
+  /**
+   * Return list of active queue worker names.
+   * @returns {string[]}
+   */
+  getActiveWorkerNames() {
+    return Array.from(this.workers.keys());
+  }
+
+  /**
    * Graceful shutdown of all workers.
    */
   async close() {

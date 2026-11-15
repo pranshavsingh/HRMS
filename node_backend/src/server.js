@@ -13,11 +13,12 @@ async function startServer() {
     await healthCheck();
     console.log(`[DB] Connected: mysql://${info.user}@${info.host}:${info.port}/${info.database}`);
     
-    // Initialize background cron jobs only in development or if explicitly enabled in API instance
-    if (process.env.RUN_CRON_IN_API === "true" || process.env.NODE_ENV !== "production") {
+    // Background cron jobs run exclusively in the dedicated background worker process
+    if (process.env.RUN_CRON_IN_API === "true") {
       initCron();
+      console.log("[CRON] Initialized in API instance (RUN_CRON_IN_API=true)");
     } else {
-      console.log("[CRON] Skipped in API cluster instance (managed by dedicated worker)");
+      console.log("[CRON] Skipped in API cluster instance (managed exclusively by dedicated background worker)");
     }
   } catch (error) {
     console.error(`[DB] Connection failed: ${error.message}`);
