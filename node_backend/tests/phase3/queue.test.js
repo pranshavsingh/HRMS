@@ -9,7 +9,7 @@ import { Worker } from "bullmq";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
-import { QUEUE_NAMES, createQueueConnection, queueConfig, defaultJobOptions } from "../../src/config/queue.js";
+import { QUEUE_NAMES, createQueueConnection, getRedisConnectionOptions, queueConfig, defaultJobOptions } from "../../src/config/queue.js";
 import queueProducerService from "../../src/services/queue-producer.service.js";
 
 async function isRedisLive() {
@@ -43,7 +43,8 @@ describe("P3.2 — BullMQ Queue Producer & Consumer Test Suite", () => {
 
   after(async () => {
     if (testWorker) {
-      await testWorker.close();
+      try { await testWorker.close(); } catch {}
+      testWorker = null;
     }
     await queueProducerService.close();
   });
@@ -79,7 +80,7 @@ describe("P3.2 — BullMQ Queue Producer & Consumer Test Suite", () => {
         return { success: true };
       },
       {
-        connection: createQueueConnection("worker-test"),
+        connection: getRedisConnectionOptions(),
         prefix: queueConfig.prefix,
         concurrency: 1
       }
@@ -103,6 +104,9 @@ describe("P3.2 — BullMQ Queue Producer & Consumer Test Suite", () => {
 
     assert.ok(processedJob, "Worker must successfully process the enqueued job");
     assert.equal(processedJob.data.message, "hello-bullmq");
+
+    await testWorker.close();
+    testWorker = null;
   });
 
   it("should prevent duplicate processing when the same deterministic Job ID is enqueued (when Redis is available)", async (t) => {
@@ -111,8 +115,9 @@ describe("P3.2 — BullMQ Queue Producer & Consumer Test Suite", () => {
       return;
     }
 
+    const dupQueueName = `dup-queue-${Date.now()}`;
     const fixedJobId = `fixed_id_${Date.now()}`;
-    const queue = queueProducerService.getQueue(testQueueName);
+    const queue = queueProducerService.getQueue(dupQueueName);
 
     const job1 = await queue.add("idempotent-task", { val: 1 }, { jobId: fixedJobId });
     assert.equal(job1.id, fixedJobId);
@@ -122,7 +127,7 @@ describe("P3.2 — BullMQ Queue Producer & Consumer Test Suite", () => {
     assert.equal(job2.id, fixedJobId);
 
     const count = await queue.getJobCounts("waiting", "active", "completed");
-    assert.ok(count.waiting + count.completed <= 2, "Duplicate job ID must not create second job");
+    assert.ok(count.waiting <= 1, "Duplicate job ID must not create second job");
   });
 
   it("should retry failed job with exponential backoff (when Redis is available)", async (t) => {
@@ -144,7 +149,7 @@ describe("P3.2 — BullMQ Queue Producer & Consumer Test Suite", () => {
         return { recovered: true };
       },
       {
-        connection: createQueueConnection("worker-retry-test"),
+        connection: getRedisConnectionOptions(),
         prefix: queueConfig.prefix,
         concurrency: 1
       }
