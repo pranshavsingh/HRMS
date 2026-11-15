@@ -63,8 +63,17 @@ export const verifyPasswordResetOtp = asyncHandler(async (req, res) => {
  * Reset password using verified OTP.
  */
 export const resetPasswordWithOtp = asyncHandler(async (req, res) => {
-  const { email, otp, new_password } = req.body;
-  const result = await accountsService.resetPasswordWithOtp(email, otp, new_password);
+  const { email, otp, new_password, reset_token } = req.body;
+  const result = await accountsService.resetPasswordWithOtp(email, otp, new_password, reset_token);
+  res.json(result);
+});
+
+/**
+ * Change password for authenticated user with current-password verification.
+ */
+export const changePassword = asyncHandler(async (req, res) => {
+  const { current_password, new_password } = req.body;
+  const result = await accountsService.changePassword(req.user.id, current_password, new_password);
   res.json(result);
 });
 
@@ -136,7 +145,7 @@ export const myDocuments = asyncHandler(async (req, res) => {
  * Get targeted employee's documents (admin/hr/manager only).
  */
 export const employeeDocuments = asyncHandler(async (req, res) => {
-  const result = await accountsService.getEmployeeDocuments(req.params.user_id);
+  const result = await accountsService.getEmployeeDocuments(req.params.user_id, req.user);
   res.json(result);
 });
 

@@ -7,6 +7,7 @@ import {
   requestOtpSchema, 
   verifyOtpSchema, 
   resetPasswordSchema, 
+  changePasswordSchema,
   createEmployeeSchema, 
   uploadDocumentSchema 
 } from "../middleware/validation.js";
@@ -21,6 +22,7 @@ r.post("/logout/", c.logout);
 r.post("/forgot-password/request-otp/", validate(requestOtpSchema), c.requestPasswordResetOtp);
 r.post("/forgot-password/verify-otp/", validate(verifyOtpSchema), c.verifyPasswordResetOtp);
 r.post("/forgot-password/reset/", validate(resetPasswordSchema), c.resetPasswordWithOtp);
+r.post("/change-password/", authenticate, validate(changePasswordSchema), c.changePassword);
 
 // Employee management endpoints
 r.post(

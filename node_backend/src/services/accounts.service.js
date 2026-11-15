@@ -16,7 +16,15 @@ import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
 
 function makeOtp() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return crypto.randomInt(100000, 1000000).toString();
+}
+
+function safeCompare(a, b) {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 function hashOtp(email, otp) {
@@ -77,14 +85,26 @@ export const accountsService = {
 
     const resolvedRole = (user.is_superuser === 1 || user.is_superuser === true) ? "superadmin" : user.role;
 
-    const access = jwt.sign({ userId: user.id, role: resolvedRole }, config.jwtSecret, { expiresIn: "15m" });
-    const refresh = jwt.sign({ userId: user.id, role: resolvedRole, type: "refresh" }, config.jwtSecret, { expiresIn: "30d" });
+    const accessJti = crypto.randomUUID();
+    const refreshJti = crypto.randomUUID();
+    const familyId = crypto.randomUUID();
+
+    const access = jwt.sign(
+      { userId: user.id, role: resolvedRole, type: "access" },
+      config.jwtSecret,
+      { expiresIn: "15m", algorithm: "HS256", jwtid: accessJti, issuer: "hrms-api", audience: "hrms-client" }
+    );
+    const refresh = jwt.sign(
+      { userId: user.id, role: resolvedRole, type: "refresh", familyId },
+      config.jwtSecret,
+      { expiresIn: "30d", algorithm: "HS256", jwtid: refreshJti, issuer: "hrms-api", audience: "hrms-client" }
+    );
 
     // Hash refresh token for secure database storage
     const refreshHash = crypto.createHash("sha256").update(refresh).digest("hex");
     const refreshExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
-    await accountsRepository.insertRefreshToken(user.id, refreshHash, refreshExpires, deviceInfo);
+    await accountsRepository.insertRefreshToken(user.id, refreshHash, refreshExpires, deviceInfo, familyId);
     
     return {
       access,
@@ -107,7 +127,9 @@ export const accountsService = {
 
     let payload;
     try {
-      payload = jwt.verify(refreshToken, config.jwtSecret);
+      payload = jwt.verify(refreshToken, config.jwtSecret, {
+        algorithms: ["HS256"]
+      });
       if (payload.type !== "refresh") {
         throw new Error();
       }
@@ -119,11 +141,57 @@ export const accountsService = {
     const tokenRecord = await accountsRepository.findRefreshTokenByHash(refreshHash);
 
     if (!tokenRecord) {
-      // Security Invalidation / Reuse Protection:
-      // If signature is valid but token hash is missing, it was rotated/used already.
-      // Signifies potential token theft and replay. Revoke all active sessions for safety.
+      // Replay Detection / Unknown token presented:
+      // If signed validly but not found in DB, token family may be compromised.
+      if (payload.familyId) {
+        await accountsRepository.revokeRefreshTokenFamily(payload.familyId);
+      }
       await accountsRepository.deleteRefreshTokensByUserId(payload.userId);
+      await redisService.del(`user:session:${payload.userId}`);
       throw new AppError("Session expired or token reused. Please login again.", 401);
+    }
+
+    // Token reuse detection: if token is already revoked, potential theft replay!
+    if (tokenRecord.is_revoked === 1 || tokenRecord.is_revoked === true) {
+      // Check concurrency grace window (15 seconds):
+      const lastActivity = new Date(tokenRecord.last_activity).getTime();
+      const nowTime = Date.now();
+      if (nowTime - lastActivity < 15000 && tokenRecord.replaced_by_hash) {
+        // Concurrency grace window: token was rotated just moments ago (likely concurrent request).
+        // Find user and return response without revoking family
+        const user = await accountsRepository.findById(payload.userId);
+        if (user && user.is_active) {
+          const resolvedRole = (user.is_superuser === 1 || user.is_superuser === true) ? "superadmin" : user.role;
+          const accessJti = crypto.randomUUID();
+          const access = jwt.sign(
+            { userId: user.id, role: resolvedRole, type: "access" },
+            config.jwtSecret,
+            { expiresIn: "15m", algorithm: "HS256", jwtid: accessJti, issuer: "hrms-api", audience: "hrms-client" }
+          );
+          return {
+            access,
+            refresh: refreshToken,
+            user: {
+              id: user.id,
+              username: user.username,
+              email: user.email,
+              role: resolvedRole,
+              first_name: user.first_name,
+              last_name: user.last_name
+            }
+          };
+        }
+      }
+
+      // Replay attack confirmed: Revoke the whole family and disconnect all devices
+      logger.warn("[Security] Refresh token reuse detected for user ID %d, family: %s", payload.userId, payload.familyId);
+      if (payload.familyId) {
+        await accountsRepository.revokeRefreshTokenFamily(payload.familyId);
+      }
+      await accountsRepository.deleteRefreshTokensByUserId(payload.userId);
+      await redisService.del(`user:session:${payload.userId}`);
+      await redisService.set(`user:revoked:${payload.userId}`, Date.now(), 86400);
+      throw new AppError("Token reuse detected. All sessions in this family revoked.", 401);
     }
 
     if (new Date(tokenRecord.expires_at) < new Date()) {
@@ -138,22 +206,34 @@ export const accountsService = {
     }
 
     const resolvedRole = (user.is_superuser === 1 || user.is_superuser === true) ? "superadmin" : user.role;
+    const familyId = payload.familyId || tokenRecord.family_id || crypto.randomUUID();
 
-    const access = jwt.sign({ userId: user.id, role: resolvedRole }, config.jwtSecret, { expiresIn: "15m" });
-    const newRefresh = jwt.sign({ userId: user.id, role: resolvedRole, type: "refresh" }, config.jwtSecret, { expiresIn: "30d" });
+    const accessJti = crypto.randomUUID();
+    const newRefreshJti = crypto.randomUUID();
+
+    const access = jwt.sign(
+      { userId: user.id, role: resolvedRole, type: "access" },
+      config.jwtSecret,
+      { expiresIn: "15m", algorithm: "HS256", jwtid: accessJti, issuer: "hrms-api", audience: "hrms-client" }
+    );
+    const newRefresh = jwt.sign(
+      { userId: user.id, role: resolvedRole, type: "refresh", familyId },
+      config.jwtSecret,
+      { expiresIn: "30d", algorithm: "HS256", jwtid: newRefreshJti, issuer: "hrms-api", audience: "hrms-client" }
+    );
 
     const newRefreshHash = crypto.createHash("sha256").update(newRefresh).digest("hex");
     const newRefreshExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    // Rotate refresh token
+    // Rotate refresh token atomically: mark old as revoked and insert new with same family
     await db.transaction(async (tx) => {
-      await accountsRepository.deleteRefreshTokenByHash(refreshHash, tx);
+      await accountsRepository.markRefreshTokenRevoked(refreshHash, newRefreshHash, tx);
       await accountsRepository.insertRefreshToken(user.id, newRefreshHash, newRefreshExpires, {
         deviceId: deviceInfo.deviceId || tokenRecord.device_id,
         deviceName: deviceInfo.deviceName || tokenRecord.device_name,
         platform: deviceInfo.platform || tokenRecord.platform,
         ipAddress: deviceInfo.ipAddress || tokenRecord.ip_address,
-      }, tx);
+      }, familyId, tx);
     });
 
     return {
@@ -174,11 +254,47 @@ export const accountsService = {
     if (!refreshToken) return { message: "Logged out" };
     try {
       const refreshHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
+      const tokenRecord = await accountsRepository.findRefreshTokenByHash(refreshHash);
+      if (tokenRecord?.family_id) {
+        await accountsRepository.revokeRefreshTokenFamily(tokenRecord.family_id);
+      }
       await accountsRepository.deleteRefreshTokenByHash(refreshHash);
     } catch (err) {
       // Suppress errors
     }
     return { message: "Logged out successfully" };
+  },
+
+  async changePassword(userId, currentPassword, newPassword) {
+    const user = await accountsRepository.findById(userId);
+    if (!user) {
+      throw new AppError("User not found", 404);
+    }
+
+    const verification = await verifyPassword(currentPassword, user.password);
+    if (!verification.valid) {
+      throw new AppError("Current password is incorrect", 400);
+    }
+
+    if (!newPassword || newPassword.length < 12) {
+      throw new AppError("New password must be at least 12 characters", 400);
+    }
+    if (newPassword.length > 128) {
+      throw new AppError("New password must not exceed 128 characters", 400);
+    }
+
+    const newHash = await hashPassword(newPassword);
+
+    await db.transaction(async (tx) => {
+      await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [newHash, userId], tx);
+      await accountsRepository.deleteRefreshTokensByUserId(userId, tx);
+    });
+
+    // Invalidate Redis session cache and record user revocation timestamp
+    await redisService.del(`user:session:${userId}`);
+    await redisService.set(`user:revoked:${userId}`, Date.now(), 86400);
+
+    return { message: "Password changed successfully. Please login again with your new password." };
   },
 
   async requestPasswordResetOtp(email) {
@@ -218,17 +334,20 @@ export const accountsService = {
       throw new AppError("Too many invalid attempts. Request new OTP.", 400);
     }
 
-    const matches = row.otp_hash === hashOtp(email, otp);
+    const matches = safeCompare(row.otp_hash, hashOtp(email, otp));
     if (!matches) {
       await accountsRepository.incrementOtpAttempts(email);
       throw new AppError("Invalid OTP", 400);
     }
 
-    await accountsRepository.verifyOtp(email);
-    return { message: "OTP verified" };
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const resetTokenHash = crypto.createHash("sha256").update(resetToken).digest("hex");
+
+    await accountsRepository.verifyOtp(email, resetTokenHash);
+    return { message: "OTP verified", reset_token: resetToken };
   },
 
-  async resetPasswordWithOtp(email, otp, newPassword) {
+  async resetPasswordWithOtp(email, otp, newPassword, resetToken = null) {
     const row = await accountsRepository.findOtpByEmail(email);
     if (!row) {
       throw new AppError("Invalid or expired OTP", 400);
@@ -240,9 +359,32 @@ export const accountsService = {
       throw new AppError("OTP expired. Request a new one.", 400);
     }
 
-    const matches = row.otp_hash === hashOtp(email, otp);
-    if (!matches) {
-      throw new AppError("Invalid OTP", 400);
+    if (Number(row.attempts || 0) >= 5) {
+      throw new AppError("Too many invalid attempts. Request new OTP.", 400);
+    }
+
+    // Critical VULN-02 fix: Require verified state
+    if (Number(row.verified) !== 1) {
+      await accountsRepository.incrementOtpAttempts(email);
+      throw new AppError("OTP must be verified before resetting password", 400);
+    }
+
+    if (row.consumed_at) {
+      throw new AppError("OTP has already been used. Request a new one.", 400);
+    }
+
+    // Validate reset challenge (either reset_token or matching otp)
+    let challengePassed = false;
+    if (resetToken && row.reset_token_hash) {
+      const computedHash = crypto.createHash("sha256").update(resetToken).digest("hex");
+      challengePassed = safeCompare(computedHash, row.reset_token_hash);
+    } else if (otp) {
+      challengePassed = safeCompare(row.otp_hash, hashOtp(email, otp));
+    }
+
+    if (!challengePassed) {
+      await accountsRepository.incrementOtpAttempts(email);
+      throw new AppError("Invalid reset challenge or OTP", 400);
     }
 
     const user = await accountsRepository.findByEmail(email);
@@ -250,13 +392,22 @@ export const accountsService = {
       throw new AppError("User not found", 400);
     }
 
+    if (!newPassword || newPassword.length < 12) {
+      throw new AppError("Password must be at least 12 characters", 400);
+    }
+    if (newPassword.length > 128) {
+      throw new AppError("Password must not exceed 128 characters", 400);
+    }
+
     const passwordHash = await hashPassword(newPassword);
     await db.transaction(async (tx) => {
       await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [passwordHash, user.id], tx);
-      await accountsRepository.deleteOtpByEmail(email, tx);
+      await accountsRepository.consumeOtp(email, tx);
+      await accountsRepository.deleteRefreshTokensByUserId(user.id, tx);
     });
 
     await redisService.del(`user:session:${user.id}`);
+    await redisService.set(`user:revoked:${user.id}`, Date.now(), 86400);
 
     return { message: "Password reset successful" };
   },
@@ -759,8 +910,19 @@ export const accountsService = {
       throw new AppError("Document not found", 404);
     }
 
-    if (String(actor.id) !== String(document.user_id) && !["admin", "hr", "manager"].includes(actor.role)) {
-      throw new AppError("You do not have permission to view this document", 403);
+    // Role-based Access & IDOR Verification
+    const isOwner = Number(actor.id) === Number(document.user_id);
+    const isGlobalViewer = ["admin", "hr", "superadmin"].includes(actor.role);
+
+    if (!isOwner && !isGlobalViewer) {
+      if (actor.role === "manager") {
+        const empProfile = await accountsRepository.findProfileByUserId(document.user_id);
+        if (!empProfile || Number(empProfile.manager_id) !== Number(actor.id)) {
+          throw new AppError("You do not have permission to view documents for this employee", 403);
+        }
+      } else {
+        throw new AppError("You do not have permission to view this document", 403);
+      }
     }
 
     const fileUrl = storageService.getUrl(document.file);
@@ -789,7 +951,23 @@ export const accountsService = {
     }));
   },
 
-  async getEmployeeDocuments(employeeId) {
+  async getEmployeeDocuments(employeeId, actor) {
+    if (actor) {
+      const isOwner = Number(actor.id) === Number(employeeId);
+      const isGlobalViewer = ["admin", "hr", "superadmin"].includes(actor.role);
+
+      if (!isOwner && !isGlobalViewer) {
+        if (actor.role === "manager") {
+          const empProfile = await accountsRepository.findProfileByUserId(employeeId);
+          if (!empProfile || Number(empProfile.manager_id) !== Number(actor.id)) {
+            throw new AppError("You do not have permission to view documents for this employee", 403);
+          }
+        } else {
+          throw new AppError("You do not have permission to view documents for this employee", 403);
+        }
+      }
+    }
+
     const docs = await accountsRepository.findDocumentsByUserId(employeeId);
     return docs.map((d) => ({
       id: d.id,

@@ -147,9 +147,21 @@ export const resetPasswordSchema = z.object({
   body: z.object({
     email: z.string({ required_error: "Email, OTP and new password are required" }).min(1, "Email, OTP and new password are required"),
     otp: z.string({ required_error: "Email, OTP and new password are required" }).min(1, "Email, OTP and new password are required"),
+    reset_token: z.string().optional(),
     new_password: z.string({ required_error: "Email, OTP and new password are required" })
       .min(1, "Email, OTP and new password are required")
-      .min(6, "Password must be at least 6 characters")
+      .min(12, "Password must be at least 12 characters")
+      .max(128, "Password must not exceed 128 characters")
+  })
+});
+
+// 4b. Authenticated Change Password
+export const changePasswordSchema = z.object({
+  body: z.object({
+    current_password: z.string({ required_error: "Current password is required" }).min(1, "Current password is required"),
+    new_password: z.string({ required_error: "New password is required" })
+      .min(12, "New password must be at least 12 characters")
+      .max(128, "New password must not exceed 128 characters")
   })
 });
 
@@ -158,18 +170,20 @@ export const createEmployeeSchema = z.object({
   body: z.object({
     username: z.string({ required_error: "username, first_name, password, role are required" }).min(1, "username, first_name, password, role are required"),
     first_name: z.string({ required_error: "username, first_name, password, role are required" }).min(1, "username, first_name, password, role are required"),
-    password: z.string({ required_error: "username, first_name, password, role are required" }).min(1, "username, first_name, password, role are required"),
+    password: z.string({ required_error: "username, first_name, password, role are required" })
+      .min(12, "Password must be at least 12 characters")
+      .max(128, "Password must not exceed 128 characters"),
     role: z.enum(["employee", "manager", "hr", "admin", "superadmin"], {
       errorMap: () => ({ message: "Only employee, manager, hr, admin, or superadmin can be created" })
     }),
-    manager: z.any().optional(),
-    team_name: z.any().optional(),
-    joining_date: z.any().optional(),
-    leave_allotted: z.any().optional(),
-    latitude: z.any().optional(),
-    longitude: z.any().optional(),
-    allowed_radius: z.any().optional(),
-    designation: z.any().optional(),
+    manager: z.coerce.number().int().positive().nullable().optional(),
+    team_name: z.string().max(120).nullable().optional(),
+    joining_date: z.string().nullable().optional(),
+    leave_allotted: z.coerce.number().int().min(0).max(365).optional(),
+    latitude: z.coerce.number().min(-90).max(90).nullable().optional(),
+    longitude: z.coerce.number().min(-180).max(180).nullable().optional(),
+    allowed_radius: z.coerce.number().int().min(1).max(50000).optional(),
+    designation: z.string().max(255).nullable().optional(),
     locations: z.any().optional()
   }),
   files: z.object({
@@ -200,8 +214,12 @@ export const createEmployeeSchema = z.object({
 // 6. Punch In / Out
 export const punchSchema = z.object({
   body: z.object({
-    latitude: z.any().refine((val) => val != null, { message: "latitude and longitude are required" }),
-    longitude: z.any().refine((val) => val != null, { message: "latitude and longitude are required" }),
+    latitude: z.coerce.number({ required_error: "latitude and longitude are required" })
+      .min(-90, "Latitude must be between -90 and 90")
+      .max(90, "Latitude must be between -90 and 90"),
+    longitude: z.coerce.number({ required_error: "latitude and longitude are required" })
+      .min(-180, "Longitude must be between -180 and 180")
+      .max(180, "Longitude must be between -180 and 180"),
     photo_public_id: z.string().optional(),
     photo_url: z.string().optional(),
   }),
