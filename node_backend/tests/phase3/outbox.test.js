@@ -202,7 +202,7 @@ describe("P3.1 — Transactional Outbox Repository & Dispatcher Test Suite", () 
     await outboxRepository.markFailed(id, workerId, "Fatal corrupt payload", false);
 
     const finalRecord = await outboxRepository.findById(id);
-    assert.equal(finalRecord.status, "FAILED", "Should be FAILED when willRetry is false");
+    assert.equal(finalRecord.status, "DEAD_LETTER", "Should be DEAD_LETTER when willRetry is false");
     assert.equal(finalRecord.retry_count, 2);
   });
 });

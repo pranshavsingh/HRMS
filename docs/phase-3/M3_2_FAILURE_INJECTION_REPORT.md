@@ -24,38 +24,60 @@
 
 ---
 
-### Scenario 2: Worker Process / Dispatcher Hard Crash After Claiming Events
-- **Failure Injected:** A worker instance claims 10 pending events with a 60-second lease, assigning `claimed_by = 'worker_dead_pid'` and `lease_expires_at = NOW() + 60s`. The worker process crashes immediately (`SIGKILL` simulation) without publishing or releasing claims.
-- **Expected Behavior:** Events remain in `PROCESSING` status during the active lease to prevent concurrent execution. Once `lease_expires_at` lapses, any surviving dispatcher running `releaseExpiredClaims()` or polling `claimPendingEvents()` must automatically reclaim the stalled events.
+### Scenario 2: Strict Lease Expiry & Zombie Worker Fencing
+- **Failure Injected:** A worker instance claims an event with a 60-second lease, assigning `claimed_by = 'dispatcher_zombie_pid_9999'` and `claimed_until = NOW() + 60s`. The worker experiences an unexpected freeze or GC pause, during which its lease expires.
+- **Expected Behavior:** When the zombie worker awakens and attempts to call `markPublished(id, zombieWorkerId)` or `markFailed(id, zombieWorkerId)`, it must be strictly fenced out (`result.changes === 0`). Survivor workers can reclaim the event, and only the active lease holder can mark the event published.
 - **Verification Evidence:**
   ```javascript
-  // Simulated clock advancement past lease
-  await db.run("UPDATE outbox_events SET lease_expires_at = DATE_SUB(NOW(), INTERVAL 5 SECOND) WHERE id = ?", [id]);
-  const reclaimedCount = await outboxRepository.releaseExpiredClaims();
-  assert.ok(reclaimedCount >= 1);
-  const recovered = await outboxRepository.findById(id);
-  assert.equal(recovered.status, "PENDING");
+  // Zombie worker tries to mark published after lease expired
+  const zombieSuccess = await outboxRepository.markPublished(id, zombieWorkerId);
+  assert.equal(zombieSuccess, false, "Zombie worker with expired lease must be fenced out");
+
+  // Survivor worker claims event and finalizes publication
+  await outboxRepository.releaseExpiredClaims();
+  await outboxRepository.claimPendingEvents(survivorWorkerId, 10, 60);
+  const survivorSuccess = await outboxRepository.markPublished(id, survivorWorkerId);
+  assert.equal(survivorSuccess, true);
   ```
-- **Result:** **PASSED**. Stalled claims recovered within one poll cycle.
+- **Result:** **PASSED**. Zombie worker fenced out; survivor cleanly completes.
 
 ---
 
-### Scenario 3: Corrupted / Malformed Payload Injection (Poison Pill Quarantine)
-- **Failure Injected:** An adversary or software bug injects an invalid JSON string or tampered ciphertext with an invalid HMAC auth tag into `outbox_events.payload`.
-- **Expected Behavior:** The background worker must not enter an infinite crash-restart loop. The error must be trapped, logged to audit telemetry, and the event transitioned to `DEAD_LETTER` with `last_error = "Decryption failed / invalid authentication tag"`.
+### Scenario 3: At-Least-Once Delivery & Durable Consumer Idempotency
+- **Failure Injected:** A BullMQ queue job is redelivered or published twice with the same `jobId`, simulating network acknowledgment loss or queue duplicate redelivery.
+- **Expected Behavior:** `sendOtpEmailHandler` claims the job execution token in `consumer_processed_jobs`. The first delivery executes and records `status = 'COMPLETED'`. The second delivery detects the existing claim, immediately skips execution without sending a duplicate email, and returns `{ duplicate: true, skipped: true, reason: 'ALREADY_PROCESSED' }`.
 - **Verification Evidence:**
   ```javascript
-  const res = await sendOtpEmailHandler({
-    id: "job_corrupted",
-    data: {
-      outboxId: 99999,
-      encryptedPayload: { version: 1, iv: "00", authTag: "00", ciphertext: "00" }
-    }
-  });
-  assert.equal(res.status, "QUARANTINED");
-  assert.equal(res.reason, "PAYLOAD_DECRYPTION_FAILED");
+  const firstResult = await sendOtpEmailHandler(jobData);
+  assert.notEqual(firstResult.duplicate, true);
+
+  const secondResult = await sendOtpEmailHandler(jobData);
+  assert.equal(secondResult.duplicate, true);
+  assert.equal(secondResult.skipped, true);
+  assert.equal(secondResult.reason, "ALREADY_PROCESSED");
   ```
-- **Result:** **PASSED**. Worker survives intact; poison message quarantined.
+- **Result:** **PASSED**. Zero duplicate side-effects observed.
+
+---
+
+### Scenario 4: Corrupted / Malformed Payload Injection (Poison Pill Quarantine & Replay)
+- **Failure Injected:** An unparseable or corrupted payload (tampered ciphertext / invalid authTag) is processed by the worker.
+- **Expected Behavior:** The background worker does NOT crash. The outbox record in `outbox_events` is persistently transitioned to `DEAD_LETTER` with `last_error` capturing the failure reason. Operators can inspect the event via `outboxRepository.getDeadLetterEvents()` and replay it using `outboxRepository.retryDeadLetterEvent()`.
+- **Verification Evidence:**
+  ```javascript
+  const res = await sendOtpEmailHandler(poisonJob);
+  assert.equal(res.status, "DEAD_LETTER");
+
+  const dbRecord = await outboxRepository.findById(id);
+  assert.equal(dbRecord.status, "DEAD_LETTER");
+
+  const deadLetters = await outboxRepository.getDeadLetterEvents(10, 0);
+  assert.ok(deadLetters.some((e) => e.id === id));
+
+  const replayed = await outboxRepository.retryDeadLetterEvent(id);
+  assert.equal(replayed, true);
+  ```
+- **Result:** **PASSED**. Poison message persistently quarantined and operator replay verified.
 
 ---
 

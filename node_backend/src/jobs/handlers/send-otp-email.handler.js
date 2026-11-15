@@ -1,49 +1,74 @@
 import { decryptPayload } from "../../utils/crypto.js";
 import { sendOtpEmail } from "../../utils/mailer.js";
 import accountsRepository from "../../repositories/accounts.repository.js";
+import outboxRepository from "../../repositories/outbox.repository.js";
+import consumerIdempotencyRepository from "../../repositories/consumer-idempotency.repository.js";
 import logger from "../../utils/logger.js";
+
+const HANDLER_NAME = "Send Password Reset OTP Email";
 
 /**
  * BullMQ Job Handler for Password Reset OTP Email dispatch.
  * Decrypts the AES-256-GCM outbox payload, verifies that the OTP has not
  * expired or been superseded, and sends the email via SMTP.
+ * Enforces durable consumer idempotency to prevent duplicate deliveries.
  * 
  * @param {import("bullmq").Job} job - BullMQ job instance
  */
 export async function sendOtpEmailHandler(job) {
-  const { outboxEventId, eventType, payload } = job.data;
+  const { outboxEventId, eventType, payload } = job.data || {};
+  const jobId = job.id || `adhoc_${Date.now()}`;
 
   logger.info(
     "[JobHandler:sendOtpEmail] Processing OTP dispatch: JobID [%s], OutboxID [%s], Attempt [%d/%d]",
-    job.id,
+    jobId,
     outboxEventId,
-    job.attemptsMade + 1,
-    job.opts.attempts || 5
+    (job.attemptsMade || 0) + 1,
+    (job.opts && job.opts.attempts) || 5
   );
+
+  // 1. Durable Consumer Idempotency Check
+  const claimAcquired = await consumerIdempotencyRepository.claimExecution(jobId, HANDLER_NAME);
+  if (!claimAcquired) {
+    logger.info(
+      "[JobHandler:sendOtpEmail] Job [%s] already claimed or completed. Skipping duplicate execution (Durable Idempotency).",
+      jobId
+    );
+    return { duplicate: true, skipped: true, reason: "ALREADY_PROCESSED" };
+  }
 
   let decrypted;
   try {
-    // 1. Decrypt authenticated AES-256-GCM payload
+    // 2. Decrypt authenticated AES-256-GCM payload
     decrypted = decryptPayload(payload);
   } catch (err) {
-    logger.error("[JobHandler:sendOtpEmail] Decryption error for JobID [%s]: %s", job.id, err.message);
-    // Malformed or corrupted encryption is a non-retryable error
-    throw new Error(`Non-retryable poison payload: ${err.message}`);
+    logger.error("[JobHandler:sendOtpEmail] Poison payload decryption error for JobID [%s]: %s", jobId, err.message);
+    if (outboxEventId) {
+      await outboxRepository.markDeadLetter(outboxEventId, `Poison payload: ${err.message}`).catch(() => {});
+    }
+    await consumerIdempotencyRepository.completeExecution(jobId, HANDLER_NAME, { status: "DEAD_LETTER", error: err.message }).catch(() => {});
+    return { status: "DEAD_LETTER", reason: "PAYLOAD_DECRYPTION_FAILED", error: err.message };
   }
 
-  const { email, otp, otpHash } = decrypted;
+  const { email, otp, otpHash } = decrypted || {};
 
   if (!email || !otp) {
-    throw new Error("Non-retryable poison payload: missing required email or OTP field.");
+    const errorMsg = "Poison payload: missing required email or OTP field.";
+    if (outboxEventId) {
+      await outboxRepository.markDeadLetter(outboxEventId, errorMsg).catch(() => {});
+    }
+    await consumerIdempotencyRepository.completeExecution(jobId, HANDLER_NAME, { status: "DEAD_LETTER", error: errorMsg }).catch(() => {});
+    return { status: "DEAD_LETTER", reason: "MISSING_REQUIRED_FIELDS", error: errorMsg };
   }
 
-  // 2. Fresh Database State Check (Prevent sending stale, superseded, or consumed OTPs)
+  // 3. Fresh Database State Check (Prevent sending stale, superseded, or consumed OTPs)
   const currentOtpRecord = await accountsRepository.findOtpByEmail(email);
 
   if (!currentOtpRecord) {
     logger.info(
       "[JobHandler:sendOtpEmail] OTP record no longer exists in database for recipient. Skipping stale email dispatch."
     );
+    await consumerIdempotencyRepository.completeExecution(jobId, HANDLER_NAME, { skipped: true, reason: "RECORD_NOT_FOUND" });
     return { skipped: true, reason: "RECORD_NOT_FOUND" };
   }
 
@@ -51,6 +76,7 @@ export async function sendOtpEmailHandler(job) {
     logger.info(
       "[JobHandler:sendOtpEmail] OTP record was already consumed. Skipping stale email dispatch."
     );
+    await consumerIdempotencyRepository.completeExecution(jobId, HANDLER_NAME, { skipped: true, reason: "ALREADY_CONSUMED" });
     return { skipped: true, reason: "ALREADY_CONSUMED" };
   }
 
@@ -58,6 +84,7 @@ export async function sendOtpEmailHandler(job) {
     logger.info(
       "[JobHandler:sendOtpEmail] OTP record has already expired. Skipping stale email dispatch."
     );
+    await consumerIdempotencyRepository.completeExecution(jobId, HANDLER_NAME, { skipped: true, reason: "EXPIRED" });
     return { skipped: true, reason: "EXPIRED" };
   }
 
@@ -65,24 +92,26 @@ export async function sendOtpEmailHandler(job) {
     logger.info(
       "[JobHandler:sendOtpEmail] A newer OTP was requested for this recipient. Skipping superseded email dispatch."
     );
+    await consumerIdempotencyRepository.completeExecution(jobId, HANDLER_NAME, { skipped: true, reason: "SUPERSEDED" });
     return { skipped: true, reason: "SUPERSEDED" };
   }
 
-  // 3. Dispatch Email via SMTP
+  // 4. Dispatch Email via SMTP
   try {
     await sendOtpEmail(email, otp);
     logger.info(
       "[JobHandler:sendOtpEmail] Successfully dispatched OTP email to recipient for JobID [%s].",
-      job.id
+      jobId
     );
+    await consumerIdempotencyRepository.completeExecution(jobId, HANDLER_NAME, { success: true, recipient: email });
     return { success: true, recipient: email };
   } catch (smtpErr) {
     logger.error(
-      "[JobHandler:sendOtpEmail] SMTP transmission failure for JobID [%s]: %s (Triggering BullMQ backoff retry)",
-      job.id,
+      "[JobHandler:sendOtpEmail] SMTP transmission failure for JobID [%s]: %s (Releasing claim for BullMQ backoff retry)",
+      jobId,
       smtpErr.message
     );
-    // Throw error so BullMQ handles exponential backoff and retry
+    await consumerIdempotencyRepository.releaseFailedClaim(jobId, HANDLER_NAME).catch(() => {});
     throw smtpErr;
   }
 }

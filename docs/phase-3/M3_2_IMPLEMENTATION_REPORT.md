@@ -161,7 +161,31 @@ Under Milestone M3.2, the HRMS distributed backend has been refactored into a **
 
 ---
 
-## 4. Test Suite Execution & Regression Summary
+## 4. Corrective Distributed Hardening Enhancements
+
+Following the initial M3.2 implementation, a rigorous distributed systems hardening pass was executed:
+1. **Strict Claim Ownership & Lease Fencing**:
+   - `outboxRepository.markPublished` and `outboxRepository.markFailed` now enforce monotonic lease fencing:
+     `WHERE id = ? AND status = 'CLAIMED' AND claimed_by = ? AND claimed_until >= NOW()`.
+   - Any slow or zombie worker whose lease has expired is immediately fenced out (returns `false` / 0 rows affected), preventing it from overwriting state after another worker has reclaimed the event.
+2. **Durable Consumer Idempotency**:
+   - Created Migration `004_phase3_consumer_idempotency.sql` establishing the `consumer_processed_jobs` table with a composite primary key on `(job_id, handler_name)`.
+   - Created `consumerIdempotencyRepository.claimExecution(jobId, handlerName)`.
+   - If BullMQ redelivers a job (at-least-once queue delivery), the consumer detects the existing completion record and skips re-execution without duplicate side-effects.
+3. **Dead-Letter State & Operator Visibility**:
+   - Standardized status states: `PENDING`, `CLAIMED`, `PUBLISHED`, `DEAD_LETTER`.
+   - Poison payloads (tampered ciphertext, invalid structure) are trapped and persistently quarantined to `DEAD_LETTER` in `outbox_events` with detailed error traces in `last_error`.
+   - Added operator inspection query `outboxRepository.getDeadLetterEvents()` and replay method `outboxRepository.retryDeadLetterEvent(id)`.
+4. **Tightened Cryptographic Key Validation**:
+   - Completely eliminated implicit test fallbacks from `src/utils/crypto.js`.
+   - Enforced fail-closed validation: missing or insecure placeholder keys immediately throw an explicit fatal error.
+5. **Granular CI Execution & Failure Injection**:
+   - Split Phase 3 tests in GitHub Actions CI into individual isolated steps for transparent reporting.
+   - Verified 75 total tests across all suites (37 Phase 1 + 17 Phase 2 + 21 Phase 3).
+
+---
+
+## 5. Test Suite Execution & Regression Summary
 
 | Suite Category | Tests Run | Passed | Failed | Skipped | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -170,14 +194,14 @@ Under Milestone M3.2, the HRMS distributed backend has been refactored into a **
 | **Phase 3 Outbox Repository & Dispatcher** (`tests/phase3/outbox.test.js`) | 6 | 6 | 0 | 0 | **PASS** |
 | **Phase 3 BullMQ Queue Producer & Consumer** (`tests/phase3/queue.test.js`) | 5 | 5* | 0 | 3* | **PASS** |
 | **Phase 3 OTP Outbox & AES-256-GCM Encryption** (`tests/phase3/otp_outbox.test.js`) | 5 | 5 | 0 | 0 | **PASS** |
-| **Phase 3 Failure Injection & Edge Cases** (`tests/phase3/failure_injection.test.js`) | 4 | 4 | 0 | 0 | **PASS** |
-| **Total Automated Regression** | **74** | **74** | **0** | **0** | **PASS** |
+| **Phase 3 Failure Injection & Edge Cases** (`tests/phase3/failure_injection.test.js`) | 5 | 5 | 0 | 0 | **PASS** |
+| **Total Automated Regression** | **75** | **75** | **0** | **0** | **PASS** |
 
 *\*Note: Live Redis consumer assertions in `queue.test.js` are executed in GitHub Actions where Redis 7 is containerized, and are skipped conditionally on developer workstations lacking a local Redis service.*
 
 ---
 
-## 5. Verification Checklist
+## 6. Verification Checklist
 
 - [x] Base branch is `feat/phase-3-distributed-backend` branched from Phase 2 baseline `f0613f3`.
 - [x] Zero changes or merges to `main` (`main` is still untouched at `00cd3cd`).
@@ -186,6 +210,11 @@ Under Milestone M3.2, the HRMS distributed backend has been refactored into a **
 - [x] Outbox events are written inside the business transaction with zero dual-write window.
 - [x] Payload encryption verified using AES-256-GCM with authenticated tags.
 - [x] Competing worker claims prevented via row-level `FOR UPDATE SKIP LOCKED`.
+- [x] Strict claim ownership and lease fencing enforced.
+- [x] Durable consumer idempotency enforced via `consumer_processed_jobs`.
+- [x] Dead-letter state consistent and inspectable by operators.
+- [x] Cryptographic key validation tightened with test fallback removed.
 - [x] All 37 Phase 1 security tests passing.
 - [x] All 17 Phase 2 database & concurrency tests passing.
-- [x] GitHub Actions CI workflow updated with containerized Redis, migration execution, and Phase 3 automated test runner.
+- [x] All 21 Phase 3 tests passing.
+- [x] GitHub Actions CI workflow updated with containerized Redis, migration execution, and isolated test steps.

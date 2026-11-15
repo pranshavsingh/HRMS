@@ -119,4 +119,27 @@ DROP TABLE IF EXISTS outbox_events;
 DELETE FROM schema_migrations WHERE migration_name = '003_phase3_outbox_events.sql';
 ```
 
-Because `outbox_events` is an additive decoupled table with zero foreign keys pointing into it from core business tables, dropping the table has **zero impact** on employee records, attendance registers, payroll ledgers, or user accounts.
+## 6. Migration 004: Durable Consumer Idempotency Table
+
+**Migration File:** `node_backend/scripts/migrations/004_phase3_consumer_idempotency.sql`  
+**Target Table:** `consumer_processed_jobs`  
+**Database Engines Tested:** MySQL 8.0, MariaDB 10.11, SQLite 3.x  
+
+### Schema Specification
+```sql
+CREATE TABLE IF NOT EXISTS consumer_processed_jobs (
+  job_id VARCHAR(128) NOT NULL,
+  handler_name VARCHAR(100) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'COMPLETED',
+  result JSON NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (job_id, handler_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE INDEX idx_consumer_processed_at ON consumer_processed_jobs (created_at);
+```
+
+### Design Rationale
+- **Primary Key `(job_id, handler_name)`**: Enforces atomic execution claiming at the RDBMS level. When a BullMQ worker begins processing a job, it executes an atomic INSERT. If a duplicate job delivery arrives (e.g. from network retry or duplicate queue dispatch), the database rejects the duplicate with error 1062, preventing duplicate side-effects (e.g. double email delivery).
+- **Transient Failure Release**: If a retryable transient failure occurs (such as an SMTP outage), `releaseFailedClaim` removes the `PROCESSING` record, allowing BullMQ's exponential backoff to re-attempt execution cleanly.
+

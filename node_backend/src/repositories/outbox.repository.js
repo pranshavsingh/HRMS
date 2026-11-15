@@ -158,7 +158,8 @@ export const outboxRepository = {
 
   /**
    * Mark an outbox event as successfully published to BullMQ.
-   * Enforces that only the worker holding the active claim (or a recovery worker) can finalize it.
+   * Strictly enforces claim fencing: only the worker that holds the active, unexpired claim
+   * can finalize the record. If the lease expired or claim was lost, returns false.
    */
   async markPublished(id, workerId, tx = null) {
     const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
@@ -171,7 +172,10 @@ export const outboxRepository = {
           claimed_by = NULL, 
           claimed_until = NULL,
           updated_at = ${nowExpr}
-      WHERE id = ? AND (claimed_by = ? OR claimed_by IS NULL)
+      WHERE id = ? 
+        AND status = 'CLAIMED' 
+        AND claimed_by = ? 
+        AND claimed_until >= ${nowExpr}
     `;
 
     const result = await db.run(sql, [id, workerId], tx);
@@ -180,13 +184,18 @@ export const outboxRepository = {
 
   /**
    * Mark an outbox event as failed during publication.
-   * If `willRetry` is true, resets status to 'PENDING' so it can be reclaimed later.
-   * If `willRetry` is false, marks as 'FAILED' (dead-letter).
+   * Strictly enforces claim fencing: only the worker with active, unexpired claim can record failure.
+   * If retries are exhausted (>= maxRetries) or willRetry is false, transitions to DEAD_LETTER.
    */
   async markFailed(id, workerId, errorMessage, willRetry = true, tx = null) {
     const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
     const nowExpr = isMysql ? "NOW()" : "datetime('now')";
-    const nextStatus = willRetry ? "PENDING" : "FAILED";
+
+    const current = await this.findById(id, tx);
+    let nextStatus = "PENDING";
+    if (!willRetry || (current && current.retry_count + 1 >= 5)) {
+      nextStatus = "DEAD_LETTER";
+    }
 
     const sql = `
       UPDATE outbox_events 
@@ -196,11 +205,72 @@ export const outboxRepository = {
           claimed_by = NULL, 
           claimed_until = NULL,
           updated_at = ${nowExpr}
-      WHERE id = ? AND (claimed_by = ? OR claimed_by IS NULL)
+      WHERE id = ? 
+        AND status = 'CLAIMED' 
+        AND claimed_by = ? 
+        AND claimed_until >= ${nowExpr}
     `;
 
     const sanitizedError = errorMessage ? String(errorMessage).slice(0, 1000) : "Unknown dispatch error";
     const result = await db.run(sql, [nextStatus, sanitizedError, id, workerId], tx);
+    return result.changes > 0;
+  },
+
+  /**
+   * Persistently quarantine an event to DEAD_LETTER status (e.g. unparseable poison payload).
+   */
+  async markDeadLetter(id, errorMessage, tx = null) {
+    const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+    const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+
+    const sql = `
+      UPDATE outbox_events 
+      SET status = 'DEAD_LETTER', 
+          last_error = ?, 
+          claimed_by = NULL, 
+          claimed_until = NULL,
+          updated_at = ${nowExpr}
+      WHERE id = ?
+    `;
+
+    const sanitizedError = errorMessage ? String(errorMessage).slice(0, 1000) : "Poison payload quarantined";
+    const result = await db.run(sql, [sanitizedError, id], tx);
+    return result.changes > 0;
+  },
+
+  /**
+   * Fetch dead-lettered events for operator inspection.
+   */
+  async getDeadLetterEvents(limit = 50, offset = 0) {
+    return db.all(
+      `SELECT id, event_type, aggregate_type, aggregate_id, retry_count, last_error, created_at, updated_at 
+       FROM outbox_events 
+       WHERE status = 'DEAD_LETTER' 
+       ORDER BY updated_at DESC 
+       LIMIT ? OFFSET ?`,
+      [Number(limit), Number(offset)]
+    );
+  },
+
+  /**
+   * Allow operators to replay/retry a dead-lettered event by moving it back to PENDING.
+   */
+  async retryDeadLetterEvent(id) {
+    const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+    const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+
+    const sql = `
+      UPDATE outbox_events 
+      SET status = 'PENDING', 
+          retry_count = 0, 
+          last_error = NULL, 
+          claimed_by = NULL, 
+          claimed_until = NULL,
+          updated_at = ${nowExpr}
+      WHERE id = ? AND status = 'DEAD_LETTER'
+    `;
+
+    const result = await db.run(sql, [id]);
     return result.changes > 0;
   },
 
@@ -242,6 +312,7 @@ export const outboxRepository = {
       claimed: 0,
       published: 0,
       failed: 0,
+      dead_letter: 0,
       total: 0
     };
 
@@ -253,6 +324,7 @@ export const outboxRepository = {
         if (s === "claimed") metrics.claimed = cnt;
         if (s === "published") metrics.published = cnt;
         if (s === "failed") metrics.failed = cnt;
+        if (s === "dead_letter") metrics.dead_letter = cnt;
         metrics.total += cnt;
       }
     }

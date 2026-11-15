@@ -30,44 +30,6 @@ export function sanitizeRedisUrl(rawUrl) {
 }
 
 /**
- * Parse Redis connection URL into standard BullMQ connection options object.
- * Passing connection options directly to BullMQ allows BullMQ to manage the lifecycle of
- * internal ioredis connections (client, bclient, subscriber) and close them automatically on .close().
- * 
- * @param {string} [rawUrl]
- * @returns {object} BullMQ/ioredis connection options
- */
-export function getRedisConnectionOptions(rawUrl = config.queueRedisUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    const options = {
-      host: parsed.hostname || "127.0.0.1",
-      port: Number(parsed.port || 6379),
-      maxRetriesPerRequest: null,
-      enableOfflineQueue: true,
-      connectTimeout: 10000
-    };
-    if (parsed.password) {
-      options.password = decodeURIComponent(parsed.password);
-    }
-    if (parsed.username && parsed.username !== "default") {
-      options.username = decodeURIComponent(parsed.username);
-    }
-    if (parsed.pathname && parsed.pathname.length > 1) {
-      options.db = Number(parsed.pathname.substring(1)) || 0;
-    }
-    return options;
-  } catch {
-    return {
-      host: "127.0.0.1",
-      port: 6379,
-      maxRetriesPerRequest: null,
-      enableOfflineQueue: true
-    };
-  }
-}
-
-/**
  * Create a dedicated Redis connection for BullMQ.
  * BullMQ requires `maxRetriesPerRequest: null` and `enableOfflineQueue: true` on worker connections.
  * 
@@ -124,15 +86,14 @@ export const defaultJobOptions = {
 
 export const queueConfig = {
   prefix: config.queuePrefix,
-  defaultJobOptions,
-  getRedisConnectionOptions
+  defaultJobOptions
 };
 
 export default {
   QUEUE_NAMES,
   sanitizeRedisUrl,
   createQueueConnection,
-  getRedisConnectionOptions,
   defaultJobOptions,
   queueConfig
 };
+

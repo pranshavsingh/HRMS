@@ -332,6 +332,18 @@ async function runMigrations() {
           await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_events(status, id)");
           await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_events(status, claimed_until, id)");
           await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox_events(created_at)");
+        } else if (file.startsWith("004_")) {
+          await sqliteDb.run(`
+            CREATE TABLE IF NOT EXISTS consumer_processed_jobs (
+              job_id TEXT NOT NULL,
+              handler_name TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'COMPLETED',
+              result TEXT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY (job_id, handler_name)
+            )
+          `);
+          await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_consumer_processed_at ON consumer_processed_jobs(created_at)");
         } else {
           const statements = parseSqlStatements(content);
           for (let statement of statements) {

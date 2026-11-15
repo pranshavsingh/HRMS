@@ -13,15 +13,18 @@ const IV_LENGTH = 12; // 96 bits standard for GCM
  * Fails closed if the key is missing or not 32 bytes.
  */
 export function getEncryptionKey(explicitKey = null) {
-  let keyStr = explicitKey || config.outboxEncryptionKey || process.env.OUTBOX_ENCRYPTION_KEY;
-  if (!keyStr && process.env.NODE_ENV === "test") {
-    keyStr = "7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852";
-  }
+  const keyStr = explicitKey || config.outboxEncryptionKey || process.env.OUTBOX_ENCRYPTION_KEY;
   if (!keyStr) {
     throw new AppError("Outbox payload encryption failed: OUTBOX_ENCRYPTION_KEY is not configured.", 500);
   }
 
   if (typeof keyStr === "string") {
+    // Reject known insecure placeholders
+    const lower = keyStr.toLowerCase();
+    if (lower.includes("placeholder") || lower.includes("change-me") || lower.includes("example")) {
+      throw new AppError("Outbox payload encryption failed: Insecure placeholder detected in OUTBOX_ENCRYPTION_KEY.", 500);
+    }
+
     // If 64 hex characters (32 bytes encoded in hex)
     if (/^[0-9a-fA-F]{64}$/.test(keyStr)) {
       return Buffer.from(keyStr, "hex");

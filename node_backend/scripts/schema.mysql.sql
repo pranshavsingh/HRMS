@@ -189,3 +189,15 @@ CREATE INDEX IF NOT EXISTS idx_leave_user_dates ON leave_leave(user_id, status, 
 CREATE INDEX IF NOT EXISTS idx_leave_status ON leave_leave(status);
 CREATE INDEX IF NOT EXISTS idx_audit_created_severity ON audit_logs(created_at, severity);
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);
+
+-- Phase 3 Durable Consumer Idempotency
+CREATE TABLE IF NOT EXISTS consumer_processed_jobs (
+  job_id VARCHAR(128) NOT NULL,
+  handler_name VARCHAR(100) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'COMPLETED',
+  result JSON NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (job_id, handler_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE INDEX IF NOT EXISTS idx_consumer_processed_at ON consumer_processed_jobs(created_at);
