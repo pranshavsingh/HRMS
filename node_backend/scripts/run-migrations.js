@@ -75,7 +75,7 @@ async function runMigrations() {
       lockAcquired = true;
       console.log("[Migration] Acquired distributed advisory lock 'hrms_db_migration_lock'");
 
-      // 2. Ensure schema_migrations table exists
+      // 2. Ensure schema_migrations and critical base tables exist
       await conn.query(`
         CREATE TABLE IF NOT EXISTS schema_migrations (
           version VARCHAR(50) PRIMARY KEY,
@@ -83,6 +83,20 @@ async function runMigrations() {
           checksum VARCHAR(64) NOT NULL,
           applied_at DATETIME NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY,
+          user_id BIGINT NULL,
+          username VARCHAR(150) NULL,
+          action VARCHAR(255) NOT NULL,
+          target_id VARCHAR(100) NULL,
+          details TEXT NULL,
+          ip_address VARCHAR(45) NULL,
+          severity VARCHAR(20) NOT NULL DEFAULT 'INFO',
+          created_at DATETIME NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
       `);
 
       // 3. Query existing applied migrations
@@ -216,13 +230,27 @@ async function runMigrations() {
     try {
       console.log("[Migration] Connected to SQLite database:", dbPath);
 
-      // Ensure schema_migrations exists
+      // Ensure schema_migrations and critical base tables exist
       await sqliteDb.run(`
         CREATE TABLE IF NOT EXISTS schema_migrations (
           version TEXT PRIMARY KEY,
           name TEXT NOT NULL,
           checksum TEXT NOT NULL,
           applied_at TEXT NOT NULL
+        )
+      `);
+
+      await sqliteDb.run(`
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NULL,
+          username TEXT NULL,
+          action TEXT NOT NULL,
+          target_id TEXT NULL,
+          details TEXT NULL,
+          ip_address TEXT NULL,
+          severity TEXT NOT NULL DEFAULT 'INFO',
+          created_at TEXT NOT NULL
         )
       `);
 

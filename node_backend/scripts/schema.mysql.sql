@@ -128,6 +128,18 @@ CREATE TABLE IF NOT EXISTS password_reset_otp (
   updated_at DATETIME NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NULL,
+  username VARCHAR(150) NULL,
+  action VARCHAR(255) NOT NULL,
+  target_id VARCHAR(100) NULL,
+  details TEXT NULL,
+  ip_address VARCHAR(45) NULL,
+  severity VARCHAR(20) NOT NULL DEFAULT 'INFO',
+  created_at DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Schema Migrations Ledger Table
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version VARCHAR(50) PRIMARY KEY,
