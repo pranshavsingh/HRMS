@@ -6,21 +6,42 @@ import redisService from "../services/redis.service.js";
 
 /**
  * Authentication Middleware - Validates the JWT and fetches the user (with Redis cache).
+ * Strictly requires Authorization: Bearer <token> header. Rejects URL query-string tokens.
  */
 export async function authenticate(req, res, next) {
   try {
     const authHeader = req.headers.authorization || "";
-    let token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
     
-    if (!token && req.query.token) {
-      token = req.query.token;
-    }
-    
+    // Explicitly reject authentication via URL query parameters (VULN-04 fix)
     if (!token) {
       return next(new AppError("Authentication required", 401));
     }
 
-    const payload = jwt.verify(token, config.jwtSecret);
+    // Explicit algorithm enforcement
+    const payload = jwt.verify(token, config.jwtSecret, {
+      algorithms: ["HS256"]
+    });
+
+    // Enforce token type: refresh tokens cannot be used as access tokens
+    if (payload.type && payload.type !== "access") {
+      return next(new AppError("Invalid token type", 401));
+    }
+
+    // Check Redis token revocation blacklist (if JTI is present)
+    if (payload.jti) {
+      const isBlacklisted = await redisService.get(`token:blacklist:${payload.jti}`);
+      if (isBlacklisted) {
+        return next(new AppError("Token has been revoked", 401));
+      }
+    }
+
+    // Check user-level session revocation timestamp
+    const userRevokedAt = await redisService.get(`user:revoked:${payload.userId}`);
+    if (userRevokedAt && payload.iat && (payload.iat * 1000) < Number(userRevokedAt)) {
+      return next(new AppError("Session revoked. Please login again.", 401));
+    }
+
     const cacheKey = `user:session:${payload.userId}`;
 
     // Fast-path: Check Redis session cache (<0.5ms)
@@ -50,6 +71,7 @@ export async function authenticate(req, res, next) {
     }
 
     req.user = user;
+    req.tokenPayload = payload;
     next();
   } catch (err) {
     return next(new AppError("Invalid token", 401));

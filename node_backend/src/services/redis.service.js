@@ -12,11 +12,14 @@ class RedisService {
   init() {
     try {
       this.client = new Redis(config.redisUrl, {
-        maxRetriesPerRequest: 3,
+        maxRetriesPerRequest: 2,
         enableOfflineQueue: false,
+        lazyConnect: true,
         retryStrategy(times) {
-          const delay = Math.min(times * 200, 2000);
-          return delay;
+          if (times > 2) {
+            return null; // Cease reconnect attempts when offline
+          }
+          return Math.min(times * 150, 600);
         },
       });
 

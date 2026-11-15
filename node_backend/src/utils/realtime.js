@@ -8,17 +8,20 @@ let subClient = null;
 const SSE_CHANNEL = "hrms:sse:events";
 
 try {
-  pubClient = new Redis(config.redisUrl, {
-    maxRetriesPerRequest: 3,
+  const redisOptions = {
+    maxRetriesPerRequest: 1,
     enableOfflineQueue: false,
     lazyConnect: true,
-  });
+    retryStrategy() {
+      return null;
+    }
+  };
 
-  subClient = new Redis(config.redisUrl, {
-    maxRetriesPerRequest: 3,
-    enableOfflineQueue: false,
-    lazyConnect: true,
-  });
+  pubClient = new Redis(config.redisUrl, redisOptions);
+  subClient = new Redis(config.redisUrl, redisOptions);
+
+  pubClient.on("error", () => {});
+  subClient.on("error", () => {});
 
   // Connect clients
   Promise.all([pubClient.connect(), subClient.connect()])
