@@ -7,48 +7,59 @@ let pubClient = null;
 let subClient = null;
 const SSE_CHANNEL = "hrms:sse:events";
 
-try {
-  const redisOptions = {
-    maxRetriesPerRequest: 1,
-    enableOfflineQueue: false,
-    lazyConnect: true,
-    retryStrategy() {
-      return null;
-    }
-  };
+if (process.env.NODE_ENV !== "test") {
+  try {
+    const redisOptions = {
+      maxRetriesPerRequest: 1,
+      enableOfflineQueue: false,
+      lazyConnect: true,
+      retryStrategy() {
+        return null;
+      }
+    };
 
-  pubClient = new Redis(config.redisUrl, redisOptions);
-  subClient = new Redis(config.redisUrl, redisOptions);
+    pubClient = new Redis(config.redisUrl, redisOptions);
+    subClient = new Redis(config.redisUrl, redisOptions);
 
-  pubClient.on("error", () => {});
-  subClient.on("error", () => {});
+    pubClient.on("error", () => {});
+    subClient.on("error", () => {});
 
-  // Connect clients
-  Promise.all([pubClient.connect(), subClient.connect()])
-    .then(() => {
-      logger.info("[Realtime] Redis Pub/Sub initialized successfully for multi-worker SSE");
-      subClient.subscribe(SSE_CHANNEL, (err) => {
-        if (err) {
-          logger.warn("[Realtime] Failed to subscribe to Redis channel %s: %s", SSE_CHANNEL, err.message);
-        }
-      });
-
-      subClient.on("message", (channel, message) => {
-        if (channel === SSE_CHANNEL) {
-          try {
-            const parsed = JSON.parse(message);
-            dispatchLocal(parsed.eventName, parsed.data, parsed.filter);
-          } catch (e) {
-            logger.error("[Realtime] Error processing PubSub message: %s", e.message);
+    // Connect clients
+    Promise.all([pubClient.connect(), subClient.connect()])
+      .then(() => {
+        logger.info("[Realtime] Redis Pub/Sub initialized successfully for multi-worker SSE");
+        subClient.subscribe(SSE_CHANNEL, (err) => {
+          if (err) {
+            logger.warn("[Realtime] Failed to subscribe to Redis channel %s: %s", SSE_CHANNEL, err.message);
           }
-        }
+        });
+
+        subClient.on("message", (channel, message) => {
+          if (channel === SSE_CHANNEL) {
+            try {
+              const parsed = JSON.parse(message);
+              dispatchLocal(parsed.eventName, parsed.data, parsed.filter);
+            } catch (e) {
+              logger.error("[Realtime] Error processing PubSub message: %s", e.message);
+            }
+          }
+        });
+      })
+      .catch((err) => {
+        logger.warn("[Realtime] Redis Pub/Sub offline, operating in single-instance mode: %s", err.message);
       });
-    })
-    .catch((err) => {
-      logger.warn("[Realtime] Redis Pub/Sub offline, operating in single-instance mode: %s", err.message);
-    });
-} catch (e) {
-  logger.warn("[Realtime] Redis setup skipped: %s", e.message);
+  } catch (e) {
+    logger.warn("[Realtime] Redis setup skipped: %s", e.message);
+  }
+}
+
+export function closeRealtime() {
+  if (pubClient) {
+    try { pubClient.disconnect(); } catch (e) {}
+  }
+  if (subClient) {
+    try { subClient.disconnect(); } catch (e) {}
+  }
 }
 
 function dispatchLocal(eventName, data, filter = {}) {

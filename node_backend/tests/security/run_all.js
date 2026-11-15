@@ -31,7 +31,14 @@ async function runSuite(suiteFile) {
       stdio: "inherit",
       env: { ...process.env, NODE_ENV: "test" }
     });
+
+    const timer = setTimeout(() => {
+      console.error(`[TIMEOUT] Suite timed out after 45s: ${suiteFile}`);
+      child.kill("SIGKILL");
+    }, 45000);
+
     child.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) {
         console.log(`[PASS] Suite passed: ${suiteFile}`);
         totalPassed++;
