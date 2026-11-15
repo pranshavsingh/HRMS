@@ -49,8 +49,14 @@ class StorageService {
       return;
     }
 
-    // Fallback: Delete legacy local file from disk
-    const absolutePath = path.resolve(process.cwd(), config.mediaRoot, dbPath);
+    // Fallback: Delete legacy local file from disk with strict path traversal boundary check
+    const rootDir = path.resolve(process.cwd(), config.mediaRoot);
+    const absolutePath = path.resolve(rootDir, dbPath);
+    if (!absolutePath.startsWith(rootDir + path.sep) && absolutePath !== rootDir) {
+      logger.warn("[Security] Path traversal attempt blocked in storage delete: %s", dbPath);
+      return;
+    }
+
     try {
       if (fs.existsSync(absolutePath)) {
         await fs.promises.unlink(absolutePath);
