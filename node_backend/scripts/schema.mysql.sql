@@ -101,8 +101,11 @@ CREATE TABLE IF NOT EXISTS accounts_employeelocation (
 CREATE TABLE IF NOT EXISTS accounts_refreshtoken (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   user_id BIGINT NOT NULL,
+  family_id VARCHAR(64) NULL,
   token_hash VARCHAR(255) NOT NULL UNIQUE,
   expires_at DATETIME NOT NULL,
+  is_revoked BOOLEAN NOT NULL DEFAULT 0,
+  replaced_by_hash VARCHAR(255) NULL,
   created_at DATETIME NOT NULL,
   device_id VARCHAR(255) NULL,
   device_name VARCHAR(255) NULL,
@@ -112,11 +115,27 @@ CREATE TABLE IF NOT EXISTS accounts_refreshtoken (
   CONSTRAINT fk_refresh_user FOREIGN KEY (user_id) REFERENCES accounts_user(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS password_reset_otp (
+  email VARCHAR(254) PRIMARY KEY,
+  otp_hash VARCHAR(128) NOT NULL,
+  reset_token_hash VARCHAR(128) NULL,
+  expires_at DATETIME NOT NULL,
+  verified INTEGER NOT NULL DEFAULT 0,
+  verified_at DATETIME NULL,
+  consumed_at DATETIME NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Enterprise Scale Performance Indexes
 CREATE INDEX IF NOT EXISTS idx_user_role_active ON accounts_user(role, is_active, deleted_at);
 CREATE INDEX IF NOT EXISTS idx_profile_manager ON accounts_employeeprofile(manager_id, is_active_employee);
 CREATE INDEX IF NOT EXISTS idx_loc_user_primary ON accounts_employeelocation(user_id, is_primary);
 CREATE INDEX IF NOT EXISTS idx_refresh_user_expiry ON accounts_refreshtoken(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_refresh_family ON accounts_refreshtoken(family_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_token_revoked ON accounts_refreshtoken(token_hash, is_revoked);
+CREATE INDEX IF NOT EXISTS idx_otp_email_verified ON password_reset_otp(email, verified);
 CREATE INDEX IF NOT EXISTS idx_att_user_date ON attendance_attendance(user_id, date);
 CREATE INDEX IF NOT EXISTS idx_att_date_status ON attendance_attendance(date, status);
 CREATE INDEX IF NOT EXISTS idx_att_user_open ON attendance_attendance(user_id, punch_out_time, punch_in_status);

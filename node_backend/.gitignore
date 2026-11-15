@@ -5,3 +5,5 @@ npm-debug.log*
 /src/uploads/documents/*
 backups/
 *.sql
+!scripts/**/*.sql
+!scripts/*.sql

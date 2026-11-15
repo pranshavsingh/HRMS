@@ -12,8 +12,11 @@ async function ensureRefreshTokenTable() {
       CREATE TABLE IF NOT EXISTS accounts_refreshtoken (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         user_id BIGINT NOT NULL,
+        family_id VARCHAR(64) NULL,
         token_hash VARCHAR(255) NOT NULL UNIQUE,
         expires_at DATETIME NOT NULL,
+        is_revoked BOOLEAN NOT NULL DEFAULT 0,
+        replaced_by_hash VARCHAR(255) NULL,
         created_at DATETIME NOT NULL,
         device_id VARCHAR(255) NULL,
         device_name VARCHAR(255) NULL,
@@ -23,13 +26,32 @@ async function ensureRefreshTokenTable() {
         CONSTRAINT fk_refresh_user FOREIGN KEY (user_id) REFERENCES accounts_user(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+    try {
+      const cols = await db.all("SHOW COLUMNS FROM accounts_refreshtoken LIKE 'family_id'");
+      if (cols.length === 0) {
+        await db.run("ALTER TABLE accounts_refreshtoken ADD COLUMN family_id VARCHAR(64) NULL AFTER user_id");
+      }
+      const colsRev = await db.all("SHOW COLUMNS FROM accounts_refreshtoken LIKE 'is_revoked'");
+      if (colsRev.length === 0) {
+        await db.run("ALTER TABLE accounts_refreshtoken ADD COLUMN is_revoked BOOLEAN NOT NULL DEFAULT 0 AFTER expires_at");
+      }
+      const colsRep = await db.all("SHOW COLUMNS FROM accounts_refreshtoken LIKE 'replaced_by_hash'");
+      if (colsRep.length === 0) {
+        await db.run("ALTER TABLE accounts_refreshtoken ADD COLUMN replaced_by_hash VARCHAR(255) NULL AFTER is_revoked");
+      }
+    } catch (err) {
+      // Ignored if table does not support SHOW COLUMNS or already altered
+    }
   } else {
     await db.run(`
       CREATE TABLE IF NOT EXISTS accounts_refreshtoken (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
+        family_id TEXT NULL,
         token_hash TEXT NOT NULL UNIQUE,
         expires_at DATETIME NOT NULL,
+        is_revoked INTEGER NOT NULL DEFAULT 0,
+        replaced_by_hash TEXT NULL,
         created_at DATETIME NOT NULL,
         device_id TEXT NULL,
         device_name TEXT NULL,
@@ -39,15 +61,89 @@ async function ensureRefreshTokenTable() {
         FOREIGN KEY (user_id) REFERENCES accounts_user(id) ON DELETE CASCADE
       );
     `);
+    try {
+      const pragma = await db.all("PRAGMA table_info(accounts_refreshtoken)");
+      const colNames = pragma.map(c => c.name);
+      if (!colNames.includes("family_id")) {
+        await db.run("ALTER TABLE accounts_refreshtoken ADD COLUMN family_id TEXT NULL");
+      }
+      if (!colNames.includes("is_revoked")) {
+        await db.run("ALTER TABLE accounts_refreshtoken ADD COLUMN is_revoked INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!colNames.includes("replaced_by_hash")) {
+        await db.run("ALTER TABLE accounts_refreshtoken ADD COLUMN replaced_by_hash TEXT NULL");
+      }
+    } catch (err) {
+      // Ignored
+    }
   }
   refreshTokenTableReady = true;
 }
 
 async function ensureOtpTable() {
   if (otpTableReady) return;
-  await db.run(
-    "CREATE TABLE IF NOT EXISTS password_reset_otp (email VARCHAR(254) PRIMARY KEY, otp_hash VARCHAR(128) NOT NULL, expires_at DATETIME NOT NULL, verified INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
-  );
+  if (config.dbClient === "mysql") {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS password_reset_otp (
+        email VARCHAR(254) PRIMARY KEY,
+        otp_hash VARCHAR(128) NOT NULL,
+        reset_token_hash VARCHAR(128) NULL,
+        expires_at DATETIME NOT NULL,
+        verified INTEGER NOT NULL DEFAULT 0,
+        verified_at DATETIME NULL,
+        consumed_at DATETIME NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    try {
+      const cols = await db.all("SHOW COLUMNS FROM password_reset_otp LIKE 'reset_token_hash'");
+      if (cols.length === 0) {
+        await db.run("ALTER TABLE password_reset_otp ADD COLUMN reset_token_hash VARCHAR(128) NULL AFTER otp_hash");
+      }
+      const colsVer = await db.all("SHOW COLUMNS FROM password_reset_otp LIKE 'verified_at'");
+      if (colsVer.length === 0) {
+        await db.run("ALTER TABLE password_reset_otp ADD COLUMN verified_at DATETIME NULL AFTER verified");
+      }
+      const colsCon = await db.all("SHOW COLUMNS FROM password_reset_otp LIKE 'consumed_at'");
+      if (colsCon.length === 0) {
+        await db.run("ALTER TABLE password_reset_otp ADD COLUMN consumed_at DATETIME NULL AFTER verified_at");
+      }
+    } catch (err) {
+      // Ignored
+    }
+  } else {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS password_reset_otp (
+        email TEXT PRIMARY KEY,
+        otp_hash TEXT NOT NULL,
+        reset_token_hash TEXT NULL,
+        expires_at DATETIME NOT NULL,
+        verified INTEGER NOT NULL DEFAULT 0,
+        verified_at DATETIME NULL,
+        consumed_at DATETIME NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME NOT NULL
+      );
+    `);
+    try {
+      const pragma = await db.all("PRAGMA table_info(password_reset_otp)");
+      const colNames = pragma.map(c => c.name);
+      if (!colNames.includes("reset_token_hash")) {
+        await db.run("ALTER TABLE password_reset_otp ADD COLUMN reset_token_hash TEXT NULL");
+      }
+      if (!colNames.includes("verified_at")) {
+        await db.run("ALTER TABLE password_reset_otp ADD COLUMN verified_at DATETIME NULL");
+      }
+      if (!colNames.includes("consumed_at")) {
+        await db.run("ALTER TABLE password_reset_otp ADD COLUMN consumed_at DATETIME NULL");
+      }
+    } catch (err) {
+      // Ignored
+    }
+  }
   otpTableReady = true;
 }
 
@@ -251,10 +347,19 @@ export const accountsRepository = {
     );
   },
 
-  async verifyOtp(email, tx = null) {
+  async verifyOtp(email, resetTokenHash = null, tx = null) {
     await ensureOtpTable();
     await db.run(
-      "UPDATE password_reset_otp SET verified = 1, updated_at = NOW() WHERE lower(email)=lower(?)",
+      "UPDATE password_reset_otp SET verified = 1, reset_token_hash = ?, verified_at = NOW(), updated_at = NOW() WHERE lower(email)=lower(?)",
+      [resetTokenHash, email],
+      tx
+    );
+  },
+
+  async consumeOtp(email, tx = null) {
+    await ensureOtpTable();
+    await db.run(
+      "UPDATE password_reset_otp SET consumed_at = NOW(), updated_at = NOW() WHERE lower(email)=lower(?)",
       [email],
       tx
     );
@@ -284,13 +389,32 @@ export const accountsRepository = {
     await db.run("DELETE FROM accounts_employeelocation WHERE user_id=?", [userId], tx);
   },
 
-  async insertRefreshToken(userId, tokenHash, expiresAt, deviceInfo = {}, tx = null) {
+  async insertRefreshToken(userId, tokenHash, expiresAt, deviceInfo = {}, familyId = null, tx = null) {
     await ensureRefreshTokenTable();
     const { deviceId = null, deviceName = null, platform = null, ipAddress = null } = deviceInfo;
     const now = new Date();
     await db.run(
-      "INSERT INTO accounts_refreshtoken (user_id, token_hash, expires_at, created_at, device_id, device_name, platform, ip_address, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [userId, tokenHash, expiresAt, now, deviceId, deviceName, platform, ipAddress, now],
+      "INSERT INTO accounts_refreshtoken (user_id, family_id, token_hash, expires_at, is_revoked, replaced_by_hash, created_at, device_id, device_name, platform, ip_address, last_activity) VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?)",
+      [userId, familyId, tokenHash, expiresAt, now, deviceId, deviceName, platform, ipAddress, now],
+      tx
+    );
+  },
+
+  async markRefreshTokenRevoked(tokenHash, replacedByHash = null, tx = null) {
+    await ensureRefreshTokenTable();
+    await db.run(
+      "UPDATE accounts_refreshtoken SET is_revoked = 1, replaced_by_hash = ?, last_activity = NOW() WHERE token_hash = ?",
+      [replacedByHash, tokenHash],
+      tx
+    );
+  },
+
+  async revokeRefreshTokenFamily(familyId, tx = null) {
+    if (!familyId) return;
+    await ensureRefreshTokenTable();
+    await db.run(
+      "UPDATE accounts_refreshtoken SET is_revoked = 1 WHERE family_id = ?",
+      [familyId],
       tx
     );
   },
