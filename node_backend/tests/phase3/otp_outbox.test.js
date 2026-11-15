@@ -155,7 +155,7 @@ describe("P3.3 — Transactional OTP Outbox & AES-256-GCM Encryption Test Suite"
 
     // Simulated job with old superseded hash
     const fakeJobSuperseded = {
-      id: "job_superseded",
+      id: `job_superseded_${unique}`,
       data: {
         outboxEventId: 999,
         eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
@@ -173,7 +173,7 @@ describe("P3.3 — Transactional OTP Outbox & AES-256-GCM Encryption Test Suite"
     await db.run("UPDATE password_reset_otp SET consumed_at = NOW() WHERE email = ?", [email]);
 
     const fakeJobConsumed = {
-      id: "job_consumed",
+      id: `job_consumed_${unique}`,
       data: {
         outboxEventId: 1000,
         eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
@@ -189,5 +189,6 @@ describe("P3.3 — Transactional OTP Outbox & AES-256-GCM Encryption Test Suite"
 
     // Cleanup
     await db.run("DELETE FROM password_reset_otp WHERE email = ?", [email]);
+    await db.run("DELETE FROM consumer_processed_jobs WHERE job_id LIKE ?", [`%_${unique}`]);
   });
 });

@@ -66,6 +66,46 @@ export function createQueueConnection(role = "client") {
 }
 
 /**
+ * Return Redis connection options object for BullMQ Queue and Worker instances.
+ * When options are provided instead of an instantiated client, BullMQ manages
+ * connection lifecycles automatically upon close().
+ * 
+ * @returns {object} ioredis connection options
+ */
+export function getRedisConnectionOptions() {
+  const rawUrl = config.queueRedisUrl || config.redisUrl || "redis://127.0.0.1:6379";
+  try {
+    const parsed = new URL(rawUrl);
+    const opts = {
+      host: parsed.hostname || "127.0.0.1",
+      port: Number(parsed.port || 6379),
+      maxRetriesPerRequest: null,
+      enableOfflineQueue: true,
+      connectTimeout: 10000
+    };
+    if (parsed.password) {
+      opts.password = decodeURIComponent(parsed.password);
+    }
+    if (parsed.username && parsed.username !== "default") {
+      opts.username = decodeURIComponent(parsed.username);
+    }
+    if (parsed.pathname && parsed.pathname.length > 1) {
+      const db = Number(parsed.pathname.slice(1));
+      if (!Number.isNaN(db)) opts.db = db;
+    }
+    return opts;
+  } catch {
+    return {
+      host: "127.0.0.1",
+      port: 6379,
+      maxRetriesPerRequest: null,
+      enableOfflineQueue: true,
+      connectTimeout: 10000
+    };
+  }
+}
+
+/**
  * Standard Default Job Options for Durable Enqueueing
  */
 export const defaultJobOptions = {
@@ -93,6 +133,7 @@ export default {
   QUEUE_NAMES,
   sanitizeRedisUrl,
   createQueueConnection,
+  getRedisConnectionOptions,
   defaultJobOptions,
   queueConfig
 };
