@@ -5,9 +5,9 @@
 **Node.js Runtime:** `v22.23.4`  
 **Database:** MySQL 8.0 (Hostinger Cloud `srv999.hstgr.io`) / MySQL 8.0 (GitHub Actions CI container)  
 **Redis:** Redis 7 (GitHub Actions CI container)  
-**GitHub Actions CI Run:** [Run 43750068203](https://github.com/pranshavsingh/HRMS/actions/runs/43750068203) (Status: `completed`, Conclusion: `success`)  
-**Commit Verified:** `db0e26f71def8f1d53647ce6e71e72a3bcc76bec`  
-**Total Tests Executed:** 74 tests across 12 distinct test suites  
+**GitHub Actions CI Run:** [Run 43752557123](https://github.com/pranshavsingh/HRMS/actions/runs/43752557123) (Status: `completed`, Conclusion: `success`)  
+**Commit Verified:** `5b3a28b8e05d33f7c9e0d1d2345e5461979ad2c8`  
+**Total Tests Executed:** 75 tests across 12 distinct test suites  
 **Total Failures:** 0  
 **Overall Status:** **100% PASS**
 
@@ -17,7 +17,7 @@
 
 ```
 ====================================================================================================
- TEST SUITE SUITE OVERVIEW                                   RUN    PASS   FAIL   SKIP   RESULT
+ TEST SUITE OVERVIEW                                         RUN    PASS   FAIL   SKIP   RESULT
 ====================================================================================================
  Phase 1: Authentication & Password Policy Security          7      7      0      0      PASS
  Phase 1: JWT, RTR & Session Family Reuse Protection         6      6      0      0      PASS
@@ -30,12 +30,12 @@
  Phase 3: Transactional Outbox Repository & Dispatcher       6      6      0      0      PASS
  Phase 3: BullMQ Queue Producer & Consumer                   5      5      0      3*     PASS
  Phase 3: Transactional OTP Outbox & AES-256-GCM Encryption 5      5      0      0      PASS
- Phase 3: Failure Injection & Edge Case Resilience           4      4      0      0      PASS
+ Phase 3: Failure Injection & Edge Case Resilience           5      5      0      0      PASS
 ====================================================================================================
- TOTAL AUTOMATED REGRESSION                                  74     74     0      3*     PASS
+ TOTAL AUTOMATED REGRESSION                                  75     75     0      3*     PASS
 ====================================================================================================
 ```
-*\*Note: 3 live Redis integration tests in `queue.test.js` conditionally skip when local Redis is offline and are enforced as mandatory in CI (`process.env.CI`).*
+*\*Note: 3 live Redis integration tests in `queue.test.js` conditionally skip when local Redis is offline and are enforced as mandatory in CI (`process.env.CI`). In GitHub Actions CI (Run 43752557123), all 5 queue tests executed and passed.*
 
 ---
 
@@ -160,28 +160,34 @@ TAP version 13
     # Subtest: should preserve outbox records in database when queue publication fails (Zero Data Loss)
     ok 1 - should preserve outbox records in database when queue publication fails (Zero Data Loss)
       ---
-      duration_ms: 1245.354
+      duration_ms: 1304.597
       type: 'test'
       ...
-    # Subtest: should safely recover from simulated dispatcher crash after claim
-    ok 2 - should safely recover from simulated dispatcher crash after claim
+    # Subtest: should enforce strict claim fencing when worker lease has expired (Zombie worker fenced out)
+    ok 2 - should enforce strict claim fencing when worker lease has expired (Zombie worker fenced out)
       ---
-      duration_ms: 1371.4497
+      duration_ms: 1270.4436
       type: 'test'
       ...
-    # Subtest: should quarantine malformed or corrupted encrypted payloads without crashing worker
-    ok 3 - should quarantine malformed or corrupted encrypted payloads without crashing worker
+    # Subtest: should enforce durable consumer idempotency across duplicate job deliveries
+    ok 3 - should enforce durable consumer idempotency across duplicate job deliveries
       ---
-      duration_ms: 2.092
+      duration_ms: 1115.6539
+      type: 'test'
+      ...
+    # Subtest: should quarantine poison payloads to DEAD_LETTER and provide operator inspection & replay
+    ok 4 - should quarantine poison payloads to DEAD_LETTER and provide operator inspection & replay
+      ---
+      duration_ms: 1292.2511
       type: 'test'
       ...
     # Subtest: should guarantee zero duplicate claims across multiple concurrent dispatchers
-    ok 4 - should guarantee zero duplicate claims across multiple concurrent dispatchers
+    ok 5 - should guarantee zero duplicate claims across multiple concurrent dispatchers
       ---
-      duration_ms: 1679.4586
+      duration_ms: 2071.412
       type: 'test'
       ...
-    1..4
+    1..5
 ok 1 - P3.4 — Failure Injection & Edge Case Resilience Test Suite
 ```
 
