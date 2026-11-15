@@ -1039,6 +1039,14 @@ export const attendanceService = {
       const detailStart = queryDetailStart || monthStartStr;
       const detailEnd = queryDetailEnd || monthEndStr;
 
+      // IDOR Scope Check: Managers can only view details of their direct reportees
+      if (!isGlobalViewer) {
+        const empProfile = await accountsRepository.findProfileByUserId(queryEmployeeId);
+        if (!empProfile || Number(empProfile.manager_id) !== Number(managerId)) {
+          throw new AppError("You do not have permission to view attendance for this employee", 403);
+        }
+      }
+
       const emp = await accountsRepository.findById(queryEmployeeId);
       if (emp) {
         const empAttendance = await attendanceRepository.getAttendanceByEmployeeIdAndRange(queryEmployeeId, detailStart, detailEnd);
