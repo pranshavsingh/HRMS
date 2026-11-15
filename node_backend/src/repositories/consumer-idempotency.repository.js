@@ -290,6 +290,31 @@ export const consumerIdempotencyRepository = {
       logger.info("[ConsumerIdempotency] Released %d expired consumer claims back to FAILED.", res.changes);
     }
     return res.changes;
+  },
+
+  /**
+   * Purge old completed consumer records according to enterprise retention policy.
+   * Only deletes records with status 'COMPLETED' older than retentionDays.
+   * 
+   * @param {number} [retentionDays=7] - Number of days to retain completed job receipts
+   * @returns {Promise<number>} Number of purged records
+   */
+  async purgeOldCompletedJobs(retentionDays = 7) {
+    const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+    const cutoffExpr = isMysql
+      ? `DATE_SUB(NOW(), INTERVAL ${Number(retentionDays)} DAY)`
+      : `datetime('now', '-${Number(retentionDays)} days')`;
+
+    const sql = `
+      DELETE FROM consumer_processed_jobs
+      WHERE status = 'COMPLETED' AND updated_at < ${cutoffExpr}
+    `;
+
+    const res = await db.run(sql);
+    if (res.changes > 0) {
+      logger.info("[ConsumerIdempotency] Purged %d completed consumer jobs older than %d days.", res.changes, retentionDays);
+    }
+    return res.changes;
   }
 };
 

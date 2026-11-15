@@ -13,7 +13,8 @@ const suites = [
   "phase3/queue.test.js",
   "phase3/otp_outbox.test.js",
   "phase3/failure_injection.test.js",
-  "phase3/worker_lifecycle.test.js"
+  "phase3/worker_lifecycle.test.js",
+  "phase3/dead_letter_replay.test.js"
 ];
 
 let totalPassed = 0;

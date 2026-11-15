@@ -200,7 +200,7 @@ describe("P3.4 — Failure Injection & Edge Case Resilience Test Suite", () => {
 
     // Operator replay: retryDeadLetterEvent moves it back to PENDING for re-processing
     const replayed = await outboxRepository.retryDeadLetterEvent(id);
-    assert.equal(replayed, true, "Operator retry must successfully update record");
+    assert.ok(replayed && (replayed === true || replayed.success === true), "Operator retry must successfully update record");
 
     const replayedRecord = await outboxRepository.findById(id);
     assert.equal(replayedRecord.status, "PENDING", "Replayed event must return to PENDING");

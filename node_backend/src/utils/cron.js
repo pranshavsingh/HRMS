@@ -142,6 +142,22 @@ export function initCron() {
     });
   });
 
+  // Job 5: Daily automated cleanup of published outbox events and completed consumer jobs at 3:00 AM (7-day retention)
+  cron.schedule("0 3 * * *", async () => {
+    await runWithLock("outbox_retention_cleanup", 1800, async () => {
+      logger.info("CRON: Initiating daily retention purge for published outbox & consumer events...");
+      try {
+        const { default: outboxRepository } = await import("../repositories/outbox.repository.js");
+        const { default: consumerIdempotencyRepository } = await import("../repositories/consumer-idempotency.repository.js");
+        const outboxPurged = await outboxRepository.purgeOldPublishedEvents(7);
+        const consumerPurged = await consumerIdempotencyRepository.purgeOldCompletedJobs(7);
+        logger.info("CRON: Retention cleanup complete. Purged %d outbox events, %d consumer receipts.", outboxPurged, consumerPurged);
+      } catch (err) {
+        logger.error("CRON: Retention cleanup failed: %s", err.message);
+      }
+    });
+  });
+
   logger.info("Background cron jobs scheduled successfully.");
 }
 

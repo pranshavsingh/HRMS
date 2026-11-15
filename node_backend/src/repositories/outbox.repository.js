@@ -240,6 +240,7 @@ export const outboxRepository = {
 
   /**
    * Fetch dead-lettered events for operator inspection.
+   * Never exposes raw or encrypted payloads to avoid credential leakage.
    */
   async getDeadLetterEvents(limit = 50, offset = 0) {
     return db.all(
@@ -253,25 +254,110 @@ export const outboxRepository = {
   },
 
   /**
-   * Allow operators to replay/retry a dead-lettered event by moving it back to PENDING.
+   * Allow authorized operators to replay/retry a dead-lettered event by moving it back to PENDING.
+   * Generates a permanent audit log entry in audit_logs to preserve full forensic accountability.
+   * Strictly prevents replaying already-PUBLISHED events to eliminate duplicate business operations.
+   * 
+   * @param {number|string} id - Outbox event identifier
+   * @param {string} [operatorUsername="system"] - Username of the operator initiating replay
+   * @param {string} [reason="Manual operator replay"] - Reason for replay
+   * @returns {Promise<{success: boolean, reason?: string, replayedAt?: Date, eventId?: number}>}
    */
-  async retryDeadLetterEvent(id) {
+  async retryDeadLetterEvent(id, operatorUsername = "system", reason = "Manual operator replay") {
     const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
     const nowExpr = isMysql ? "NOW()" : "datetime('now')";
 
+    const event = await this.findById(id);
+    if (!event) {
+      return { success: false, reason: "EVENT_NOT_FOUND" };
+    }
+
+    if (event.status === "PUBLISHED") {
+      logger.warn(
+        "[Outbox:Replay] Rejected replay attempt for OutboxID [%s]: Event is already PUBLISHED (Idempotency Protection).",
+        id
+      );
+      return { success: false, reason: "ALREADY_PUBLISHED" };
+    }
+
+    if (event.status !== "DEAD_LETTER") {
+      logger.warn(
+        "[Outbox:Replay] Rejected replay attempt for OutboxID [%s]: Status is '%s' (Only DEAD_LETTER events are eligible).",
+        id,
+        event.status
+      );
+      return { success: false, reason: `INELIGIBLE_STATUS_${event.status}` };
+    }
+
+    return db.transaction(async (tx) => {
+      const sql = `
+        UPDATE outbox_events 
+        SET status = 'PENDING', 
+            retry_count = 0, 
+            last_error = NULL, 
+            claimed_by = NULL, 
+            claimed_until = NULL,
+            updated_at = ${nowExpr}
+        WHERE id = ? AND status = 'DEAD_LETTER'
+      `;
+
+      const result = await db.run(sql, [id], tx);
+      if (result.changes === 0) {
+        return { success: false, reason: "CONCURRENT_STATUS_CHANGE" };
+      }
+
+      // Record operator replay action in audit_logs
+      const auditSql = `
+        INSERT INTO audit_logs (
+          username, action, target_id, details, severity, created_at
+        ) VALUES (?, 'OUTBOX_DEAD_LETTER_REPLAY', ?, ?, 'WARNING', ${nowExpr})
+      `;
+
+      const auditDetails = JSON.stringify({
+        operatorReason: reason,
+        previousError: event.last_error,
+        previousRetryCount: event.retry_count,
+        eventType: event.event_type,
+        aggregateType: event.aggregate_type,
+        aggregateId: event.aggregate_id
+      });
+
+      await db.run(auditSql, [operatorUsername, String(id), auditDetails], tx);
+
+      logger.info(
+        "[Outbox:Replay] Operator [%s] replayed Dead-Letter OutboxID [%s] back to PENDING. Reason: %s",
+        operatorUsername,
+        id,
+        reason
+      );
+
+      return { success: true, replayedAt: new Date(), eventId: Number(id) };
+    });
+  },
+
+  /**
+   * Purge old published events according to enterprise retention policy.
+   * Only deletes events with status 'PUBLISHED' older than the retention threshold.
+   * 
+   * @param {number} [retentionDays=7] - Number of days to retain published events
+   * @returns {Promise<number>} Number of purged events
+   */
+  async purgeOldPublishedEvents(retentionDays = 7) {
+    const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+    const cutoffExpr = isMysql
+      ? `DATE_SUB(NOW(), INTERVAL ${Number(retentionDays)} DAY)`
+      : `datetime('now', '-${Number(retentionDays)} days')`;
+
     const sql = `
-      UPDATE outbox_events 
-      SET status = 'PENDING', 
-          retry_count = 0, 
-          last_error = NULL, 
-          claimed_by = NULL, 
-          claimed_until = NULL,
-          updated_at = ${nowExpr}
-      WHERE id = ? AND status = 'DEAD_LETTER'
+      DELETE FROM outbox_events
+      WHERE status = 'PUBLISHED' AND updated_at < ${cutoffExpr}
     `;
 
-    const result = await db.run(sql, [id]);
-    return result.changes > 0;
+    const res = await db.run(sql);
+    if (res.changes > 0) {
+      logger.info("[Outbox] Purged %d published events older than %d days.", res.changes, retentionDays);
+    }
+    return res.changes;
   },
 
   /**
