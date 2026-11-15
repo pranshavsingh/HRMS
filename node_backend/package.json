@@ -14,7 +14,8 @@
     "test:pagination": "node --test tests/pagination/pagination.test.js",
     "test:performance": "node --test tests/performance/load_simulation.test.js",
     "test:phase2": "node tests/run_phase2.js",
-    "test:all": "npm run test:security && npm run test:phase2",
+    "test:phase3": "node tests/run_phase3.js",
+    "test:all": "npm run test:security && npm run test:phase2 && npm run test:phase3",
     "check": "node --check src/server.js && node --check src/worker.js",
     "db:init:mysql": "node scripts/init-mysql.js",
     "db:migrate": "node scripts/run-migrations.js",
@@ -22,6 +23,7 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "bullmq": "^6.7.6",
     "cloudinary": "^2.10.0",
     "compression": "^1.7.4",
     "cors": "^2.8.5",

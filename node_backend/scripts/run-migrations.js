@@ -310,6 +310,28 @@ async function runMigrations() {
             await sqliteDb.run("ALTER TABLE password_reset_otp ADD COLUMN consumed_at DATETIME NULL");
           }
           await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_otp_email_verified ON password_reset_otp(email, verified)");
+        } else if (file.startsWith("003_")) {
+          await sqliteDb.run(`
+            CREATE TABLE IF NOT EXISTS outbox_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              event_type TEXT NOT NULL,
+              aggregate_type TEXT NOT NULL,
+              aggregate_id TEXT NOT NULL,
+              payload TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL DEFAULT 'PENDING',
+              retry_count INTEGER NOT NULL DEFAULT 0,
+              claimed_by TEXT NULL,
+              claimed_until TEXT NULL,
+              last_error TEXT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              published_at TEXT NULL,
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+          `);
+          await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_events(status, id)");
+          await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_events(status, claimed_until, id)");
+          await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox_events(created_at)");
         } else {
           const statements = parseSqlStatements(content);
           for (let statement of statements) {

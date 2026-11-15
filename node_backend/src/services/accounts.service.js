@@ -5,7 +5,8 @@ import auditRepository from "../repositories/audit.repository.js";
 import { realtimeManager } from "../utils/realtime.js";
 import auditService from "./audit.service.js";
 import storageService from "./storage.service.js";
-import queueService from "./queue.service.js";
+import outboxRepository from "../repositories/outbox.repository.js";
+import { encryptPayload } from "../utils/crypto.js";
 import cloudinaryService from "./cloudinary.service.js";
 import redisService from "./redis.service.js";
 import { config } from "../config/env.js";
@@ -308,13 +309,28 @@ export const accountsService = {
     const otp = makeOtp();
     const otpHash = hashOtp(user.email.toLowerCase(), otp);
     const expires = expiryDate(config.otpExpiryMinutes);
+    const idempotencyKey = `otp_request:${user.email.toLowerCase()}:${otpHash}`;
 
-    await accountsRepository.deleteOtpByEmail(user.email);
-    await accountsRepository.insertOtp(user.email, otpHash, expires);
+    // Encrypt OTP payload with authenticated AES-256-GCM
+    const encryptedPayload = encryptPayload({
+      email: user.email.toLowerCase(),
+      otp,
+      otpHash,
+      expiresAt: expires.toISOString(),
+      userId: user.id
+    });
 
-    // Queue email sending asynchronously
-    await queueService.add("Send Password Reset OTP Email", async () => {
-      await sendOtpEmail(user.email, otp);
+    // Transactionally persist OTP hash and outbox event atomically
+    await db.transaction(async (tx) => {
+      await accountsRepository.deleteOtpByEmail(user.email, tx);
+      await accountsRepository.insertOtp(user.email, otpHash, expires, tx);
+      await outboxRepository.createEvent({
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        aggregateType: "User",
+        aggregateId: user.id,
+        payload: encryptedPayload,
+        idempotencyKey
+      }, tx);
     });
 
     return { message: "If this email exists, OTP has been sent." };

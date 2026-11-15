@@ -1,42 +1,39 @@
 import logger from "../utils/logger.js";
 
-class QueueService {
+/**
+ * @deprecated
+ * LEGACY IN-MEMORY QUEUE SERVICE (REPLACED IN PHASE 3 M3.2)
+ * 
+ * All background jobs must now be processed via BullMQ and the Transactional Outbox pattern.
+ * This class is preserved solely for backward compatibility with external test mocks.
+ * It does NOT execute production work in memory.
+ */
+class DeprecatedQueueService {
   constructor() {
     this.jobs = [];
     this.isProcessing = false;
   }
 
   /**
-   * Add a job to the queue.
-   * @param {string} name - Name of the job / action
-   * @param {function} handler - The async work function
+   * @deprecated
    */
-  async add(name, handler) {
-    logger.info("Adding job to queue: %s", name);
-    this.jobs.push({ name, handler });
-    
-    // Execute asynchronously to avoid blocking the current thread
-    setImmediate(() => this.processQueue());
+  async add(name) {
+    logger.warn(
+      "[DEPRECATION WARNING] Legacy queueService.add() called for '%s'. Background jobs must use BullMQ and Outbox.",
+      name
+    );
+    throw new Error(
+      `DeprecatedQueueService: In-memory queueing is disabled in Phase 3. Use outboxRepository or queueProducerService instead.`
+    );
   }
 
+  /**
+   * @deprecated
+   */
   async processQueue() {
-    if (this.isProcessing) return;
-    this.isProcessing = true;
-
-    while (this.jobs.length > 0) {
-      const job = this.jobs.shift();
-      try {
-        logger.info("Processing background job: %s", job.name);
-        await job.handler();
-        logger.info("Job completed successfully: %s", job.name);
-      } catch (err) {
-        logger.error("Job failed: %s. Error: %s", job.name, err.message);
-      }
-    }
-
-    this.isProcessing = false;
+    logger.warn("[DEPRECATION WARNING] Legacy queueService.processQueue() called. Ignored.");
   }
 }
 
-export const queueService = new QueueService();
+export const queueService = new DeprecatedQueueService();
 export default queueService;

@@ -29,6 +29,15 @@ export const config = {
   cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET || "",
   cloudinaryAttendancePreset: process.env.CLOUDINARY_ATTENDANCE_PRESET || "attendance_preset",
   cloudinaryDocumentsPreset: process.env.CLOUDINARY_DOCUMENTS_PRESET || "documents_preset",
+
+  // Phase 3 — Distributed Queue & Outbox Configuration
+  queueRedisUrl: process.env.QUEUE_REDIS_URL || process.env.REDIS_URL || "redis://127.0.0.1:6379",
+  queuePrefix: process.env.QUEUE_PREFIX || "hrms",
+  queueDefaultAttempts: Number(process.env.QUEUE_DEFAULT_ATTEMPTS || 5),
+  queueDefaultBackoffMs: Number(process.env.QUEUE_DEFAULT_BACKOFF_MS || 1000),
+  queueJobRemoveOnComplete: Number(process.env.QUEUE_JOB_REMOVE_ON_COMPLETE || 100),
+  queueJobRemoveOnFail: Number(process.env.QUEUE_JOB_REMOVE_ON_FAIL || 500),
+  outboxEncryptionKey: process.env.OUTBOX_ENCRYPTION_KEY || "",
 };
 
 export function validateProductionEnv(env = process.env) {
@@ -61,6 +70,12 @@ export function validateProductionEnv(env = process.env) {
   const corsOrigin = env.CORS_ORIGIN || "";
   if (!corsOrigin || corsOrigin.trim() === "*" || corsOrigin.includes("*")) {
     errors.push("CORS_ORIGIN must be explicitly configured with allowed domain(s) in production. Wildcards (*) are strictly forbidden.");
+  }
+
+  // 6. Outbox Payload Encryption Key Validation (if enabled/configured in production)
+  const outboxKey = env.OUTBOX_ENCRYPTION_KEY || "";
+  if (outboxKey && outboxKey.length < 32) {
+    errors.push("OUTBOX_ENCRYPTION_KEY must be a cryptographically secure key of at least 32 characters (256-bit).");
   }
 
   return {
