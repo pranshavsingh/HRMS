@@ -27,6 +27,7 @@ export default function LoginScreen() {
   const [forgotEmail, setForgotEmail] = useState("");
   const [forgotStep, setForgotStep] = useState(1); // 1: Send OTP, 2: Verify OTP, 3: Reset Password
   const [otp, setOtp] = useState("");
+  const [resetToken, setResetToken] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [forgotLoading, setForgotLoading] = useState(false);
   const [forgotMsg, setForgotMsg] = useState("");
@@ -77,7 +78,10 @@ export default function LoginScreen() {
     setForgotLoading(true);
     setForgotMsg("");
     try {
-      await api.post("/auth/forgot-password/verify-otp/", { email: forgotEmail.trim(), otp: otp.trim() });
+      const res = await api.post("/auth/forgot-password/verify-otp/", { email: forgotEmail.trim(), otp: otp.trim() });
+      if (res.data?.reset_token) {
+        setResetToken(res.data.reset_token);
+      }
       setForgotStep(3);
       setForgotMsg("OTP verified. Set your new password.");
     } catch (err: any) {
@@ -98,6 +102,7 @@ export default function LoginScreen() {
       await api.post("/auth/forgot-password/reset/", {
         email: forgotEmail.trim(),
         otp: otp.trim(),
+        reset_token: resetToken,
         new_password: newPassword,
       });
       Alert.alert("Success", "Password reset successful. You can log in now.");
@@ -105,6 +110,7 @@ export default function LoginScreen() {
       setForgotStep(1);
       setForgotEmail("");
       setOtp("");
+      setResetToken("");
       setNewPassword("");
       setForgotMsg("");
     } catch (err: any) {

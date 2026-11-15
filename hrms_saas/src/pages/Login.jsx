@@ -10,6 +10,7 @@ export default function Login() {
   const [step, setStep] = useState(1);
   const [mail, setMail] = useState("");
   const [otp, setOtp] = useState("");
+  const [resetToken, setResetToken] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [forgotLoading, setForgotLoading] = useState(false);
   const [forgotMsg, setForgotMsg] = useState("");
@@ -49,7 +50,10 @@ export default function Login() {
     try {
       setForgotLoading(true);
       setForgotMsg("");
-      await API.post("/auth/forgot-password/verify-otp/", { email: mail, otp });
+      const res = await API.post("/auth/forgot-password/verify-otp/", { email: mail, otp });
+      if (res.data?.reset_token) {
+        setResetToken(res.data.reset_token);
+      }
       setStep(3);
       setForgotMsg("OTP verified. Set your new password.");
     } catch (err) {
@@ -66,11 +70,13 @@ export default function Login() {
       await API.post("/auth/forgot-password/reset/", {
         email: mail,
         otp,
+        reset_token: resetToken,
         new_password: newPassword,
       });
       setForgotMsg("Password reset successful. You can login now.");
       setStep(1);
       setOtp("");
+      setResetToken("");
       setNewPassword("");
     } catch (err) {
       setForgotMsg(err.response?.data?.error || "Reset failed");
