@@ -198,6 +198,17 @@ async function runMigrations() {
           if (await columnExists("audit_logs", "id") && !(await columnExists("audit_logs", "severity"))) {
             await conn.query("ALTER TABLE audit_logs ADD COLUMN severity VARCHAR(20) NOT NULL DEFAULT 'INFO'");
           }
+        } else if (file.startsWith("005_")) {
+          const hasClaimedBy = await columnExists("consumer_processed_jobs", "claimed_by");
+          if (!hasClaimedBy) {
+            await conn.query("ALTER TABLE consumer_processed_jobs ADD COLUMN claimed_by VARCHAR(100) NULL AFTER handler_name");
+            await conn.query("ALTER TABLE consumer_processed_jobs ADD COLUMN lease_expires_at DATETIME NULL AFTER claimed_by");
+            await conn.query("ALTER TABLE consumer_processed_jobs ADD COLUMN fencing_token BIGINT NOT NULL DEFAULT 1 AFTER lease_expires_at");
+            await conn.query("ALTER TABLE consumer_processed_jobs ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at");
+          }
+          if (!(await indexExists("consumer_processed_jobs", "idx_consumer_lease"))) {
+            await conn.query("CREATE INDEX idx_consumer_lease ON consumer_processed_jobs(status, lease_expires_at)");
+          }
         } else {
           // Parse and safely execute each statement
           const statements = parseSqlStatements(content);
@@ -344,6 +355,20 @@ async function runMigrations() {
             )
           `);
           await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_consumer_processed_at ON consumer_processed_jobs(created_at)");
+        } else if (file.startsWith("005_")) {
+          if (!(await sqliteColumnExists("consumer_processed_jobs", "claimed_by"))) {
+            await sqliteDb.run("ALTER TABLE consumer_processed_jobs ADD COLUMN claimed_by TEXT NULL");
+          }
+          if (!(await sqliteColumnExists("consumer_processed_jobs", "lease_expires_at"))) {
+            await sqliteDb.run("ALTER TABLE consumer_processed_jobs ADD COLUMN lease_expires_at TEXT NULL");
+          }
+          if (!(await sqliteColumnExists("consumer_processed_jobs", "fencing_token"))) {
+            await sqliteDb.run("ALTER TABLE consumer_processed_jobs ADD COLUMN fencing_token INTEGER NOT NULL DEFAULT 1");
+          }
+          if (!(await sqliteColumnExists("consumer_processed_jobs", "updated_at"))) {
+            await sqliteDb.run("ALTER TABLE consumer_processed_jobs ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))");
+          }
+          await sqliteDb.run("CREATE INDEX IF NOT EXISTS idx_consumer_lease ON consumer_processed_jobs(status, lease_expires_at)");
         } else {
           const statements = parseSqlStatements(content);
           for (let statement of statements) {

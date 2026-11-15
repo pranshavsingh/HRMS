@@ -250,4 +250,123 @@ describe("P3.4 — Failure Injection & Edge Case Resilience Test Suite", () => {
       }
     }
   });
+
+  it("should recover expired consumer claim with incremented fencing token and fence out stale worker", async () => {
+    const testJobId = `job_fencing_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+    testJobIds.push(testJobId);
+    const handler = "Send Password Reset OTP Email";
+
+    const worker1 = "worker_crashed_pid_101";
+    const worker2 = "worker_survivor_pid_202";
+
+    // 1. Worker 1 claims job
+    const claim1 = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker1, 60);
+    assert.equal(claim1.acquired, true);
+    assert.equal(claim1.fencingToken, 1);
+    assert.equal(claim1.isRecovery, false);
+
+    // 2. Simulate Worker 1 crashing: its lease expires in the past
+    const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+    if (isMysql) {
+      await db.run(
+        "UPDATE consumer_processed_jobs SET lease_expires_at = DATE_SUB(NOW(), INTERVAL 15 SECOND) WHERE job_id = ?",
+        [testJobId]
+      );
+    } else {
+      await db.run(
+        "UPDATE consumer_processed_jobs SET lease_expires_at = datetime('now', '-15 seconds') WHERE job_id = ?",
+        [testJobId]
+      );
+    }
+
+    // 3. Worker 2 detects expired claim and recovers execution
+    const claim2 = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker2, 60);
+    assert.equal(claim2.acquired, true, "Survivor worker must successfully recover expired claim");
+    assert.equal(claim2.fencingToken, 2, "Fencing token must be monotonically incremented to 2");
+    assert.equal(claim2.isRecovery, true, "Must be flagged as a recovery event");
+
+    // 4. Stale Worker 1 wakes up and attempts to complete execution: MUST BE FENCED OUT
+    const staleCompletion = await consumerIdempotencyRepository.completeExecution(
+      testJobId,
+      handler,
+      worker1,
+      claim1.fencingToken,
+      { sentBy: worker1 }
+    );
+    assert.equal(staleCompletion, false, "Stale worker completion must affect 0 rows and return false");
+
+    // 5. Survivor Worker 2 completes execution: MUST SUCCEED
+    const validCompletion = await consumerIdempotencyRepository.completeExecution(
+      testJobId,
+      handler,
+      worker2,
+      claim2.fencingToken,
+      { sentBy: worker2 }
+    );
+    assert.equal(validCompletion, true, "Active worker with valid fencing token must successfully complete");
+
+    // 6. Verify final state in database
+    const record = await consumerIdempotencyRepository.findRecord(testJobId, handler);
+    assert.equal(record.status, "COMPLETED");
+    assert.equal(record.fencing_token, 2);
+    assert.equal(record.claimed_by, worker2);
+  });
+
+  it("should prevent competing worker from acquiring an active unexpired consumer claim", async () => {
+    const testJobId = `job_compete_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+    testJobIds.push(testJobId);
+    const handler = "Send Password Reset OTP Email";
+
+    const workerA = "worker_alpha";
+    const workerB = "worker_beta";
+
+    // Worker A claims with 60s lease
+    const claimA = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerA, 60);
+    assert.equal(claimA.acquired, true);
+
+    // Worker B attempts to claim while lease is active
+    const claimB = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerB, 60);
+    assert.equal(claimB.acquired, false, "Active unexpired claim must not be acquired by competitor");
+    assert.equal(claimB.reason, "ACTIVE_CLAIM");
+    assert.equal(claimB.claimedBy, workerA);
+  });
+
+  it("should support retry after consumer transient failure release", async () => {
+    const testJobId = `job_transient_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+    testJobIds.push(testJobId);
+    const handler = "Send Password Reset OTP Email";
+
+    const workerA = "worker_attempt_1";
+    const workerB = "worker_attempt_2";
+
+    // Attempt 1 claims
+    const claim1 = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerA, 60);
+    assert.equal(claim1.acquired, true);
+    assert.equal(claim1.fencingToken, 1);
+
+    // Attempt 1 encounters transient SMTP network timeout and safely releases claim
+    const released = await consumerIdempotencyRepository.releaseFailedClaim(
+      testJobId,
+      handler,
+      workerA,
+      claim1.fencingToken,
+      "ETIMEDOUT connecting to smtp.hostinger.com:465"
+    );
+    assert.equal(released, true, "Transient failure release must succeed for active claim owner");
+
+    // Attempt 2 (e.g. BullMQ retry) re-claims
+    const claim2 = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerB, 60);
+    assert.equal(claim2.acquired, true, "Subsequent retry must successfully acquire claim");
+    assert.equal(claim2.fencingToken, 2, "Fencing token must advance on retry");
+
+    // Attempt 2 succeeds
+    const completed = await consumerIdempotencyRepository.completeExecution(
+      testJobId,
+      handler,
+      workerB,
+      claim2.fencingToken,
+      { success: true }
+    );
+    assert.equal(completed, true);
+  });
 });

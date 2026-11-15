@@ -195,9 +195,14 @@ CREATE TABLE IF NOT EXISTS consumer_processed_jobs (
   job_id VARCHAR(128) NOT NULL,
   handler_name VARCHAR(100) NOT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'COMPLETED',
+  claimed_by VARCHAR(100) NULL,
+  lease_expires_at DATETIME NULL,
+  fencing_token BIGINT NOT NULL DEFAULT 1,
   result JSON NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (job_id, handler_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE INDEX IF NOT EXISTS idx_consumer_processed_at ON consumer_processed_jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_consumer_lease ON consumer_processed_jobs(status, lease_expires_at);
