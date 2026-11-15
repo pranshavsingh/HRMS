@@ -68,6 +68,10 @@ export async function healthCheck() {
   await pool.query("SELECT 1");
 }
 
+export async function closePool() {
+  await pool.end();
+}
+
 export function dbInfo() {
   return {
     client: "mysql",

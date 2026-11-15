@@ -28,3 +28,21 @@ export const config = {
   cloudinaryAttendancePreset: process.env.CLOUDINARY_ATTENDANCE_PRESET || "attendance_preset",
   cloudinaryDocumentsPreset: process.env.CLOUDINARY_DOCUMENTS_PRESET || "documents_preset",
 };
+
+// Security Check: Fail-fast in production if secrets are unconfigured or default placeholders
+if (process.env.NODE_ENV === "production") {
+  const insecure = [];
+  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.includes("change-me")) {
+    insecure.push("JWT_SECRET");
+  }
+  if (!process.env.OTP_SECRET || process.env.OTP_SECRET.includes("change-me")) {
+    insecure.push("OTP_SECRET");
+  }
+  if (!process.env.MYSQL_PASSWORD) {
+    insecure.push("MYSQL_PASSWORD");
+  }
+  if (insecure.length > 0) {
+    console.error(`\x1b[31m[SECURITY FATAL] Production startup rejected! Default or missing credentials detected for: ${insecure.join(", ")}. Configure strong values in your server .env file.\x1b[0m`);
+    process.exit(1);
+  }
+}

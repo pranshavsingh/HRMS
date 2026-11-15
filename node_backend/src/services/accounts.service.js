@@ -10,7 +10,7 @@ import cloudinaryService from "./cloudinary.service.js";
 import redisService from "./redis.service.js";
 import { config } from "../config/env.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { fullName, makeNodePassword, verifyDjangoPassword } from "../utils/auth.js";
+import { fullName, makeNodePassword, verifyDjangoPassword, hashPassword, verifyPassword } from "../utils/auth.js";
 import { sendOtpEmail } from "../utils/mailer.js";
 import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
@@ -58,9 +58,23 @@ export const accountsService = {
     if (!user.is_active) {
       throw new AppError("Account is inactive. Reactivate it from HR employee management and try again.", 400);
     }
-    if (!verifyDjangoPassword(password, user.password)) {
+
+    const verification = await verifyPassword(password, user.password);
+    if (!verification.valid) {
       throw new AppError("Invalid credentials", 400);
     }
+
+    // Auto-migrate legacy PBKDF2 hash to enterprise Bcrypt
+    if (verification.isLegacy) {
+      try {
+        const newHash = await hashPassword(password);
+        await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [newHash, user.id]);
+        logger.info("[Auth] Auto-migrated user ID %d (%s) password to Bcrypt", user.id, user.username);
+      } catch (migrateErr) {
+        logger.warn("[Auth] Password auto-migration failed for user %d: %s", user.id, migrateErr.message);
+      }
+    }
+
     const resolvedRole = (user.is_superuser === 1 || user.is_superuser === true) ? "superadmin" : user.role;
 
     const access = jwt.sign({ userId: user.id, role: resolvedRole }, config.jwtSecret, { expiresIn: "15m" });
@@ -236,8 +250,9 @@ export const accountsService = {
       throw new AppError("User not found", 400);
     }
 
+    const passwordHash = await hashPassword(newPassword);
     await db.transaction(async (tx) => {
-      await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [makeNodePassword(newPassword), user.id], tx);
+      await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [passwordHash, user.id], tx);
       await accountsRepository.deleteOtpByEmail(email, tx);
     });
 
@@ -292,8 +307,8 @@ export const accountsService = {
 
     const uploadedPaths = [];
     try {
+      const passwordHash = await hashPassword(password);
       const employee = await db.transaction(async (tx) => {
-        const passwordHash = makeNodePassword(password);
         const userId = await accountsRepository.insertUser(passwordHash, username, first_name, last_name, email, role, tx);
         
         await accountsRepository.insertProfile(
@@ -500,7 +515,7 @@ export const accountsService = {
       await accountsRepository.updateProfile(employeeId, data, tx);
 
       if (data.password) {
-        const passwordHash = makeNodePassword(data.password);
+        const passwordHash = await hashPassword(data.password);
         await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [passwordHash, employeeId], tx);
       }
       

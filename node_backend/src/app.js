@@ -12,6 +12,8 @@ import { errorHandler } from "./middleware/errorHandler.js";
 import { authenticate } from "./middleware/auth.js";
 import { getDocumentDetailRedirect } from "./controllers/accounts.controller.js";
 import { createApiLimiter, createLoginLimiter } from "./middleware/rateLimiter.js";
+import { healthCheck } from "./db/index.js";
+import redisService from "./services/redis.service.js";
 
 export function createApp() {
   const app = express();
@@ -31,8 +33,18 @@ export function createApp() {
   // 3. Tiered High-Throughput API Limiter
   app.use(createApiLimiter());
 
-  // 3. CORS
-  app.use(cors({ origin: config.corsOrigin === "*" ? true : config.corsOrigin }));
+  // 3. Enterprise CORS Configuration
+  const isProduction = process.env.NODE_ENV === "production";
+  app.use(
+    cors({
+      origin: config.corsOrigin === "*" 
+        ? (isProduction ? true : true) 
+        : config.corsOrigin.split(",").map((s) => s.trim()),
+      credentials: true,
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    })
+  );
 
   // 4. Request Logger (Morgan)
   app.use(morgan("combined"));
@@ -65,8 +77,51 @@ export function createApp() {
   app.use("/api/attendance", attendanceRoutes);
   app.use("/api/leave", leaveRoutes);
 
-  // System Health check
-  app.get("/health", (_req, res) => res.json({ ok: true }));
+  // System Liveness check
+  app.get("/health", (_req, res) => res.json({ status: "alive", uptime: process.uptime() }));
+
+  // Deep Enterprise Readiness Probe (inspects MySQL & Redis status and memory)
+  app.get("/health/ready", async (_req, res) => {
+    const checks = {
+      status: "healthy",
+      timestamp: new Date().toISOString(),
+      uptime_seconds: Number(process.uptime().toFixed(1)),
+      memory: {
+        rss_mb: Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1)),
+        heap_used_mb: Number((process.memoryUsage().heapUsed / (1024 * 1024)).toFixed(1)),
+      },
+      dependencies: {
+        database: "unknown",
+        redis: "unknown",
+      },
+    };
+
+    let isHealthy = true;
+
+    try {
+      const start = Date.now();
+      await healthCheck();
+      checks.dependencies.database = { status: "connected", latency_ms: Date.now() - start };
+    } catch (err) {
+      checks.dependencies.database = { status: "unreachable", error: err.message };
+      isHealthy = false;
+    }
+
+    try {
+      if (redisService.isReady()) {
+        const start = Date.now();
+        await redisService.client.ping();
+        checks.dependencies.redis = { status: "connected", latency_ms: Date.now() - start };
+      } else {
+        checks.dependencies.redis = { status: "offline", mode: "in-memory fallback" };
+      }
+    } catch (err) {
+      checks.dependencies.redis = { status: "error", error: err.message };
+    }
+
+    checks.status = isHealthy ? "ready" : "degraded";
+    return res.status(isHealthy ? 200 : 503).json(checks);
+  });
 
   // 404 Route Not Found
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));

@@ -1,3 +1,4 @@
+import multer from "multer";
 import logger from "../utils/logger.js";
 
 export class AppError extends Error {
@@ -11,6 +12,14 @@ export class AppError extends Error {
 }
 
 export function errorHandler(err, req, res, next) {
+  // Handle Multer upload limits (e.g. 5MB exceeded)
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ error: "File size exceeds the allowed limit of 5MB." });
+    }
+    return res.status(400).json({ error: `File upload error: ${err.message}` });
+  }
+
   const statusCode = err.statusCode || 500;
   
   if (statusCode === 500) {

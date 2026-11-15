@@ -21,6 +21,9 @@ expo-env.d.ts
 *.sqlite3
 *.sqlite3-journal
 *.db
+backups/
+*.sql
+!node_backend/scripts/*.sql
 
 # Uploads & Dynamic media
 node_backend/src/uploads/*

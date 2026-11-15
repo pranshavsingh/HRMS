@@ -2,6 +2,7 @@ import cron from "node-cron";
 import logger from "./logger.js";
 import { db } from "../db/index.js";
 import storageService from "../services/storage.service.js";
+import { runDatabaseBackup } from "./backup.js";
 
 /**
  * Initialize all scheduled background tasks.
@@ -95,6 +96,12 @@ export function initCron() {
     } catch (err) {
       logger.error("CRON ERROR (daily cleanup): %s", err.message);
     }
+  });
+
+  // Job 4: Daily automated compressed database backup at 2:00 AM (30-day retention)
+  cron.schedule("0 2 * * *", async () => {
+    logger.info("CRON: Initiating scheduled daily database backup...");
+    await runDatabaseBackup();
   });
 
   logger.info("Background cron jobs scheduled successfully.");

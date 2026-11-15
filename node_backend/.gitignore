@@ -3,3 +3,5 @@ node_modules
 npm-debug.log*
 /src/uploads/attendance/*
 /src/uploads/documents/*
+backups/
+*.sql
