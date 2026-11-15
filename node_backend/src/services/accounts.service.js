@@ -1,0 +1,895 @@
+import jwt from "jsonwebtoken";
+import crypto from "crypto";
+import accountsRepository from "../repositories/accounts.repository.js";
+import auditRepository from "../repositories/audit.repository.js";
+import { realtimeManager } from "../utils/realtime.js";
+import auditService from "./audit.service.js";
+import storageService from "./storage.service.js";
+import queueService from "./queue.service.js";
+import cloudinaryService from "./cloudinary.service.js";
+import redisService from "./redis.service.js";
+import { config } from "../config/env.js";
+import { AppError } from "../middleware/errorHandler.js";
+import { fullName, makeNodePassword, verifyDjangoPassword } from "../utils/auth.js";
+import { sendOtpEmail } from "../utils/mailer.js";
+import { db } from "../db/index.js";
+import logger from "../utils/logger.js";
+
+function makeOtp() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function hashOtp(email, otp) {
+  return crypto.createHmac("sha256", config.otpSecret).update(`${email}:${otp}`).digest("hex");
+}
+
+function expiryDate(minutes) {
+  return new Date(Date.now() + minutes * 60 * 1000);
+}
+
+function dbTimeToIso(dbVal) {
+  if (!dbVal) return null;
+  if (dbVal instanceof Date) {
+    return dbVal.toISOString();
+  }
+  if (typeof dbVal === "string") {
+    if (dbVal.includes("T") || dbVal.includes("Z")) {
+      return new Date(dbVal).toISOString();
+    }
+    return `${dbVal.replace(" ", "T")}Z`;
+  }
+  return new Date(dbVal).toISOString();
+}
+
+function toHours(punchIn, punchOut, status) {
+  if (status !== "approved" || !punchIn || !punchOut) return 0;
+  const inDate = new Date(dbTimeToIso(punchIn));
+  const outDate = new Date(dbTimeToIso(punchOut));
+  const diff = (outDate - inDate) / (1000 * 60 * 60);
+  return Number(Math.max(0, diff).toFixed(2));
+}
+
+export const accountsService = {
+  async login(username, password, deviceInfo = {}) {
+    const user = await accountsRepository.findByUsernameOrEmail(username);
+    if (!user) {
+      throw new AppError("Invalid credentials", 400);
+    }
+    if (!user.is_active) {
+      throw new AppError("Account is inactive. Reactivate it from HR employee management and try again.", 400);
+    }
+    if (!verifyDjangoPassword(password, user.password)) {
+      throw new AppError("Invalid credentials", 400);
+    }
+    const resolvedRole = (user.is_superuser === 1 || user.is_superuser === true) ? "superadmin" : user.role;
+
+    const access = jwt.sign({ userId: user.id, role: resolvedRole }, config.jwtSecret, { expiresIn: "15m" });
+    const refresh = jwt.sign({ userId: user.id, role: resolvedRole, type: "refresh" }, config.jwtSecret, { expiresIn: "30d" });
+
+    // Hash refresh token for secure database storage
+    const refreshHash = crypto.createHash("sha256").update(refresh).digest("hex");
+    const refreshExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+    await accountsRepository.insertRefreshToken(user.id, refreshHash, refreshExpires, deviceInfo);
+    
+    return {
+      access,
+      refresh,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: resolvedRole,
+        first_name: user.first_name,
+        last_name: user.last_name
+      }
+    };
+  },
+
+  async refreshSession(refreshToken, deviceInfo = {}) {
+    if (!refreshToken) {
+      throw new AppError("Refresh token is required", 400);
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(refreshToken, config.jwtSecret);
+      if (payload.type !== "refresh") {
+        throw new Error();
+      }
+    } catch (err) {
+      throw new AppError("Invalid refresh token", 401);
+    }
+
+    const refreshHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
+    const tokenRecord = await accountsRepository.findRefreshTokenByHash(refreshHash);
+
+    if (!tokenRecord) {
+      // Security Invalidation / Reuse Protection:
+      // If signature is valid but token hash is missing, it was rotated/used already.
+      // Signifies potential token theft and replay. Revoke all active sessions for safety.
+      await accountsRepository.deleteRefreshTokensByUserId(payload.userId);
+      throw new AppError("Session expired or token reused. Please login again.", 401);
+    }
+
+    if (new Date(tokenRecord.expires_at) < new Date()) {
+      await accountsRepository.deleteRefreshTokenByHash(refreshHash);
+      throw new AppError("Refresh token expired. Please login again.", 401);
+    }
+
+    const user = await accountsRepository.findById(payload.userId);
+    if (!user || !user.is_active) {
+      await accountsRepository.deleteRefreshTokenByHash(refreshHash);
+      throw new AppError("User account is inactive or not found", 401);
+    }
+
+    const resolvedRole = (user.is_superuser === 1 || user.is_superuser === true) ? "superadmin" : user.role;
+
+    const access = jwt.sign({ userId: user.id, role: resolvedRole }, config.jwtSecret, { expiresIn: "15m" });
+    const newRefresh = jwt.sign({ userId: user.id, role: resolvedRole, type: "refresh" }, config.jwtSecret, { expiresIn: "30d" });
+
+    const newRefreshHash = crypto.createHash("sha256").update(newRefresh).digest("hex");
+    const newRefreshExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    // Rotate refresh token
+    await db.transaction(async (tx) => {
+      await accountsRepository.deleteRefreshTokenByHash(refreshHash, tx);
+      await accountsRepository.insertRefreshToken(user.id, newRefreshHash, newRefreshExpires, {
+        deviceId: deviceInfo.deviceId || tokenRecord.device_id,
+        deviceName: deviceInfo.deviceName || tokenRecord.device_name,
+        platform: deviceInfo.platform || tokenRecord.platform,
+        ipAddress: deviceInfo.ipAddress || tokenRecord.ip_address,
+      }, tx);
+    });
+
+    return {
+      access,
+      refresh: newRefresh,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: resolvedRole,
+        first_name: user.first_name,
+        last_name: user.last_name
+      }
+    };
+  },
+
+  async logoutSession(refreshToken) {
+    if (!refreshToken) return { message: "Logged out" };
+    try {
+      const refreshHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
+      await accountsRepository.deleteRefreshTokenByHash(refreshHash);
+    } catch (err) {
+      // Suppress errors
+    }
+    return { message: "Logged out successfully" };
+  },
+
+  async requestPasswordResetOtp(email) {
+    const user = await accountsRepository.findByEmail(email);
+    if (!user || !user.is_active) {
+      return { message: "If this email exists, OTP has been sent." };
+    }
+
+    const otp = makeOtp();
+    const otpHash = hashOtp(user.email.toLowerCase(), otp);
+    const expires = expiryDate(config.otpExpiryMinutes);
+
+    await accountsRepository.deleteOtpByEmail(user.email);
+    await accountsRepository.insertOtp(user.email, otpHash, expires);
+
+    // Queue email sending asynchronously
+    await queueService.add("Send Password Reset OTP Email", async () => {
+      await sendOtpEmail(user.email, otp);
+    });
+
+    return { message: "If this email exists, OTP has been sent." };
+  },
+
+  async verifyPasswordResetOtp(email, otp) {
+    const row = await accountsRepository.findOtpByEmail(email);
+    if (!row) {
+      throw new AppError("Invalid or expired OTP", 400);
+    }
+
+    const now = new Date();
+    if (new Date(row.expires_at) < now) {
+      await accountsRepository.deleteOtpByEmail(email);
+      throw new AppError("OTP expired. Request a new one.", 400);
+    }
+
+    if (Number(row.attempts || 0) >= 5) {
+      throw new AppError("Too many invalid attempts. Request new OTP.", 400);
+    }
+
+    const matches = row.otp_hash === hashOtp(email, otp);
+    if (!matches) {
+      await accountsRepository.incrementOtpAttempts(email);
+      throw new AppError("Invalid OTP", 400);
+    }
+
+    await accountsRepository.verifyOtp(email);
+    return { message: "OTP verified" };
+  },
+
+  async resetPasswordWithOtp(email, otp, newPassword) {
+    const row = await accountsRepository.findOtpByEmail(email);
+    if (!row) {
+      throw new AppError("Invalid or expired OTP", 400);
+    }
+
+    const now = new Date();
+    if (new Date(row.expires_at) < now) {
+      await accountsRepository.deleteOtpByEmail(email);
+      throw new AppError("OTP expired. Request a new one.", 400);
+    }
+
+    const matches = row.otp_hash === hashOtp(email, otp);
+    if (!matches) {
+      throw new AppError("Invalid OTP", 400);
+    }
+
+    const user = await accountsRepository.findByEmail(email);
+    if (!user) {
+      throw new AppError("User not found", 400);
+    }
+
+    await db.transaction(async (tx) => {
+      await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [makeNodePassword(newPassword), user.id], tx);
+      await accountsRepository.deleteOtpByEmail(email, tx);
+    });
+
+    await redisService.del(`user:session:${user.id}`);
+
+    return { message: "Password reset successful" };
+  },
+
+  async createEmployee(data, files, actor) {
+    const {
+      username,
+      first_name,
+      last_name = "",
+      email = "",
+      role,
+      password,
+      manager,
+      team_name,
+      joining_date,
+      leave_allotted = 0,
+      latitude,
+      longitude,
+      allowed_radius = 100
+    } = data;
+
+    if (actor.role === "hr") {
+      if (!["employee", "manager"].includes(role)) {
+        throw new AppError("HR can only create employee and manager accounts", 403);
+      }
+    } else if (actor.role === "admin") {
+      if (!["employee", "manager", "hr"].includes(role)) {
+        throw new AppError("Admin can only create employee, manager, and hr accounts", 403);
+      }
+    } else if (actor.role === "superadmin") {
+      // Superadmin can create any role
+    } else {
+      throw new AppError("You do not have permission to create accounts", 403);
+    }
+
+    const managerId = role === "employee" && manager ? Number(manager) : null;
+    const teamName = role === "manager" && team_name ? team_name : null;
+    const designation = data.designation || null;
+    
+    let locations = [];
+    if (data.locations) {
+      try {
+        locations = typeof data.locations === "string" ? JSON.parse(data.locations) : data.locations;
+      } catch (err) {
+        // ignore parsing error
+      }
+    }
+
+    const uploadedPaths = [];
+    try {
+      const employee = await db.transaction(async (tx) => {
+        const passwordHash = makeNodePassword(password);
+        const userId = await accountsRepository.insertUser(passwordHash, username, first_name, last_name, email, role, tx);
+        
+        await accountsRepository.insertProfile(
+          latitude,
+          longitude,
+          allowed_radius,
+          managerId,
+          userId,
+          teamName,
+          joining_date,
+          leave_allotted,
+          designation,
+          tx
+        );
+
+        if (locations && locations.length > 0) {
+          for (const loc of locations) {
+            await accountsRepository.insertLocation(
+              userId,
+              loc.latitude,
+              loc.longitude,
+              loc.allowed_radius,
+              loc.is_primary,
+              tx
+            );
+          }
+        }
+
+        const docs = [
+          ["aadhar_file", "Aadhar Card"],
+          ["pan_file", "PAN Card"],
+          ["bank_file", "Bank Details"],
+          ["cv_file", "CV"],
+          ["voter_file", "Voter ID"],
+          ["dl_file", "Driving License"]
+        ];
+        
+        const uploaded = [];
+        for (const [field, title] of docs) {
+          const fList = files[field];
+          const f = fList ? fList[0] : null;
+          if (!f) continue;
+
+          const relativePath = await storageService.store(f, "documents", userId);
+          uploadedPaths.push(relativePath);
+          await accountsRepository.insertDocument(title, relativePath, userId, tx);
+          uploaded.push(title);
+        }
+
+        await auditService.log(
+          actor,
+          "create_employee",
+          userId.toString(),
+          { username, role, uploaded_documents: uploaded },
+          null,
+          tx
+        );
+
+        const created = await accountsRepository.findById(userId, tx);
+        return { created, uploaded };
+      });
+
+      realtimeManager.broadcast("employee_update", { actorId: actor.id });
+      return {
+        message: `${role[0].toUpperCase()}${role.slice(1)} created successfully`,
+        employee: await this.serializeStaffMember(employee.created),
+        uploaded_documents: employee.uploaded
+      };
+    } catch (err) {
+      // rollback uploaded Cloudinary files to prevent orphan files
+      for (const path of uploadedPaths) {
+        try {
+          await storageService.delete(path);
+        } catch (cleanupErr) {
+          logger.error("Failed to clean up uploaded asset %s during rollback: %s", path, cleanupErr.message);
+        }
+      }
+      throw err;
+    }
+  },
+
+  async getManagers() {
+    const rows = await accountsRepository.findActiveManagers();
+    return rows.map((m) => ({
+      id: m.id,
+      username: m.username,
+      email: m.email,
+      name: fullName(m),
+      team_name: m.team_name
+    }));
+  },
+
+  async getEmployees() {
+    const users = await accountsRepository.findAllEmployees();
+    const out = [];
+    for (const u of users) {
+      out.push(await this.serializeStaffMember(u));
+    }
+    return out;
+  },
+
+  async getAdminSummary() {
+    const [
+      staff,
+      managers,
+      employeesOnly,
+      hrCount,
+      pendingAttendance,
+      pendingLeave,
+      presentToday,
+    ] = await Promise.all([
+      db.get("SELECT COUNT(*) c FROM accounts_user WHERE role IN ('employee','manager','hr') AND is_active=1 AND deleted_at IS NULL"),
+      db.get("SELECT COUNT(*) c FROM accounts_user WHERE role='manager' AND deleted_at IS NULL"),
+      db.get("SELECT COUNT(*) c FROM accounts_user WHERE role='employee' AND deleted_at IS NULL"),
+      db.get("SELECT COUNT(*) c FROM accounts_user WHERE role='hr' AND deleted_at IS NULL"),
+      db.get("SELECT COUNT(*) c FROM attendance_attendanceapproval WHERE status='pending'"),
+      db.get("SELECT COUNT(*) c FROM leave_leave WHERE status='pending'"),
+      db.get(
+        config.dbClient === "mysql"
+          ? `SELECT COUNT(DISTINCT a.user_id) c 
+             FROM attendance_attendance a 
+             JOIN accounts_user u ON u.id = a.user_id
+             WHERE a.date = CURDATE() 
+               AND a.status <> 'rejected'
+               AND u.role IN ('employee', 'manager', 'hr')`
+          : `SELECT COUNT(DISTINCT a.user_id) c 
+             FROM attendance_attendance a 
+             JOIN accounts_user u ON u.id = a.user_id
+             WHERE a.date = date('now', 'localtime')
+               AND a.status <> 'rejected'
+               AND u.role IN ('employee', 'manager', 'hr')`
+      ),
+    ]);
+
+    const staffCount = Number(staff?.c || 0);
+    const todayPresentCount = Number(presentToday?.c || 0);
+    const absentTodayCount = Math.max(0, staffCount - todayPresentCount);
+
+    const todayPresentRecords = await db.all(
+      config.dbClient === "mysql"
+        ? `SELECT a.*, u.username, u.role, u.first_name, u.last_name 
+           FROM attendance_attendance a 
+           JOIN accounts_user u ON u.id = a.user_id 
+           WHERE u.deleted_at IS NULL 
+             AND a.status <> 'rejected'
+             AND a.date = CURDATE()
+             AND u.role IN ('employee', 'manager', 'hr')
+           ORDER BY a.punch_in_time DESC`
+        : `SELECT a.*, u.username, u.role, u.first_name, u.last_name 
+           FROM attendance_attendance a 
+           JOIN accounts_user u ON u.id = a.user_id 
+           WHERE u.deleted_at IS NULL 
+             AND a.status <> 'rejected'
+             AND a.date = date('now', 'localtime')
+             AND u.role IN ('employee', 'manager', 'hr')
+           ORDER BY a.punch_in_time DESC`
+    );
+
+    return {
+      staff: staffCount,
+      managers: Number(managers?.c || 0),
+      employees: Number(employeesOnly?.c || 0),
+      hr: Number(hrCount?.c || 0),
+      pending_attendance_approvals: Number(pendingAttendance?.c || 0),
+      pending_leave_requests: Number(pendingLeave?.c || 0),
+      present_today: todayPresentCount,
+      absent_today: absentTodayCount,
+      today_present_employees: todayPresentRecords.map(r => {
+        const name = `${r.first_name || ""} ${r.last_name || ""}`.trim() || r.username;
+        return {
+          employee_name: name,
+          username: r.username,
+          role: r.role,
+          date: r.date,
+          status: r.status,
+          work_hours: toHours(r.punch_in_time, r.punch_out_time, r.status),
+        };
+      })
+    };
+  },
+
+  async updateEmployee(employeeId, data, actor) {
+    const user = await accountsRepository.findById(employeeId);
+    
+    const allowedEditableRoles = ["employee", "manager"];
+    if (actor.role === "admin") {
+      allowedEditableRoles.push("hr");
+    } else if (actor.role === "superadmin") {
+      allowedEditableRoles.push("hr", "admin", "superadmin");
+    }
+
+    if (!user || !allowedEditableRoles.includes(user.role)) {
+      throw new AppError("Employee not found or you do not have permission to edit this account type", 404);
+    }
+
+    if (data.role && !allowedEditableRoles.includes(data.role)) {
+      throw new AppError("You do not have permission to assign this role", 403);
+    }
+
+    const oldSerialized = await this.serializeStaffMember(user);
+
+    const updated = await db.transaction(async (tx) => {
+      await accountsRepository.updateUser(employeeId, data, tx);
+      await accountsRepository.updateProfile(employeeId, data, tx);
+
+      if (data.password) {
+        const passwordHash = makeNodePassword(data.password);
+        await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [passwordHash, employeeId], tx);
+      }
+      
+      if (data.locations !== undefined) {
+        let locations = data.locations;
+        if (typeof locations === "string") {
+          try {
+            locations = JSON.parse(locations);
+          } catch (e) {
+            locations = [];
+          }
+        }
+        await accountsRepository.deleteLocationsByUserId(employeeId, tx);
+        if (Array.isArray(locations)) {
+          for (const loc of locations) {
+            await accountsRepository.insertLocation(
+              employeeId,
+              loc.latitude,
+              loc.longitude,
+              loc.allowed_radius,
+              loc.is_primary,
+              tx
+            );
+          }
+        }
+      }
+
+      const updatedUser = await accountsRepository.findById(employeeId, tx);
+      const newSerialized = await this.serializeStaffMember(updatedUser, tx);
+
+      const diff = {};
+      const fieldsToCompare = [
+        "username",
+        "first_name",
+        "last_name",
+        "email",
+        "role",
+        "manager",
+        "team_name",
+        "joining_date",
+        "leave_allotted",
+        "is_active_employee",
+        "latitude",
+        "longitude",
+        "allowed_radius",
+        "designation",
+        "is_active"
+      ];
+
+      for (const field of fieldsToCompare) {
+        const oldVal = oldSerialized[field];
+        const newVal = newSerialized[field];
+        if (oldVal !== newVal) {
+          const normalizedOld = (oldVal === undefined || oldVal === null) ? "" : oldVal;
+          const normalizedNew = (newVal === undefined || newVal === null) ? "" : newVal;
+          if (String(normalizedOld) !== String(normalizedNew)) {
+            diff[field] = { old: oldVal, new: newVal };
+          }
+        }
+      }
+
+      if (data.password) {
+        diff["password"] = { old: "******", new: "******" };
+      }
+
+      const oldLocs = oldSerialized.locations || [];
+      const newLocs = newSerialized.locations || [];
+      const oldLocsStr = JSON.stringify(oldLocs.map(l => ({ lat: l.latitude, lng: l.longitude, rad: l.allowed_radius, pri: l.is_primary })));
+      const newLocsStr = JSON.stringify(newLocs.map(l => ({ lat: l.latitude, lng: l.longitude, rad: l.allowed_radius, pri: l.is_primary })));
+      if (oldLocsStr !== newLocsStr) {
+        diff["locations"] = { old: oldLocs, new: newLocs };
+      }
+      
+      await auditService.log(
+        actor,
+        "update_employee",
+        employeeId.toString(),
+        diff,
+        null,
+        tx
+      );
+
+      return updatedUser;
+    });
+
+    await redisService.del(`user:session:${employeeId}`);
+    realtimeManager.broadcast("employee_update", { actorId: actor.id });
+    return {
+      message: "Employee details updated successfully",
+      employee: await this.serializeStaffMember(updated)
+    };
+  },
+
+  async deleteEmployee(employeeId, actor) {
+    const user = await accountsRepository.findById(employeeId);
+    
+    const allowedDeleteRoles = ["employee", "manager"];
+    if (actor.role === "admin") {
+      allowedDeleteRoles.push("hr");
+    } else if (actor.role === "superadmin") {
+      allowedDeleteRoles.push("hr", "admin", "superadmin");
+    }
+
+    if (!user || !allowedDeleteRoles.includes(user.role)) {
+      throw new AppError("Employee not found or you do not have permission to archive this account type", 404);
+    }
+    if (user.id === actor.id) {
+      throw new AppError("You cannot archive your own account from this page", 400);
+    }
+
+    await db.transaction(async (tx) => {
+      await accountsRepository.softDeleteUser(employeeId, tx);
+      await accountsRepository.softDeleteProfile(employeeId, tx);
+      
+      await auditService.log(
+        actor,
+        "archive_employee",
+        employeeId.toString(),
+        { username: user.username, email: user.email },
+        null,
+        tx
+      );
+    });
+
+    await redisService.del(`user:session:${employeeId}`);
+    realtimeManager.broadcast("employee_update", { actorId: actor.id });
+    return { message: "Employee archived successfully. Documents are kept safe." };
+  },
+
+  async deleteDocument(documentId, actor) {
+    if (actor.role !== "superadmin") {
+      throw new AppError("Only super admin can delete uploaded documents", 403);
+    }
+
+    const document = await accountsRepository.findDocumentById(documentId);
+    if (!document) {
+      throw new AppError("Document not found", 404);
+    }
+
+    // Delete actual file from storage/Cloudinary
+    await storageService.delete(document.file);
+
+    // Delete record from database
+    await db.run("DELETE FROM accounts_employeedocument WHERE id = ?", [documentId]);
+
+    // Log audit activity
+    await auditService.log(
+      actor,
+      "delete_employee_document",
+      document.user_id.toString(),
+      { title: document.title, file: document.file }
+    );
+
+    return { message: "Document deleted successfully" };
+  },
+
+  async uploadDocument(data, file, actor) {
+    const { user, title } = data;
+
+    if (String(actor.id) !== String(user) && !["admin", "hr", "superadmin"].includes(actor.role)) {
+      throw new AppError("You do not have permission to manage documents for this employee", 403);
+    }
+
+    const existingDocs = await accountsRepository.findDocumentsByUserId(user);
+    const duplicate = existingDocs.find((d) => d.title === title);
+    if (duplicate) {
+      if (actor.role !== "superadmin") {
+        throw new AppError("Only super admin can edit or overwrite uploaded documents", 403);
+      }
+      await storageService.delete(duplicate.file);
+      await db.run("DELETE FROM accounts_employeedocument WHERE id = ?", [duplicate.id]);
+    }
+
+    const relativePath = await storageService.store(file, "documents", user);
+    
+    try {
+      await db.transaction(async (tx) => {
+        await accountsRepository.insertDocument(title, relativePath, user, tx);
+        await auditService.log(
+          actor,
+          "upload_employee_document",
+          user.toString(),
+          { title, path: relativePath },
+          null,
+          tx
+        );
+      });
+    } catch (err) {
+      try {
+        await storageService.delete(relativePath);
+      } catch (cleanupErr) {
+        logger.error("Failed to clean up uploaded asset %s during rollback: %s", relativePath, cleanupErr.message);
+      }
+      throw err;
+    }
+
+    return { message: "Document uploaded" };
+  },
+
+  async registerDirectDocument(data, actor) {
+    const { user, title, public_id } = data;
+
+    if (String(actor.id) !== String(user) && !["admin", "hr", "superadmin"].includes(actor.role)) {
+      throw new AppError("You do not have permission to manage documents for this employee", 403);
+    }
+
+    const existingDocs = await accountsRepository.findDocumentsByUserId(user);
+    const duplicate = existingDocs.find((d) => d.title === title);
+    if (duplicate) {
+      if (actor.role !== "superadmin") {
+        throw new AppError("Only super admin can edit or overwrite uploaded documents", 403);
+      }
+      await storageService.delete(duplicate.file);
+      await db.run("DELETE FROM accounts_employeedocument WHERE id = ?", [duplicate.id]);
+    }
+
+    // Verify metadata on Cloudinary
+    const folderPrefix = `employee-documents/${user}`;
+    await cloudinaryService.verifyMetadata(public_id, folderPrefix, true);
+
+    const dbPath = `cloudinary://${public_id}`;
+
+    await db.transaction(async (tx) => {
+      await accountsRepository.insertDocument(title, dbPath, user, tx);
+      await auditService.log(
+        actor,
+        "register_employee_document",
+        user.toString(),
+        { title, path: dbPath },
+        null,
+        tx
+      );
+    });
+
+    return { message: "Document registered successfully" };
+  },
+
+  async getDocumentDetail(id, actor, ipAddress) {
+    const document = await accountsRepository.findDocumentById(id);
+    if (!document) {
+      throw new AppError("Document not found", 404);
+    }
+
+    if (String(actor.id) !== String(document.user_id) && !["admin", "hr", "manager"].includes(actor.role)) {
+      throw new AppError("You do not have permission to view this document", 403);
+    }
+
+    const fileUrl = storageService.getUrl(document.file);
+    if (!fileUrl) {
+      throw new AppError("Failed to retrieve document path / file is missing", 404);
+    }
+
+    await auditService.log(
+      actor,
+      "view_employee_document",
+      document.user_id.toString(),
+      { document_id: document.id, title: document.title, file: document.file },
+      ipAddress
+    );
+
+    return fileUrl;
+  },
+
+  async getMyDocuments(userId) {
+    const docs = await accountsRepository.findDocumentsByUserId(userId);
+    return docs.map((d) => ({
+      id: d.id,
+      title: d.title,
+      file: storageService.getUrl(d.file),
+      uploaded_at: d.uploaded_at
+    }));
+  },
+
+  async getEmployeeDocuments(employeeId) {
+    const docs = await accountsRepository.findDocumentsByUserId(employeeId);
+    return docs.map((d) => ({
+      id: d.id,
+      title: d.title,
+      file: storageService.getUrl(d.file),
+      uploaded_at: d.uploaded_at
+    }));
+  },
+
+  async getAuditLogs(actor, query) {
+    if (actor.role !== "superadmin") {
+      throw new AppError("Only super admin can access audit logs", 403);
+    }
+
+    const limit = query.limit ? Number(query.limit) : 50;
+    const page = query.page ? Number(query.page) : 1;
+    const offset = (page - 1) * limit;
+
+    const [logs, total] = await Promise.all([
+      auditRepository.findAuditLogs({
+        limit,
+        offset,
+        search: query.search || "",
+        sort: query.sort || "desc",
+        startDate: query.start_date || "",
+        endDate: query.end_date || "",
+        actionType: query.action || ""
+      }),
+      auditRepository.getAuditLogsCount({
+        search: query.search || "",
+        startDate: query.start_date || "",
+        endDate: query.end_date || "",
+        actionType: query.action || ""
+      })
+    ]);
+
+    const serializedLogs = logs.map(log => {
+      let parsedDetails = null;
+      if (log.details) {
+        try {
+          parsedDetails = JSON.parse(log.details);
+        } catch (e) {
+          parsedDetails = log.details;
+        }
+      }
+
+      let targetDisplay = null;
+      if (log.target_username) {
+        const name = `${log.target_first_name || ""} ${log.target_last_name || ""}`.trim();
+        targetDisplay = name ? `${name} (${log.target_username})` : log.target_username;
+      }
+
+      return {
+        id: log.id,
+        user_id: log.user_id,
+        username: log.username,
+        action: log.action,
+        target_id: log.target_id,
+        target_display: targetDisplay,
+        details: parsedDetails,
+        ip_address: log.ip_address,
+        severity: log.severity || "INFO",
+        created_at: log.created_at
+      };
+    });
+
+    const uniqueActions = await db.all("SELECT DISTINCT action FROM audit_logs ORDER BY action ASC");
+
+    return {
+      logs: serializedLogs,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit)
+      },
+      availableActions: uniqueActions.map(r => r.action)
+    };
+  },
+
+  async serializeStaffMember(user, tx = null) {
+    const p = await accountsRepository.findProfileByUserId(user.id, tx);
+    const manager = p?.manager_id ? await accountsRepository.findById(p.manager_id, tx) : null;
+    const docCount = await accountsRepository.findDocumentCountByUserId(user.id, tx);
+    const locations = await accountsRepository.findLocationsByUserId(user.id, tx);
+    
+    return {
+      id: user.id,
+      username: user.username,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      name: fullName(user),
+      email: user.email,
+      role: user.role,
+      manager: manager?.username || null,
+      manager_id: manager?.id || null,
+      team_name: p?.team_name || null,
+      joining_date: p?.joining_date || null,
+      leave_allotted: p?.leave_allotted || 0,
+      document_count: docCount,
+      is_active_employee: Boolean(user.is_active && p?.is_active_employee),
+      latitude: p?.latitude ?? null,
+      longitude: p?.longitude ?? null,
+      allowed_radius: p?.allowed_radius ?? 100,
+      designation: p?.designation ?? null,
+      locations: locations.map(l => ({
+        id: l.id,
+        latitude: l.latitude,
+        longitude: l.longitude,
+        allowed_radius: l.allowed_radius,
+        is_primary: Boolean(l.is_primary)
+      })),
+      is_active: Boolean(user.is_active)
+    };
+  }
+};
+
+export default accountsService;

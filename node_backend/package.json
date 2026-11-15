@@ -1,0 +1,39 @@
+{
+  "name": "hrms-node-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "start:worker": "node src/worker.js",
+    "start:cluster": "pm2 start ecosystem.config.cjs --env production",
+    "check": "node --check src/server.js && node --check src/worker.js",
+    "db:init:mysql": "node scripts/init-mysql.js",
+    "db:migrate:sqlite-to-mysql": "node scripts/migrate-sqlite-to-mysql.js"
+  },
+  "dependencies": {
+    "cloudinary": "^2.10.0",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.7.4",
+    "file-type": "^22.0.1",
+    "helmet": "^7.1.0",
+    "ioredis": "^6.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.2",
+    "mysql2": "^3.11.0",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.8",
+    "nodemon": "^3.1.14",
+    "rate-limit-redis": "^6.0.2",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1",
+    "winston": "^3.19.0",
+    "zod": "^4.4.3"
+  }
+}

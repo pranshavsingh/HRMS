@@ -1,0 +1,40 @@
+# MySQL 8.0 Enterprise Configuration for Hostinger KVM 4 (16 GB RAM)
+# Path on Ubuntu: /etc/mysql/conf.d/enterprise_tuning.cnf
+
+[mysqld]
+# Connection Limits
+max_connections                = 250
+max_connect_errors             = 10000
+wait_timeout                   = 600
+interactive_timeout            = 600
+connect_timeout                = 10
+
+# Memory & Buffer Pool (Allocating 6 GB to InnoDB buffer pool)
+innodb_buffer_pool_size        = 6G
+innodb_buffer_pool_instances  = 6
+innodb_log_file_size           = 512M
+innodb_log_buffer_size         = 64M
+innodb_flush_log_at_trx_commit = 2   # Highly optimizes write throughput for bursts
+innodb_flush_method            = O_DIRECT
+innodb_file_per_table          = 1
+
+# I/O Concurrency
+innodb_read_io_threads         = 4
+innodb_write_io_threads        = 4
+innodb_io_capacity             = 2000
+innodb_io_capacity_max         = 4000
+
+# Table & Thread Caches
+table_open_cache               = 4000
+table_definition_cache         = 2000
+thread_cache_size              = 50
+
+# Temp Tables
+tmp_table_size                 = 64M
+max_heap_table_size            = 64M
+
+# Slow Query Logging for Monitoring Bottlenecks
+slow_query_log                 = 1
+slow_query_log_file            = /var/log/mysql/mysql-slow.log
+long_query_time                = 1.0
+log_queries_not_using_indexes  = 0
