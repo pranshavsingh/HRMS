@@ -240,6 +240,15 @@ class RealtimeService {
   }
 
   /**
+   * Return number of currently connected local socket clients.
+   * @returns {number}
+   */
+  getConnectedClientCount() {
+    if (!this.io || !this.io.sockets) return 0;
+    return this.io.sockets.sockets ? this.io.sockets.sockets.size : 0;
+  }
+
+  /**
    * Gracefully close Socket.IO server and Redis Pub/Sub connections.
    */
   async close() {

@@ -14,6 +14,7 @@ import { getDocumentDetailRedirect } from "./controllers/accounts.controller.js"
 import { createApiLimiter, createLoginLimiter } from "./middleware/rateLimiter.js";
 import { healthCheck } from "./db/index.js";
 import redisService from "./services/redis.service.js";
+import metricsService from "./services/metrics.service.js";
 
 export function createApp() {
   const app = express();
@@ -24,6 +25,9 @@ export function createApp() {
       crossOriginResourcePolicy: { policy: "cross-origin" },
     })
   );
+
+  // Observability: Collect Prometheus HTTP latency & throughput metrics
+  app.use(metricsService.httpMetricsMiddleware());
 
   // 2. Strict Rate Limiter for Login Routes (stops brute-force without affecting office NAT)
   const loginLimiter = createLoginLimiter();
@@ -156,6 +160,17 @@ export function createApp() {
 
     checks.status = isHealthy ? "ready" : "degraded";
     return res.status(isHealthy ? 200 : 503).json(checks);
+  });
+
+  // Prometheus Metrics Scrape Endpoint
+  app.get("/metrics", async (_req, res) => {
+    try {
+      const metrics = await metricsService.getMetrics();
+      res.setHeader("Content-Type", metricsService.getContentType());
+      return res.status(200).send(metrics);
+    } catch (err) {
+      return res.status(500).send(`Error collecting metrics: ${err.message}`);
+    }
   });
 
   // 404 Route Not Found

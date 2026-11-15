@@ -125,3 +125,26 @@ export function dbInfo() {
     connectionLimit: config.mysqlConnectionLimit,
   };
 }
+
+export function getPoolMetrics() {
+  const p = pool?.pool;
+  if (!p) {
+    return {
+      total: 0,
+      free: 0,
+      active: 0,
+      queued: 0,
+      limit: config.mysqlConnectionLimit || 30,
+    };
+  }
+  const total = Array.isArray(p._allConnections) ? p._allConnections.length : 0;
+  const free = Array.isArray(p._freeConnections) ? p._freeConnections.length : 0;
+  const queued = Array.isArray(p._connectionQueue) ? p._connectionQueue.length : 0;
+  return {
+    total,
+    free,
+    active: Math.max(0, total - free),
+    queued,
+    limit: config.mysqlConnectionLimit || 30,
+  };
+}

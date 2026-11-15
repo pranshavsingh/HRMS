@@ -4,6 +4,7 @@ import redisService from "./redis.service.js";
 import outboxDispatcherService from "./outbox-dispatcher.service.js";
 import queueWorkerManager from "../jobs/index.js";
 import outboxRepository from "../repositories/outbox.repository.js";
+import metricsService from "./metrics.service.js";
 import logger from "../utils/logger.js";
 
 class WorkerHealthService {
@@ -142,6 +143,20 @@ class WorkerHealthService {
               timestamp: new Date().toISOString()
             })
           );
+        }
+
+        // 4. Prometheus Scrape Endpoint
+        if (pathname === "/metrics") {
+          try {
+            const metrics = await metricsService.getMetrics();
+            res.setHeader("Content-Type", metricsService.getContentType());
+            res.writeHead(200);
+            return res.end(metrics);
+          } catch (mErr) {
+            res.setHeader("Content-Type", "text/plain");
+            res.writeHead(500);
+            return res.end(`Error scraping metrics: ${mErr.message}`);
+          }
         }
 
         // 404 for unknown routes
