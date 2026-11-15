@@ -92,6 +92,7 @@ jobs:
           MYSQL_USER: root
           MYSQL_PASSWORD: root_ci_password_strong_123
           MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
           DB_CLIENT: mysql
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: 6379
@@ -112,6 +113,7 @@ jobs:
           MYSQL_USER: root
           MYSQL_PASSWORD: root_ci_password_strong_123
           MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
           DB_CLIENT: mysql
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: 6379
