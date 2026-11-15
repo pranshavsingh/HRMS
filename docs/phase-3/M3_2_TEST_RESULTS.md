@@ -5,6 +5,8 @@
 **Node.js Runtime:** `v22.23.4`  
 **Database:** MySQL 8.0 (Hostinger Cloud `srv999.hstgr.io`) / MySQL 8.0 (GitHub Actions CI container)  
 **Redis:** Redis 7 (GitHub Actions CI container)  
+**GitHub Actions CI Run:** [Run 43750068203](https://github.com/pranshavsingh/HRMS/actions/runs/43750068203) (Status: `completed`, Conclusion: `success`)  
+**Commit Verified:** `db0e26f71def8f1d53647ce6e71e72a3bcc76bec`  
 **Total Tests Executed:** 74 tests across 12 distinct test suites  
 **Total Failures:** 0  
 **Overall Status:** **100% PASS**
