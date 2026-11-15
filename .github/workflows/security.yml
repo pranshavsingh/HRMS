@@ -296,6 +296,28 @@ jobs:
           cd node_backend
           node --test tests/phase3/dead_letter_replay.test.js
 
+      - name: Run Phase 3 Realtime Pub/Sub Tests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+          QUEUE_REDIS_URL: redis://127.0.0.1:6379
+          OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
+        run: |
+          cd node_backend
+          node --test tests/phase3/realtime_pubsub.test.js
+
   frontend-build:
     name: Frontend Build Verification
     runs-on: ubuntu-latest

@@ -2,6 +2,7 @@ import { createApp } from "./app.js";
 import { config } from "./config/env.js";
 import { dbInfo, healthCheck, closePool } from "./db/index.js";
 import { initCron } from "./utils/cron.js";
+import realtimeService from "./services/realtime.service.js";
 
 const app = createApp();
 
@@ -25,8 +26,15 @@ async function startServer() {
     process.exit(1);
   }
 
-  const server = app.listen(config.port, () => {
+  const server = app.listen(config.port, async () => {
     console.log(`[APP] Backend listening on port ${config.port}`);
+
+    // Initialize distributed realtime Socket.IO service
+    try {
+      await realtimeService.init(server);
+    } catch (err) {
+      console.warn(`[Realtime] Warning during realtime initialization: ${err.message}`);
+    }
 
     // Notify PM2 cluster that this worker is ready to receive requests (zero-downtime rolling reload)
     if (typeof process.send === "function") {
@@ -40,6 +48,11 @@ async function startServer() {
 
     server.close(async () => {
       console.log("[APP] HTTP server stopped accepting connections.");
+      try {
+        await realtimeService.close();
+      } catch (err) {
+        console.warn(`[Realtime] Error during close: ${err.message}`);
+      }
       try {
         await closePool();
         console.log("[DB] MySQL connection pool drained successfully.");
