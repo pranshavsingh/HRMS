@@ -37,14 +37,15 @@ export class WebClient {
   }
 
   processQueue(error, token = null) {
-    for (const item of this.failedQueue) {
+    const queue = [...this.failedQueue];
+    this.failedQueue = [];
+    for (const item of queue) {
       if (error) {
         item.reject(error);
       } else {
         item.resolve(token);
       }
     }
-    this.failedQueue = [];
   }
 
   async login(username, password, extra = {}) {
@@ -101,22 +102,24 @@ export class WebClient {
 
     // 401 Interceptor with Mutex Queue and _retry guard
     if (res.status === 401 && !options._retry && !endpoint.includes("/login/") && !endpoint.includes("/refresh/")) {
+      const currentToken = this.inMemoryAccessToken;
+      const sentHeader = headers["Authorization"] || headers["authorization"];
+      if (currentToken && sentHeader && sentHeader !== `Bearer ${currentToken}`) {
+        return await this.request(method, endpoint, {
+          ...options,
+          _retry: true,
+          headers: { ...headers, Authorization: `Bearer ${currentToken}` }
+        });
+      }
+
       if (this.isRefreshing) {
         return new Promise((resolve, reject) => {
-          this.failedQueue.push({
-            resolve: async (newToken) => {
-              try {
-                const retryRes = await this.request(method, endpoint, {
-                  ...options,
-                  _retry: true,
-                  headers: { ...headers, Authorization: `Bearer ${newToken}` }
-                });
-                resolve(retryRes);
-              } catch (err) {
-                reject(err);
-              }
-            },
-            reject
+          this.failedQueue.push({ resolve, reject });
+        }).then((newToken) => {
+          return this.request(method, endpoint, {
+            ...options,
+            _retry: true,
+            headers: { ...headers, Authorization: `Bearer ${newToken}` }
           });
         });
       }
@@ -126,6 +129,7 @@ export class WebClient {
         const refreshRes = await this.silentRefresh();
         if (refreshRes.ok && this.inMemoryAccessToken) {
           const newToken = this.inMemoryAccessToken;
+          this.isRefreshing = false;
           this.processQueue(null, newToken);
           return await this.request(method, endpoint, {
             ...options,
@@ -133,16 +137,21 @@ export class WebClient {
             headers: { ...headers, Authorization: `Bearer ${newToken}` }
           });
         } else {
+          this.isRefreshing = false;
           this.processQueue(new Error("Token refresh failed"), null);
           this.logoutLocal();
           return res;
         }
       } catch (err) {
+        this.isRefreshing = false;
         this.processQueue(err, null);
         this.logoutLocal();
         return res;
       } finally {
         this.isRefreshing = false;
+        if (this.failedQueue.length > 0) {
+          this.processQueue(null, this.inMemoryAccessToken);
+        }
       }
     }
 
@@ -215,14 +224,15 @@ export class MobileClient {
   }
 
   processQueue(error, token = null) {
-    for (const item of this.failedQueue) {
+    const queue = [...this.failedQueue];
+    this.failedQueue = [];
+    for (const item of queue) {
       if (error) {
         item.reject(error);
       } else {
         item.resolve(token);
       }
     }
-    this.failedQueue = [];
   }
 
   getSecureToken() {
@@ -315,22 +325,24 @@ export class MobileClient {
 
     // 401 Interceptor with Mutex Queue and _retry guard
     if (res.status === 401 && !options._retry && !endpoint.includes("/login/") && !endpoint.includes("/refresh/")) {
+      const currentToken = this.getSecureToken();
+      const sentHeader = headers["Authorization"] || headers["authorization"];
+      if (currentToken && sentHeader && sentHeader !== `Bearer ${currentToken}`) {
+        return await this.request(method, endpoint, {
+          ...options,
+          _retry: true,
+          headers: { ...headers, Authorization: `Bearer ${currentToken}` }
+        });
+      }
+
       if (this.isRefreshing) {
         return new Promise((resolve, reject) => {
-          this.failedQueue.push({
-            resolve: async (newToken) => {
-              try {
-                const retryRes = await this.request(method, endpoint, {
-                  ...options,
-                  _retry: true,
-                  headers: { ...headers, Authorization: `Bearer ${newToken}` }
-                });
-                resolve(retryRes);
-              } catch (err) {
-                reject(err);
-              }
-            },
-            reject
+          this.failedQueue.push({ resolve, reject });
+        }).then((newToken) => {
+          return this.request(method, endpoint, {
+            ...options,
+            _retry: true,
+            headers: { ...headers, Authorization: `Bearer ${newToken}` }
           });
         });
       }
@@ -340,6 +352,7 @@ export class MobileClient {
         const refreshRes = await this.silentRefresh();
         const newToken = this.getSecureToken();
         if (refreshRes.ok && newToken) {
+          this.isRefreshing = false;
           this.processQueue(null, newToken);
           return await this.request(method, endpoint, {
             ...options,
@@ -347,16 +360,21 @@ export class MobileClient {
             headers: { ...headers, Authorization: `Bearer ${newToken}` }
           });
         } else {
+          this.isRefreshing = false;
           this.processQueue(new Error("Mobile token refresh failed"), null);
           this.logoutLocal();
           return res;
         }
       } catch (err) {
+        this.isRefreshing = false;
         this.processQueue(err, null);
         this.logoutLocal();
         return res;
       } finally {
         this.isRefreshing = false;
+        if (this.failedQueue.length > 0) {
+          this.processQueue(null, this.getSecureToken());
+        }
       }
     }
 

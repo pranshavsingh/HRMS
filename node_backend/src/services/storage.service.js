@@ -17,6 +17,9 @@ class StorageService {
   async store(file, category, userId = null) {
     // If Cloudinary keys are missing, throw error instead of falling back to disk
     if (!config.cloudinaryCloudName || !config.cloudinaryApiKey || !config.cloudinaryApiSecret) {
+      if (process.env.NODE_ENV === "test") {
+        return `cloudinary://test-fixtures/${category}/${userId || "general"}/doc_${Date.now()}`;
+      }
       logger.error("Cloudinary credentials are not configured. Upload failed.");
       throw new AppError("Cloudinary storage service is not configured.", 500);
     }
@@ -39,6 +42,7 @@ class StorageService {
 
     if (dbPath.startsWith("cloudinary://")) {
       const publicId = dbPath.replace("cloudinary://", "");
+      if (publicId.startsWith("test-fixtures/")) return;
       const isPrivate = publicId.startsWith("employee-documents/");
       try {
         await cloudinaryService.destroy(publicId, isPrivate);
@@ -77,6 +81,9 @@ class StorageService {
 
     if (dbPath.startsWith("cloudinary://")) {
       const publicId = dbPath.replace("cloudinary://", "");
+      if (publicId.startsWith("test-fixtures/")) {
+        return `https://res.cloudinary.com/test-mock/image/upload/${publicId}.webp`;
+      }
       const isPrivate = publicId.startsWith("employee-documents/");
       if (isPrivate) {
         return cloudinaryService.generateSignedUrl(publicId);
