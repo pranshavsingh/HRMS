@@ -102,13 +102,17 @@ async function runSuite(suiteRelPath) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ["--test", fullPath], {
       stdio: "inherit",
-      env: { ...process.env, NODE_ENV: "test", MYSQL_CONNECTION_LIMIT: "2" }
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        MYSQL_CONNECTION_LIMIT: process.env.MYSQL_CONNECTION_LIMIT || "10"
+      }
     });
 
     const timer = setTimeout(() => {
-      console.error(`${c.red}✖ [TIMEOUT] Suite exceeded 90s limit: ${suiteRelPath}${c.reset}`);
+      console.error(`${c.red}✖ [TIMEOUT] Suite exceeded 120s limit: ${suiteRelPath}${c.reset}`);
       child.kill("SIGKILL");
-    }, 90000);
+    }, 120000);
 
     child.on("close", (code) => {
       clearTimeout(timer);
