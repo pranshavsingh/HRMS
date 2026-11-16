@@ -290,14 +290,19 @@ export const accountsRepository = {
     );
   },
 
-  async findEmployeesPaged({ limit = 50, offset = 0, role = null, search = "", status = null } = {}, tx = null) {
+  async findEmployeesPaged({ limit = 50, offset = 0, role = null, team = null, search = "", status = null } = {}, tx = null) {
     await ensureAccountsSchema();
     const whereConditions = ["u.deleted_at IS NULL", "u.role IN ('employee','manager','hr','admin','superadmin')"];
     const params = [];
 
-    if (role) {
+    if (role && role !== "all") {
       whereConditions.push("u.role = ?");
       params.push(role);
+    }
+
+    if (team && team !== "all") {
+      whereConditions.push("ep.team_name = ?");
+      params.push(team);
     }
 
     if (status === "active") {
@@ -332,14 +337,19 @@ export const accountsRepository = {
     return db.all(sql, params, tx);
   },
 
-  async countEmployees({ role = null, search = "", status = null } = {}, tx = null) {
+  async countEmployees({ role = null, team = null, search = "", status = null } = {}, tx = null) {
     await ensureAccountsSchema();
     const whereConditions = ["u.deleted_at IS NULL", "u.role IN ('employee','manager','hr','admin','superadmin')"];
     const params = [];
 
-    if (role) {
+    if (role && role !== "all") {
       whereConditions.push("u.role = ?");
       params.push(role);
+    }
+
+    if (team && team !== "all") {
+      whereConditions.push("ep.team_name = ?");
+      params.push(team);
     }
 
     if (status === "active") {
