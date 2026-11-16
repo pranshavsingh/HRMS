@@ -5,7 +5,7 @@
 **Branch**: `feat/phase-4-web-mobile-hardening`  
 **Base Commit**: `0896d0be97e9dca68ca78e1b6f0f5b991823eb91`  
 **Reported HEAD**: `05a47f8420830086013375dd56cf49465104594a`  
-**Audited & Verified HEAD**: `0e5b44f538b6a09c85398c422fe33aed20dee092`  
+**Audited & Verified HEAD**: `b174705589e0db7023bf8f142841bda86faea93a`  
 **Date**: 2026-11-16  
 **Final Governance Status**: **PASS — CODE ACCEPTANCE ONLY**
 
@@ -20,7 +20,7 @@
 | **Active Working Branch** | `feat/phase-4-web-mobile-hardening` | Dedicated Phase 4 feature branch |
 | **Base Commit SHA** | `0896d0be97e9dca68ca78e1b6f0f5b991823eb91` | Certified Phase 3 baseline (`0896d0b`) |
 | **Reported Implementation SHA** | `05a47f8420830086013375dd56cf49465104594a` | Clean commit of M4.2–M4.10 implementations |
-| **Current Verified HEAD SHA** | `0e5b44f538b6a09c85398c422fe33aed20dee092` | Includes minimal ESLint Node.js compliance fix |
+| **Current Verified HEAD SHA** | `b174705589e0db7023bf8f142841bda86faea93a` | Includes minimal CI and test resilience fixes |
 | **Main Branch HEAD SHA** | `00cd3cdde082bac3557a40563fa496b9aa4c5f60` | Verified clean ancestor of base commit |
 | **Working Tree Status** | Clean (0 modified, 0 untracked) | Working tree verified clean |
 | **Secret / Credential Leakage** | ZERO detected | Grep & AST verification across all staged files |
@@ -131,13 +131,14 @@ All 39 suites executed against the real Express application, live MySQL database
 ## G. CI Evidence
 
 - **Workflow File**: `.github/workflows/security.yml`
-- **Workflow Run ID**: `43815767584`
-- **Workflow Run URL**: [https://github.com/pranshavsingh/HRMS/actions/runs/43815767584](https://github.com/pranshavsingh/HRMS/actions/runs/43815767584)
-- **Tested HEAD SHA**: `0e5b44f538b6a09c85398c422fe33aed20dee092`
+- **Certified Passing Workflow Run ID**: `43818221885`
+- **Certified Passing Workflow Run URL**: [https://github.com/pranshavsingh/HRMS/actions/runs/43818221885](https://github.com/pranshavsingh/HRMS/actions/runs/43818221885)
+- **Tested HEAD SHA**: `b174705589e0db7023bf8f142841bda86faea93a`
+- **Overall Conclusion**: **SUCCESS (100% Green across all 3 CI Jobs)**
 - **Job Statuses**:
-  1. `Backend Security, Migrations & Tests`: Includes Phase 1-3 regressions and all 39 Phase 4 E2E suites.
-  2. `Frontend Quality & Build Verification`: Runs ESLint and Vite production build.
-  3. `Mobile Client Verification (TypeScript & Bundle)`: Runs `tsc --noEmit` and `expo export --platform android`.
+  1. `Frontend Quality & Build Verification`: **COMPLETED SUCCESS** (ESLint 0 errors, Vite production build clean).
+  2. `Mobile Client Verification (TypeScript & Bundle)`: **COMPLETED SUCCESS** (`npx tsc --noEmit` 0 errors, Expo static export Hermes bytecode generated).
+  3. `Backend Security, Migrations & Tests`: **COMPLETED SUCCESS** (All 24 steps completed cleanly: MySQL schema & migrations, Redis AOF persistence, Phase 1 security suite, Phase 2 concurrency & load suites, Phase 3 distributed outbox & worker suites, and all 39 Phase 4 E2E test suites).
 
 ---
 
@@ -158,12 +159,11 @@ Exactly 9 canonical documentation artifacts exist in `docs/phase-4/`:
 
 ## I. Minimal Corrections Implemented During Audit
 
-In accordance with the Minimal Correction Policy:
-1. **Defect Discovered**: In `hrms_saas/vite.config.js`, calling `process.cwd()` without explicitly importing `process` caused ESLint rule `no-undef` to report 1 error under the browser-focused ESLint configuration.
-2. **Impact**: Blocked the frontend CI quality gate step (`npm run lint`).
-3. **Correction**: Added `import process from 'node:process'` in `hrms_saas/vite.config.js`.
-4. **Verification**: `npm --prefix hrms_saas run lint` executed with **0 errors**.
-5. **Commit SHA**: `0e5b44f538b6a09c85398c422fe33aed20dee092`.
+In accordance with the Minimal Correction Policy, exactly four minimal, verified defect corrections were applied:
+1. **Frontend ESLint Compliance (`0e5b44f`)**: In `hrms_saas/vite.config.js`, calling `process.cwd()` without explicitly importing `process` caused ESLint rule `no-undef` to report 1 error under the browser-focused ESLint configuration. Resolved via `import process from 'node:process'`.
+2. **E2E Child Process Concurrency Limit (`a154fb6`)**: In `node_backend/tests/e2e/run_all.js`, child processes hardcoded `MYSQL_CONNECTION_LIMIT: "2"`, overriding CI connection pool limits and starving MySQL queries during high-concurrency suites. Resolved by respecting `process.env.MYSQL_CONNECTION_LIMIT || "10"` and relaxing suite timeout to 120s for CI runners.
+3. **Client Simulator Refresh Mutex Hardening (`b174705`)**: In `node_backend/tests/e2e/harness/client-simulator.js`, concurrent requests arriving with 401 while a refresh was resolving could remain stranded in `failedQueue`. Resolved by resetting `isRefreshing = false` prior to queue processing, draining queued promises atomically, and short-circuiting in-flight requests whose tokens were already rotated.
+4. **Hermetic Test Storage Fallback (`b174705`)**: In `node_backend/src/services/storage.service.js`, document uploads threw HTTP 500 when external Cloudinary API keys were missing in hermetic CI test environments. Resolved by adding a synthetic `cloudinary://test-fixtures/...` fallback for `NODE_ENV === "test"`.
 
 ---
 
@@ -177,7 +177,7 @@ In accordance with the Minimal Correction Policy:
 4. **Android Release Binary Status**: **DEFERRED TO CI/EAS BUILD PIPELINE**. (No local Android SDK / EAS cloud credentials provided in execution environment).
 5. **Emulator Testing**: **NOT VERIFIED**. (No Android emulator installed in local environment).
 6. **Physical-Device Testing**: **NOT VERIFIED**. (No physical Android hardware supplied).
-7. **CI Status**: **ACTIVE (Run ID 43815767584)**.
+7. **CI Status**: **PASSED (Certified Run ID 43818221885 — 100% Success across all 3 jobs)**.
 8. **Security Status**: **PASSED**. Zero critical or high-severity vulnerabilities remain.
 9. **Merge Recommendation**: The working branch `feat/phase-4-web-mobile-hardening` is verified, stable, and recommended for merge into `main` by the Project Owner.
 10. **Deployment Recommendation**: Deployment to live infrastructure is deferred to **Phase 5 (Production Infrastructure)** awaiting explicit Project Owner authorization.
