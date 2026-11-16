@@ -679,9 +679,10 @@ export const accountsService = {
 
   async getEmployees(query = {}) {
     const { page, limit, offset } = parsePagination(query, 50, 100);
-    const [total, rows] = await Promise.all([
+    const [total, rows, totalDocuments] = await Promise.all([
       accountsRepository.countEmployees(query),
-      accountsRepository.findEmployeesPaged({ ...query, limit, offset })
+      accountsRepository.findEmployeesPaged({ ...query, limit, offset }),
+      accountsRepository.countTotalDocuments()
     ]);
 
     const userIds = rows.map((r) => r.id);
@@ -691,7 +692,7 @@ export const accountsService = {
     ]);
 
     const data = this.serializeStaffMembersBatch(rows, docCountMap, locMap);
-    return formatPaginationResponse(data, total, page, limit, { records: data });
+    return formatPaginationResponse(data, total, page, limit, { records: data, total_documents: totalDocuments });
   },
 
   async getAdminSummary() {

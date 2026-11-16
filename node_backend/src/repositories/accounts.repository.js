@@ -376,6 +376,12 @@ export const accountsRepository = {
     return Number(row?.c || 0);
   },
 
+  async countTotalDocuments(tx = null) {
+    await ensureAccountsSchema();
+    const row = await db.get("SELECT COUNT(*) as c FROM accounts_employeedocument", [], tx);
+    return Number(row?.c || 0);
+  },
+
   async findDocumentCountsByUserIds(userIds = [], tx = null) {
     if (!userIds || userIds.length === 0) return new Map();
     const placeholders = userIds.map(() => "?").join(",");
