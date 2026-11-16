@@ -244,6 +244,8 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           QUEUE_REDIS_URL: redis://127.0.0.1:6379
           OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
+          MAIL_FROM: HRMS <noreply@hrms.internal>
+          SMTP_USER: noreply@hrms.internal
         run: |
           cd node_backend
           node --test tests/phase3/otp_outbox.test.js
@@ -266,6 +268,8 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           QUEUE_REDIS_URL: redis://127.0.0.1:6379
           OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
+          MAIL_FROM: HRMS <noreply@hrms.internal>
+          SMTP_USER: noreply@hrms.internal
         run: |
           cd node_backend
           node --test tests/phase3/failure_injection.test.js

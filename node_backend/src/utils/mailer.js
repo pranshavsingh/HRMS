@@ -12,7 +12,7 @@ export const transporter = nodemailer.createTransport({
 });
 
 export async function sendOtpEmail(to, otp) {
-  const from = config.mailFrom || config.smtpUser;
+  const from = config.mailFrom || config.smtpUser || "HRMS <noreply@hrms.internal>";
   if (!from) throw new Error("MAIL_FROM/SMTP_USER is not configured");
 
   await transporter.sendMail({
