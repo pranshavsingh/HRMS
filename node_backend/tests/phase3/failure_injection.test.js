@@ -576,4 +576,521 @@ describe("P3.4 — Failure Injection & Edge Case Resilience Test Suite", () => {
     assert.equal(record.status, "DEAD_LETTER");
     assert.equal(record.last_error, "Poison payload verified");
   });
+
+  describe("Consumer Idempotency DLQ Fencing & Ownership Verification", () => {
+    it("should allow a valid active owner to dead-letter its own PROCESSING record", async () => {
+      const testJobId = `job_dlq_valid_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_active_dlq";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      const dlqSuccess = await consumerIdempotencyRepository.markDeadLetter(
+        testJobId,
+        handler,
+        worker,
+        claim.fencingToken,
+        "Malformed payload detected"
+      );
+      assert.equal(dlqSuccess, true, "Active owner must successfully transition record to DEAD_LETTER");
+
+      const record = await consumerIdempotencyRepository.findRecord(testJobId, handler);
+      assert.equal(record.status, "DEAD_LETTER");
+      assert.equal(record.claimed_by, null);
+    });
+
+    it("should reject dead-letter transition when worker lease has expired", async () => {
+      const testJobId = `job_dlq_expired_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_expired_dlq";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      // Expire the lease in DB
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      if (isMysql) {
+        await db.run(
+          "UPDATE consumer_processed_jobs SET lease_expires_at = DATE_SUB(NOW(), INTERVAL 10 SECOND) WHERE job_id = ?",
+          [testJobId]
+        );
+      } else {
+        await db.run(
+          "UPDATE consumer_processed_jobs SET lease_expires_at = datetime('now', '-10 seconds') WHERE job_id = ?",
+          [testJobId]
+        );
+      }
+
+      const dlqSuccess = await consumerIdempotencyRepository.markDeadLetter(
+        testJobId,
+        handler,
+        worker,
+        claim.fencingToken,
+        "Expired worker poison claim"
+      );
+      assert.equal(dlqSuccess, false, "Worker with expired lease must be fenced out of dead-lettering");
+    });
+
+    it("should reject dead-letter transition with old fencing token after claim recovery", async () => {
+      const testJobId = `job_dlq_stale_token_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const workerA = "worker_stale_dlq_A";
+      const workerB = "worker_recovery_dlq_B";
+
+      const claimA = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerA, 60);
+      assert.equal(claimA.acquired, true);
+
+      // Expire worker A lease
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      if (isMysql) {
+        await db.run(
+          "UPDATE consumer_processed_jobs SET lease_expires_at = DATE_SUB(NOW(), INTERVAL 10 SECOND) WHERE job_id = ?",
+          [testJobId]
+        );
+      } else {
+        await db.run(
+          "UPDATE consumer_processed_jobs SET lease_expires_at = datetime('now', '-10 seconds') WHERE job_id = ?",
+          [testJobId]
+        );
+      }
+
+      // Worker B recovers claim, incrementing fencing token to 2
+      const claimB = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerB, 60);
+      assert.equal(claimB.acquired, true);
+      assert.equal(claimB.fencingToken, 2);
+
+      // Stale Worker A attempts to dead-letter with token 1: MUST FAIL
+      const staleDlq = await consumerIdempotencyRepository.markDeadLetter(
+        testJobId,
+        handler,
+        workerA,
+        claimA.fencingToken,
+        "Stale worker poison claim"
+      );
+      assert.equal(staleDlq, false, "Worker with superseded fencing token must be fenced out");
+    });
+
+    it("should reject changing a COMPLETED consumer record into DEAD_LETTER", async () => {
+      const testJobId = `job_dlq_completed_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_completed_dlq";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      // Complete execution normally
+      const completed = await consumerIdempotencyRepository.completeExecution(
+        testJobId,
+        handler,
+        worker,
+        claim.fencingToken,
+        { success: true }
+      );
+      assert.equal(completed, true);
+
+      // Attempt to dead-letter completed job: MUST FAIL
+      const dlqSuccess = await consumerIdempotencyRepository.markDeadLetter(
+        testJobId,
+        handler,
+        worker,
+        claim.fencingToken,
+        "Attempt to poison completed job"
+      );
+      assert.equal(dlqSuccess, false, "Completed consumer record cannot be changed to DEAD_LETTER");
+
+      const record = await consumerIdempotencyRepository.findRecord(testJobId, handler);
+      assert.equal(record.status, "COMPLETED", "Status must remain COMPLETED");
+    });
+
+    it("should reject dead-letter transition when worker ID does not match active claim", async () => {
+      const testJobId = `job_dlq_wrong_worker_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const rightfulWorker = "worker_rightful_dlq";
+      const wrongWorker = "worker_imposter_dlq";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, rightfulWorker, 60);
+      assert.equal(claim.acquired, true);
+
+      // Imposter worker attempts to dead-letter: MUST FAIL
+      const dlqSuccess = await consumerIdempotencyRepository.markDeadLetter(
+        testJobId,
+        handler,
+        wrongWorker,
+        claim.fencingToken,
+        "Imposter attempt"
+      );
+      assert.equal(dlqSuccess, false, "Worker with wrong workerId must be rejected");
+    });
+
+    it("should safely reject repeated dead-letter attempts (Idempotent rejection)", async () => {
+      const testJobId = `job_dlq_repeat_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_repeat_dlq";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      // First DLQ transition: SUCCEEDS
+      const first = await consumerIdempotencyRepository.markDeadLetter(
+        testJobId,
+        handler,
+        worker,
+        claim.fencingToken,
+        "First DLQ call"
+      );
+      assert.equal(first, true);
+
+      // Second DLQ transition: FAILS cleanly (status is now DEAD_LETTER, not PROCESSING)
+      const second = await consumerIdempotencyRepository.markDeadLetter(
+        testJobId,
+        handler,
+        worker,
+        claim.fencingToken,
+        "Duplicate DLQ call"
+      );
+      assert.equal(second, false, "Repeated DLQ call must safely affect 0 rows and return false");
+    });
+
+    it("should reject dead-letter transition when required arguments are missing", async () => {
+      assert.equal(await consumerIdempotencyRepository.markDeadLetter(null, "h", "w", 1), false);
+      assert.equal(await consumerIdempotencyRepository.markDeadLetter("j", null, "w", 1), false);
+      assert.equal(await consumerIdempotencyRepository.markDeadLetter("j", "h", null, 1), false);
+      assert.equal(await consumerIdempotencyRepository.markDeadLetter("j", "h", "w", null), false);
+    });
+  });
+
+  describe("Transactional Outbox DLQ Ownership & Consumer Fencing", () => {
+    it("should allow a valid active consumer to dead-letter an eligible outbox event", async () => {
+      const key = `outbox_dlq_valid_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const outboxId = await outboxRepository.createEvent({
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        aggregateType: "User",
+        aggregateId: "9101",
+        payload: { poison: true },
+        idempotencyKey: key
+      });
+      createdIds.push(outboxId);
+
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+      await db.run(`UPDATE outbox_events SET status = 'PUBLISHED', published_at = ${nowExpr} WHERE id = ?`, [outboxId]);
+
+      const testJobId = `job_outbox_dlq_${Date.now()}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_consumer_dlq_valid";
+
+      // Consumer claims execution in consumer_processed_jobs
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      const ownership = {
+        workerId: worker,
+        fencingToken: claim.fencingToken,
+        jobId: testJobId,
+        handlerName: handler
+      };
+
+      const dlqSuccess = await outboxRepository.markDeadLetter(outboxId, "Poison payload in consumer", ownership);
+      assert.equal(dlqSuccess, true, "Active consumer must successfully dead-letter outbox event");
+
+      const record = await outboxRepository.findById(outboxId);
+      assert.equal(record.status, "DEAD_LETTER");
+      assert.ok(record.last_error.includes("Poison payload in consumer"));
+    });
+
+    it("should reject outbox dead-letter when consumer lease has expired", async () => {
+      const key = `outbox_dlq_expired_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const outboxId = await outboxRepository.createEvent({
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        aggregateType: "User",
+        aggregateId: "9102",
+        payload: { poison: true },
+        idempotencyKey: key
+      });
+      createdIds.push(outboxId);
+
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+      await db.run(`UPDATE outbox_events SET status = 'PUBLISHED', published_at = ${nowExpr} WHERE id = ?`, [outboxId]);
+
+      const testJobId = `job_outbox_expired_${Date.now()}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_consumer_expired";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      // Expire consumer lease
+      if (isMysql) {
+        await db.run(
+          "UPDATE consumer_processed_jobs SET lease_expires_at = DATE_SUB(NOW(), INTERVAL 10 SECOND) WHERE job_id = ?",
+          [testJobId]
+        );
+      } else {
+        await db.run(
+          "UPDATE consumer_processed_jobs SET lease_expires_at = datetime('now', '-10 seconds') WHERE job_id = ?",
+          [testJobId]
+        );
+      }
+
+      const ownership = {
+        workerId: worker,
+        fencingToken: claim.fencingToken,
+        jobId: testJobId,
+        handlerName: handler
+      };
+
+      const dlqSuccess = await outboxRepository.markDeadLetter(outboxId, "Expired consumer poison claim", ownership);
+      assert.equal(dlqSuccess, false, "Stale consumer with expired lease must be fenced out of dead-lettering outbox");
+
+      const record = await outboxRepository.findById(outboxId);
+      assert.equal(record.status, "PUBLISHED", "Outbox record status must remain PUBLISHED");
+    });
+
+    it("should reject outbox dead-letter with old fencing token after claim recovery", async () => {
+      const key = `outbox_dlq_stale_token_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const outboxId = await outboxRepository.createEvent({
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        aggregateType: "User",
+        aggregateId: "9103",
+        payload: { poison: true },
+        idempotencyKey: key
+      });
+      createdIds.push(outboxId);
+
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+      await db.run(`UPDATE outbox_events SET status = 'PUBLISHED', published_at = ${nowExpr} WHERE id = ?`, [outboxId]);
+
+      const testJobId = `job_outbox_token_${Date.now()}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const workerA = "worker_outbox_stale_A";
+      const workerB = "worker_outbox_survivor_B";
+
+      const claimA = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerA, 60);
+      assert.equal(claimA.acquired, true);
+
+      // Expire worker A lease
+      if (isMysql) {
+        await db.run(
+          "UPDATE consumer_processed_jobs SET lease_expires_at = DATE_SUB(NOW(), INTERVAL 10 SECOND) WHERE job_id = ?",
+          [testJobId]
+        );
+      } else {
+        await db.run(
+          "UPDATE consumer_processed_jobs SET lease_expires_at = datetime('now', '-10 seconds') WHERE job_id = ?",
+          [testJobId]
+        );
+      }
+
+      // Worker B recovers claim, incrementing fencing token to 2
+      const claimB = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerB, 60);
+      assert.equal(claimB.acquired, true);
+      assert.equal(claimB.fencingToken, 2);
+
+      // Worker A attempts outbox dead-letter with token 1: MUST FAIL
+      const ownershipA = {
+        workerId: workerA,
+        fencingToken: claimA.fencingToken,
+        jobId: testJobId,
+        handlerName: handler
+      };
+      const dlqA = await outboxRepository.markDeadLetter(outboxId, "Worker A stale DLQ", ownershipA);
+      assert.equal(dlqA, false, "Stale worker with superseded fencing token must not dead-letter outbox");
+
+      // Worker B dead-letters with valid token 2: MUST SUCCEED
+      const ownershipB = {
+        workerId: workerB,
+        fencingToken: claimB.fencingToken,
+        jobId: testJobId,
+        handlerName: handler
+      };
+      const dlqB = await outboxRepository.markDeadLetter(outboxId, "Worker B valid DLQ", ownershipB);
+      assert.equal(dlqB, true, "Active recovery worker with valid fencing token must succeed");
+
+      const record = await outboxRepository.findById(outboxId);
+      assert.equal(record.status, "DEAD_LETTER");
+    });
+
+    it("should reject outbox dead-letter if consumer execution is already COMPLETED", async () => {
+      const key = `outbox_dlq_completed_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const outboxId = await outboxRepository.createEvent({
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        aggregateType: "User",
+        aggregateId: "9104",
+        payload: { poison: true },
+        idempotencyKey: key
+      });
+      createdIds.push(outboxId);
+
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+      await db.run(`UPDATE outbox_events SET status = 'PUBLISHED', published_at = ${nowExpr} WHERE id = ?`, [outboxId]);
+
+      const testJobId = `job_outbox_comp_${Date.now()}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_outbox_completed";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      // Complete consumer execution
+      await consumerIdempotencyRepository.completeExecution(
+        testJobId,
+        handler,
+        worker,
+        claim.fencingToken,
+        { success: true }
+      );
+
+      // Attempt to dead-letter outbox after completion: MUST FAIL
+      const ownership = {
+        workerId: worker,
+        fencingToken: claim.fencingToken,
+        jobId: testJobId,
+        handlerName: handler
+      };
+      const dlqSuccess = await outboxRepository.markDeadLetter(outboxId, "Poison after complete", ownership);
+      assert.equal(dlqSuccess, false, "Outbox event cannot be transitioned to DEAD_LETTER after consumer completed");
+
+      const record = await outboxRepository.findById(outboxId);
+      assert.equal(record.status, "PUBLISHED");
+    });
+
+    it("should reject outbox dead-letter if worker ID does not match active consumer claim", async () => {
+      const key = `outbox_dlq_imposter_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const outboxId = await outboxRepository.createEvent({
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        aggregateType: "User",
+        aggregateId: "9105",
+        payload: { poison: true },
+        idempotencyKey: key
+      });
+      createdIds.push(outboxId);
+
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+      await db.run(`UPDATE outbox_events SET status = 'PUBLISHED', published_at = ${nowExpr} WHERE id = ?`, [outboxId]);
+
+      const testJobId = `job_outbox_imp_${Date.now()}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const rightfulWorker = "worker_rightful_consumer";
+      const rogueWorker = "worker_rogue_consumer";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, rightfulWorker, 60);
+      assert.equal(claim.acquired, true);
+
+      const rogueOwnership = {
+        workerId: rogueWorker,
+        fencingToken: claim.fencingToken,
+        jobId: testJobId,
+        handlerName: handler
+      };
+
+      const dlqSuccess = await outboxRepository.markDeadLetter(outboxId, "Rogue poison attempt", rogueOwnership);
+      assert.equal(dlqSuccess, false, "Rogue consumer worker must be fenced out");
+    });
+
+    it("should safely reject repeated outbox dead-letter transitions without state corruption", async () => {
+      const key = `outbox_dlq_repeat_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const outboxId = await outboxRepository.createEvent({
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        aggregateType: "User",
+        aggregateId: "9106",
+        payload: { poison: true },
+        idempotencyKey: key
+      });
+      createdIds.push(outboxId);
+
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+      await db.run(`UPDATE outbox_events SET status = 'PUBLISHED', published_at = ${nowExpr} WHERE id = ?`, [outboxId]);
+
+      const testJobId = `job_outbox_rep_${Date.now()}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_repeat_consumer";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      const ownership = {
+        workerId: worker,
+        fencingToken: claim.fencingToken,
+        jobId: testJobId,
+        handlerName: handler
+      };
+
+      // First call succeeds
+      const first = await outboxRepository.markDeadLetter(outboxId, "Initial DLQ call", ownership);
+      assert.equal(first, true);
+
+      // Second call fails safely (status is now DEAD_LETTER)
+      const second = await outboxRepository.markDeadLetter(outboxId, "Duplicate DLQ call", ownership);
+      assert.equal(second, false, "Repeated outbox dead-letter call must affect 0 rows and return false");
+
+      const record = await outboxRepository.findById(outboxId);
+      assert.equal(record.status, "DEAD_LETTER");
+      assert.equal(record.last_error, "Initial DLQ call");
+    });
+
+    it("should preserve legitimate operator dead-letter replay after consumer DLQ transition", async () => {
+      const key = `outbox_dlq_replay_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const outboxId = await outboxRepository.createEvent({
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        aggregateType: "User",
+        aggregateId: "9107",
+        payload: { fixable: true },
+        idempotencyKey: key
+      });
+      createdIds.push(outboxId);
+
+      const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+      const nowExpr = isMysql ? "NOW()" : "datetime('now')";
+      await db.run(`UPDATE outbox_events SET status = 'PUBLISHED', published_at = ${nowExpr} WHERE id = ?`, [outboxId]);
+
+      const testJobId = `job_outbox_rep_op_${Date.now()}`;
+      testJobIds.push(testJobId);
+      const handler = "Send Password Reset OTP Email";
+      const worker = "worker_replay_consumer";
+
+      const claim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, worker, 60);
+      assert.equal(claim.acquired, true);
+
+      const ownership = {
+        workerId: worker,
+        fencingToken: claim.fencingToken,
+        jobId: testJobId,
+        handlerName: handler
+      };
+
+      // Consumer marks DLQ
+      await outboxRepository.markDeadLetter(outboxId, "Temporary poison error", ownership);
+
+      // Operator inspects DLQ
+      const dlqList = await outboxRepository.getDeadLetterEvents(10, 0);
+      assert.ok(dlqList.some((e) => e.id === outboxId), "Dead-lettered event must appear in operator inspection");
+
+      // Operator replays event back to PENDING
+      const replayed = await outboxRepository.retryDeadLetterEvent(outboxId);
+      assert.ok(replayed && (replayed === true || replayed.success === true));
+
+      const replayedRecord = await outboxRepository.findById(outboxId);
+      assert.equal(replayedRecord.status, "PENDING", "Replayed event must return to PENDING");
+      assert.equal(replayedRecord.retry_count, 0);
+      assert.equal(replayedRecord.last_error, null);
+    });
+  });
 });

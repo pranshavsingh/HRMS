@@ -221,41 +221,43 @@ export const consumerIdempotencyRepository = {
 
   /**
    * Persistently quarantine an unrecoverable poison payload to DEAD_LETTER status.
+   * Hardened DLQ fencing: strictly enforces that the caller owns the active claim
+   * (matching workerId, matching fencingToken, status = 'PROCESSING', and unexpired lease).
+   * 
+   * @param {string} jobId - BullMQ Job ID
+   * @param {string} handlerName - Name of the consumer handler
+   * @param {string} workerId - Identifier of claiming worker
+   * @param {number} fencingToken - Monotonic fencing token of active claim
+   * @param {string} [errorMsg=null] - Error description
+   * @param {object} [tx=null] - Optional transaction
+   * @returns {Promise<boolean>} - True if record transitioned to DEAD_LETTER, false if fenced out
    */
-  async markDeadLetter(jobId, handlerName, workerId = null, fencingToken = null, errorMsg = null, tx = null) {
+  async markDeadLetter(jobId, handlerName, workerId, fencingToken, errorMsg = null, tx = null) {
+    if (!jobId || !handlerName || !workerId || fencingToken === null || fencingToken === undefined) {
+      return false;
+    }
+
     const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
     const nowExpr = isMysql ? "NOW()" : "datetime('now')";
     const resultJson = errorMsg ? JSON.stringify({ error: String(errorMsg).slice(0, 500) }) : null;
 
-    let sql;
-    let params;
-
-    if (workerId && fencingToken) {
-      sql = `
-        UPDATE consumer_processed_jobs
-        SET status = 'DEAD_LETTER',
-            result = ?,
-            claimed_by = NULL,
-            lease_expires_at = NULL,
-            updated_at = ${nowExpr}
-        WHERE job_id = ? AND handler_name = ? AND claimed_by = ? AND fencing_token = ?
-      `;
-      params = [resultJson, String(jobId), handlerName, workerId, fencingToken];
-    } else {
-      sql = `
-        UPDATE consumer_processed_jobs
-        SET status = 'DEAD_LETTER',
-            result = ?,
-            claimed_by = NULL,
-            lease_expires_at = NULL,
-            updated_at = ${nowExpr}
-        WHERE job_id = ? AND handler_name = ?
-      `;
-      params = [resultJson, String(jobId), handlerName];
-    }
+    const sql = `
+      UPDATE consumer_processed_jobs
+      SET status = 'DEAD_LETTER',
+          result = ?,
+          claimed_by = NULL,
+          lease_expires_at = NULL,
+          updated_at = ${nowExpr}
+      WHERE job_id = ? 
+        AND handler_name = ? 
+        AND claimed_by = ? 
+        AND fencing_token = ? 
+        AND status = 'PROCESSING'
+        AND lease_expires_at >= ${nowExpr}
+    `;
 
     const runner = tx || db;
-    const res = await runner.run(sql, params, tx);
+    const res = await runner.run(sql, [resultJson, String(jobId), handlerName, workerId, Number(fencingToken)], tx);
     return res.changes > 0;
   },
 

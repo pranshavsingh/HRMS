@@ -218,15 +218,22 @@ export const outboxRepository = {
 
   /**
    * Persistently quarantine an event to DEAD_LETTER status (e.g. unparseable poison payload).
-   * Enforces claim fencing if workerId is provided: only the active lease holder can dead-letter it.
+   * Enforces strict claim ownership and fencing:
+   * - Consumer Context: If consumer claim context is provided ({ workerId, fencingToken, jobId, handlerName }),
+   *   verifies that the outbox record is PUBLISHED/PENDING and that consumer_processed_jobs contains an active,
+   *   unexpired claim in PROCESSING status for that exact worker and fencing token.
+   * - Dispatcher Context: If workerId is provided (string or { workerId }), verifies that the outbox
+   *   record is currently CLAIMED by that exact dispatcher and the claim lease has not expired.
+   * - Administrative Context: If no ownership context is provided, only unassigned, unclaimed PENDING
+   *   records may be transitioned.
    * 
    * @param {number|string} id - Outbox event ID
    * @param {string} errorMessage - Error description
-   * @param {string} [workerId=null] - Optional claiming worker identifier for claim fencing
+   * @param {string|object} [ownership=null] - Dispatcher workerId OR consumer claim context
    * @param {object} [tx=null] - Optional transaction
-   * @returns {Promise<boolean>}
+   * @returns {Promise<boolean>} - True if transitioned to DEAD_LETTER, false if fenced out
    */
-  async markDeadLetter(id, errorMessage, workerId = null, tx = null) {
+  async markDeadLetter(id, errorMessage, ownership = null, tx = null) {
     const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
     const nowExpr = isMysql ? "NOW()" : "datetime('now')";
     const sanitizedError = errorMessage ? String(errorMessage).slice(0, 1000) : "Poison payload quarantined";
@@ -234,7 +241,15 @@ export const outboxRepository = {
     let sql;
     let params;
 
-    if (workerId) {
+    const isConsumerContext = Boolean(
+      ownership && typeof ownership === "object" && ownership.jobId && ownership.handlerName
+    );
+
+    if (isConsumerContext) {
+      const { workerId, fencingToken, jobId, handlerName } = ownership;
+      if (!workerId || fencingToken === null || fencingToken === undefined || !jobId || !handlerName) {
+        return false;
+      }
       sql = `
         UPDATE outbox_events 
         SET status = 'DEAD_LETTER', 
@@ -243,24 +258,48 @@ export const outboxRepository = {
             claimed_until = NULL,
             updated_at = ${nowExpr}
         WHERE id = ? 
-          AND (
-            (status = 'CLAIMED' AND claimed_by = ? AND claimed_until >= ${nowExpr})
-            OR status IN ('PUBLISHED', 'PENDING')
+          AND status IN ('PUBLISHED', 'PENDING')
+          AND EXISTS (
+            SELECT 1 FROM consumer_processed_jobs 
+            WHERE job_id = ? 
+              AND handler_name = ? 
+              AND claimed_by = ? 
+              AND fencing_token = ? 
+              AND status = 'PROCESSING' 
+              AND lease_expires_at >= ${nowExpr}
           )
       `;
-      params = [sanitizedError, id, workerId];
+      params = [sanitizedError, id, String(jobId), String(handlerName), String(workerId), Number(fencingToken)];
     } else {
-      sql = `
-        UPDATE outbox_events 
-        SET status = 'DEAD_LETTER', 
-            last_error = ?, 
-            claimed_by = NULL, 
-            claimed_until = NULL,
-            updated_at = ${nowExpr}
-        WHERE id = ? 
-          AND (status != 'CLAIMED' OR claimed_until < ${nowExpr})
-      `;
-      params = [sanitizedError, id];
+      const workerId = typeof ownership === "string" ? ownership : (ownership && ownership.workerId);
+      if (workerId) {
+        sql = `
+          UPDATE outbox_events 
+          SET status = 'DEAD_LETTER', 
+              last_error = ?, 
+              claimed_by = NULL, 
+              claimed_until = NULL,
+              updated_at = ${nowExpr}
+          WHERE id = ? 
+            AND status = 'CLAIMED' 
+            AND claimed_by = ? 
+            AND claimed_until >= ${nowExpr}
+        `;
+        params = [sanitizedError, id, String(workerId)];
+      } else {
+        sql = `
+          UPDATE outbox_events 
+          SET status = 'DEAD_LETTER', 
+              last_error = ?, 
+              claimed_by = NULL, 
+              claimed_until = NULL,
+              updated_at = ${nowExpr}
+          WHERE id = ? 
+            AND status = 'PENDING'
+            AND (claimed_by IS NULL OR claimed_until < ${nowExpr})
+        `;
+        params = [sanitizedError, id];
+      }
     }
 
     const runner = tx || db;

@@ -11,7 +11,16 @@ const HANDLER_NAME = "Send Password Reset OTP Email";
  * BullMQ Job Handler for Password Reset OTP Email dispatch.
  * Decrypts the AES-256-GCM outbox payload, verifies that the OTP has not
  * expired or been superseded, and sends the email via SMTP.
- * Enforces durable consumer idempotency to prevent duplicate deliveries.
+ * 
+ * Delivery Guarantee Semantics:
+ * - Queue processing is durable and idempotent at the application and database level.
+ * - SMTP delivery provides AT-LEAST-ONCE semantics where external provider-side idempotency
+ *   is unavailable. If the SMTP provider accepts the message but the worker process crashes
+ *   before recording completion in consumer_processed_jobs, a peer worker will recover the
+ *   expired claim and may retransmit the message.
+ * - Mitigations: Checks fresh database state before transmission (skipping expired, consumed,
+ *   or superseded OTPs), uses short worker leases (60s), monotonic fencing tokens, and
+ *   strict claim recovery to bound duplicate transmission risk.
  * 
  * @param {import("bullmq").Job} job - BullMQ job instance
  */
@@ -41,6 +50,7 @@ export async function sendOtpEmailHandler(job) {
     return { duplicate: true, skipped: true, reason };
   }
   const fencingToken = claim.fencingToken;
+  const consumerOwnership = { workerId, fencingToken, jobId, handlerName: HANDLER_NAME };
 
   let decrypted;
   try {
@@ -49,7 +59,7 @@ export async function sendOtpEmailHandler(job) {
   } catch (err) {
     logger.error("[JobHandler:sendOtpEmail] Poison payload decryption error for JobID [%s]: %s", jobId, err.message);
     if (outboxEventId) {
-      await outboxRepository.markDeadLetter(outboxEventId, `Poison payload: ${err.message}`, workerId).catch(() => {});
+      await outboxRepository.markDeadLetter(outboxEventId, `Poison payload: ${err.message}`, consumerOwnership).catch(() => {});
     }
     await consumerIdempotencyRepository.markDeadLetter(jobId, HANDLER_NAME, workerId, fencingToken, err.message).catch(() => {});
     return { status: "DEAD_LETTER", reason: "PAYLOAD_DECRYPTION_FAILED", error: err.message };
@@ -60,7 +70,7 @@ export async function sendOtpEmailHandler(job) {
   if (!email || !otp) {
     const errorMsg = "Poison payload: missing required email or OTP field.";
     if (outboxEventId) {
-      await outboxRepository.markDeadLetter(outboxEventId, errorMsg, workerId).catch(() => {});
+      await outboxRepository.markDeadLetter(outboxEventId, errorMsg, consumerOwnership).catch(() => {});
     }
     await consumerIdempotencyRepository.markDeadLetter(jobId, HANDLER_NAME, workerId, fencingToken, errorMsg).catch(() => {});
     return { status: "DEAD_LETTER", reason: "MISSING_REQUIRED_FIELDS", error: errorMsg };
