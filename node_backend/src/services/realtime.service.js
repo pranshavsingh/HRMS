@@ -130,8 +130,18 @@ class RealtimeService {
         socket.join(`user:${user.id}`);
       }
 
-      // Auto-join role-based room (e.g. role:admin, role:hr, role:employee)
+      // Auto-join tenant-scoped user room
+      if (user.id && user.organization_id) {
+        socket.join(`org:${user.organization_id}:user:${user.id}`);
+      }
+
+      // Auto-join tenant-scoped role room (e.g. org:10:role:admin)
       const role = (user.role || "").toLowerCase();
+      if (role && user.organization_id) {
+        socket.join(`org:${user.organization_id}:role:${role}`);
+      }
+
+      // Auto-join role-based room (e.g. role:admin, role:hr, role:employee)
       if (role) {
         socket.join(`role:${role}`);
       }
@@ -165,29 +175,51 @@ class RealtimeService {
 
   /**
    * Verify if a user is authorized to join a requested room.
+   * Strictly enforces tenant isolation and role boundaries.
    */
   canJoinRoom(user, roomName) {
     if (!roomName || typeof roomName !== "string") return false;
+
+    // 1. Tenant-scoped room verification: org:<orgId>:...
+    if (roomName.startsWith("org:")) {
+      const parts = roomName.split(":");
+      const targetOrgId = parts[1];
+      // Cross-tenant access strictly forbidden
+      if (String(user.organization_id) !== String(targetOrgId)) {
+        return false;
+      }
+      // org:<orgId>
+      if (parts.length === 2) return true;
+      // org:<orgId>:role:<role>
+      if (parts[2] === "role") {
+        return (user.role || "").toLowerCase() === (parts[3] || "").toLowerCase();
+      }
+      // org:<orgId>:user:<userId>
+      if (parts[2] === "user") {
+        return String(user.id) === String(parts[3]);
+      }
+      // org:<orgId>:<channel>
+      if (["attendance", "leave", "notifications"].includes(parts[2])) {
+        return ["admin", "hr", "manager"].includes((user.role || "").toLowerCase());
+      }
+      return false;
+    }
+
     const [type, id] = roomName.split(":");
 
-    // Users can always join their own user room
+    // 2. Personal user room: strictly restricted to own user ID
     if (type === "user" && String(id) === String(user.id)) {
       return true;
     }
 
-    // Role-based rooms require matching user role
+    // 3. Role-based rooms require matching user role
     const role = (user.role || "").toLowerCase();
     if (type === "role" && role === String(id).toLowerCase()) {
       return true;
     }
 
-    // Admins and HR have access to administrative event rooms
+    // 4. Admins and HR have access to administrative event rooms
     if (["admin", "hr", "manager"].includes(role) && ["attendance", "leave", "notifications"].includes(roomName)) {
-      return true;
-    }
-
-    // Org-level rooms require matching organization ID
-    if (type === "org" && String(user.organization_id) === String(id)) {
       return true;
     }
 
@@ -211,8 +243,15 @@ class RealtimeService {
 
   /**
    * Broadcast an event to a role (e.g. all admins or HR) across all API instances.
+   * If organizationId is provided, scopes the broadcast strictly to that organization.
+   * 
+   * @param {string} role - Target role name
+   * @param {string} eventType - Event identifier
+   * @param {object} [data={}] - Payload data
+   * @param {string|number} [aggregateId=null] - Aggregate ID
+   * @param {string|number} [organizationId=null] - Optional organization ID for strict tenant isolation
    */
-  emitToRole(role, eventType, data = {}, aggregateId = null) {
+  emitToRole(role, eventType, data = {}, aggregateId = null, organizationId = null) {
     if (!this.io) return;
     const envelope = createRealtimeEnvelope({
       eventType,
@@ -220,7 +259,32 @@ class RealtimeService {
       aggregateId: aggregateId || role,
       payload: data
     });
-    this.io.to(`role:${role.toLowerCase()}`).emit(eventType, envelope);
+
+    if (organizationId) {
+      this.io.to(`org:${organizationId}:role:${role.toLowerCase()}`).emit(eventType, envelope);
+    } else {
+      this.io.to(`role:${role.toLowerCase()}`).emit(eventType, envelope);
+    }
+    return envelope;
+  }
+
+  /**
+   * Broadcast an event to an entire organization / tenant across all API instances.
+   * 
+   * @param {string|number} organizationId - Tenant organization ID
+   * @param {string} eventType - Event identifier
+   * @param {object} [data={}] - Payload data
+   * @param {string|number} [aggregateId=null] - Aggregate ID
+   */
+  emitToOrg(organizationId, eventType, data = {}, aggregateId = null) {
+    if (!this.io || !organizationId) return;
+    const envelope = createRealtimeEnvelope({
+      eventType,
+      aggregateType: "Organization",
+      aggregateId: aggregateId || organizationId,
+      payload: data
+    });
+    this.io.to(`org:${organizationId}`).emit(eventType, envelope);
     return envelope;
   }
 

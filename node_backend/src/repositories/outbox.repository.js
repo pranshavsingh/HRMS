@@ -218,23 +218,51 @@ export const outboxRepository = {
 
   /**
    * Persistently quarantine an event to DEAD_LETTER status (e.g. unparseable poison payload).
+   * Enforces claim fencing if workerId is provided: only the active lease holder can dead-letter it.
+   * 
+   * @param {number|string} id - Outbox event ID
+   * @param {string} errorMessage - Error description
+   * @param {string} [workerId=null] - Optional claiming worker identifier for claim fencing
+   * @param {object} [tx=null] - Optional transaction
+   * @returns {Promise<boolean>}
    */
-  async markDeadLetter(id, errorMessage, tx = null) {
+  async markDeadLetter(id, errorMessage, workerId = null, tx = null) {
     const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
     const nowExpr = isMysql ? "NOW()" : "datetime('now')";
-
-    const sql = `
-      UPDATE outbox_events 
-      SET status = 'DEAD_LETTER', 
-          last_error = ?, 
-          claimed_by = NULL, 
-          claimed_until = NULL,
-          updated_at = ${nowExpr}
-      WHERE id = ?
-    `;
-
     const sanitizedError = errorMessage ? String(errorMessage).slice(0, 1000) : "Poison payload quarantined";
-    const result = await db.run(sql, [sanitizedError, id], tx);
+
+    let sql;
+    let params;
+
+    if (workerId) {
+      sql = `
+        UPDATE outbox_events 
+        SET status = 'DEAD_LETTER', 
+            last_error = ?, 
+            claimed_by = NULL, 
+            claimed_until = NULL,
+            updated_at = ${nowExpr}
+        WHERE id = ? 
+          AND status = 'CLAIMED' 
+          AND claimed_by = ? 
+          AND claimed_until >= ${nowExpr}
+      `;
+      params = [sanitizedError, id, workerId];
+    } else {
+      sql = `
+        UPDATE outbox_events 
+        SET status = 'DEAD_LETTER', 
+            last_error = ?, 
+            claimed_by = NULL, 
+            claimed_until = NULL,
+            updated_at = ${nowExpr}
+        WHERE id = ?
+      `;
+      params = [sanitizedError, id];
+    }
+
+    const runner = tx || db;
+    const result = await runner.run(sql, params, tx);
     return result.changes > 0;
   },
 

@@ -42,7 +42,12 @@ describe("P3.4 — Failure Injection & Edge Case Resilience Test Suite", () => {
     createdIds.push(id);
 
     const workerId = "worker_simulated_disconnect";
-    await outboxRepository.claimPendingEvents(workerId, 10, 60);
+    const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+    const claimExpiryExpr = isMysql ? "DATE_ADD(NOW(), INTERVAL 60 SECOND)" : "datetime('now', '+60 seconds')";
+    await db.run(
+      `UPDATE outbox_events SET status = 'CLAIMED', claimed_by = ?, claimed_until = ${claimExpiryExpr} WHERE id = ?`,
+      [workerId, id]
+    );
 
     // Simulate network error during queue publish
     const networkError = new Error("ECONNREFUSED 127.0.0.1:6379");
@@ -368,5 +373,101 @@ describe("P3.4 — Failure Injection & Edge Case Resilience Test Suite", () => {
       { success: true }
     );
     assert.equal(completed, true);
+  });
+
+  it("should handle worker crash after SMTP delivery and strictly fence out zombie completion", async () => {
+    const testJobId = `job_smtp_crash_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+    testJobIds.push(testJobId);
+    const handler = "Send Password Reset OTP Email";
+
+    const workerA = "worker_crashed_post_smtp";
+    const workerB = "worker_recovery_peer";
+
+    // 1. Worker A claims job
+    const claimA = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerA, 60);
+    assert.equal(claimA.acquired, true);
+    assert.equal(claimA.fencingToken, 1);
+
+    // 2. Worker A delivers message to SMTP server (accepted), but crashes before recording completion
+    // Simulate elapsed lease time: set lease_expires_at in past
+    const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+    if (isMysql) {
+      await db.run(
+        "UPDATE consumer_processed_jobs SET lease_expires_at = DATE_SUB(NOW(), INTERVAL 15 SECOND) WHERE job_id = ?",
+        [testJobId]
+      );
+    } else {
+      await db.run(
+        "UPDATE consumer_processed_jobs SET lease_expires_at = datetime('now', '-15 seconds') WHERE job_id = ?",
+        [testJobId]
+      );
+    }
+
+    // 3. Worker B reclaims the expired job
+    const claimB = await consumerIdempotencyRepository.claimExecution(testJobId, handler, workerB, 60);
+    assert.equal(claimB.acquired, true, "Worker B must reclaim expired claim");
+    assert.equal(claimB.isRecovery, true, "Must be marked as recovery");
+    assert.equal(claimB.fencingToken, 2, "Fencing token must advance to 2");
+
+    // 4. Worker B completes execution
+    const completedB = await consumerIdempotencyRepository.completeExecution(
+      testJobId,
+      handler,
+      workerB,
+      claimB.fencingToken,
+      { success: true, deliveredBy: workerB }
+    );
+    assert.equal(completedB, true, "Worker B with valid fencing token 2 must complete");
+
+    // 5. Zombie Worker A awakens and attempts to finalize with stale token 1: MUST BE FENCED OUT
+    const zombieCompletion = await consumerIdempotencyRepository.completeExecution(
+      testJobId,
+      handler,
+      workerA,
+      claimA.fencingToken,
+      { success: true, deliveredBy: workerA }
+    );
+    assert.equal(zombieCompletion, false, "Zombie worker with stale fencing token 1 must be fenced out (0 rows updated)");
+
+    // 6. Redundant duplicate delivery attempt from BullMQ: MUST BE DEDUPLICATED PERMANENTLY
+    const duplicateClaim = await consumerIdempotencyRepository.claimExecution(testJobId, handler, "worker_late", 60);
+    assert.equal(duplicateClaim.acquired, false, "Completed job must permanently reject new claims");
+    assert.equal(duplicateClaim.status, "COMPLETED");
+    assert.equal(duplicateClaim.reason, "ALREADY_COMPLETED");
+  });
+
+  it("should fence outbox dead-letter transitions against unleased workers", async () => {
+    const key = `fencing_dl_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+    const id = await outboxRepository.createEvent({
+      eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+      aggregateType: "User",
+      aggregateId: "9005",
+      payload: { test: "dead_letter_fencing" },
+      idempotencyKey: key
+    });
+    createdIds.push(id);
+
+    const rightfulWorker = "worker_rightful_owner";
+    const rogueWorker = "worker_rogue_intruder";
+
+    // Rightful worker claims event under active lease
+    const isMysqlDl = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+    const claimExpiryExprDl = isMysqlDl ? "DATE_ADD(NOW(), INTERVAL 60 SECOND)" : "datetime('now', '+60 seconds')";
+    await db.run(
+      `UPDATE outbox_events SET status = 'CLAIMED', claimed_by = ?, claimed_until = ${claimExpiryExprDl} WHERE id = ?`,
+      [rightfulWorker, id]
+    );
+
+    // Rogue worker attempts to dead-letter the event without lease ownership: MUST FAIL
+    const rogueDeadLetter = await outboxRepository.markDeadLetter(id, "Rogue poison claim", rogueWorker);
+    assert.equal(rogueDeadLetter, false, "Rogue worker without lease ownership must be fenced out of dead-lettering");
+
+    // Rightful worker dead-letters poison event: MUST SUCCEED
+    const rightfulDeadLetter = await outboxRepository.markDeadLetter(id, "Poison payload verified", rightfulWorker);
+    assert.equal(rightfulDeadLetter, true, "Rightful lease owner must successfully transition to DEAD_LETTER");
+
+    const record = await outboxRepository.findById(id);
+    assert.equal(record.status, "DEAD_LETTER");
+    assert.equal(record.last_error, "Poison payload verified");
   });
 });

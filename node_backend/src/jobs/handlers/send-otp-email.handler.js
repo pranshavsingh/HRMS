@@ -114,6 +114,7 @@ export async function sendOtpEmailHandler(job) {
         "[JobHandler:sendOtpEmail] Completion update affected 0 rows for JobID [%s] (fenced out or lease expired).",
         jobId
       );
+      return { success: false, fencedOut: true, reason: "LEASE_EXPIRED_OR_FENCED" };
     }
     return { success: true, recipient: email };
   } catch (smtpErr) {

@@ -241,4 +241,142 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
       new Promise((r) => srvB.close(r))
     ]);
   });
+
+  it("should enforce tenant isolation and room authorization across two independent instances via Redis Pub/Sub", async (t) => {
+    const redisOnline = await isRedisOnline();
+    if (!redisOnline) {
+      if (process.env.CI) {
+        throw new Error("Redis service is mandatory in CI for distributed Pub/Sub verification.");
+      }
+      t.skip("Local Redis offline. Multi-instance Pub/Sub integration verified in containerized CI.");
+      return;
+    }
+
+    const redisUrl = config.redisUrl || "redis://127.0.0.1:6379";
+
+    const tokenOrg10 = jwt.sign(
+      { id: 8001, username: "admin_org10", role: "admin", organization_id: 10 },
+      config.jwtSecret,
+      { expiresIn: "1h" }
+    );
+
+    const tokenOrg20 = jwt.sign(
+      { id: 8002, username: "admin_org20", role: "admin", organization_id: 20 },
+      config.jwtSecret,
+      { expiresIn: "1h" }
+    );
+
+    // Setup Instance 1
+    const srv1 = http.createServer();
+    await new Promise((r) => srv1.listen(0, r));
+    const portSrv1 = srv1.address().port;
+
+    const io1 = new SocketIOServer(srv1, { transports: ["websocket"] });
+    const pub1 = new Redis(redisUrl, { lazyConnect: true });
+    const sub1 = pub1.duplicate();
+    await Promise.all([pub1.connect(), sub1.connect()]);
+    io1.adapter(createAdapter(pub1, sub1));
+
+    io1.use((socket, next) => {
+      socket.user = jwt.verify(socket.handshake.auth.token, config.jwtSecret);
+      next();
+    });
+    io1.on("connection", async (socket) => {
+      const u = socket.user;
+      await socket.join(`org:${u.organization_id}:role:${(u.role || "").toLowerCase()}`);
+      socket.on("join_room", (roomName, cb) => {
+        const allowed = realtimeService.canJoinRoom(u, roomName);
+        if (allowed) socket.join(roomName);
+        if (typeof cb === "function") cb({ success: allowed, error: allowed ? null : "Unauthorized room access" });
+      });
+    });
+
+    // Setup Instance 2
+    const srv2 = http.createServer();
+    await new Promise((r) => srv2.listen(0, r));
+    const portSrv2 = srv2.address().port;
+
+    const io2 = new SocketIOServer(srv2, { transports: ["websocket"] });
+    const pub2 = new Redis(redisUrl, { lazyConnect: true });
+    const sub2 = pub2.duplicate();
+    await Promise.all([pub2.connect(), sub2.connect()]);
+    io2.adapter(createAdapter(pub2, sub2));
+
+    io2.use((socket, next) => {
+      socket.user = jwt.verify(socket.handshake.auth.token, config.jwtSecret);
+      next();
+    });
+    io2.on("connection", async (socket) => {
+      const u = socket.user;
+      await socket.join(`org:${u.organization_id}:role:${(u.role || "").toLowerCase()}`);
+      socket.on("join_room", (roomName, cb) => {
+        const allowed = realtimeService.canJoinRoom(u, roomName);
+        if (allowed) socket.join(roomName);
+        if (typeof cb === "function") cb({ success: allowed, error: allowed ? null : "Unauthorized room access" });
+      });
+    });
+
+    // Client 1 (Org 10) connects to Instance 1
+    const clientOrg10 = ClientIO(`http://127.0.0.1:${portSrv1}`, {
+      auth: { token: tokenOrg10 },
+      transports: ["websocket"]
+    });
+    await new Promise((r) => clientOrg10.on("connect", r));
+
+    // Client 2 (Org 20) connects to Instance 2
+    const clientOrg20 = ClientIO(`http://127.0.0.1:${portSrv2}`, {
+      auth: { token: tokenOrg20 },
+      transports: ["websocket"]
+    });
+    await new Promise((r) => clientOrg20.on("connect", r));
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Verify Cross-Tenant Isolation:
+    // Instance 2 broadcasts strictly to Org 10's admins
+    let org20Received = false;
+    clientOrg20.on("CONFIDENTIAL_TENANT_EVENT", () => {
+      org20Received = true;
+    });
+
+    const org10ReceivedPromise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Timeout waiting for Org 10 event")), 5000);
+      clientOrg10.on("CONFIDENTIAL_TENANT_EVENT", (data) => {
+        clearTimeout(timer);
+        resolve(data);
+      });
+    });
+
+    // Emitted across nodes: from Instance 2 to org:10:role:admin
+    io2.to("org:10:role:admin").emit("CONFIDENTIAL_TENANT_EVENT", { tenantId: 10, secret: "payroll_batch_ok" });
+
+    const receivedOrg10 = await org10ReceivedPromise;
+    assert.equal(receivedOrg10.tenantId, 10);
+    assert.equal(receivedOrg10.secret, "payroll_batch_ok");
+
+    // Allow time to guarantee Client 2 never receives Org 10's message
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(org20Received, false, "Client in Org 20 must NOT receive events dispatched to Org 10 role room");
+
+    // Client 2 (Org 20) attempts unauthorized dynamic join to Org 10's room
+    const crossTenantJoinResult = await new Promise((resolve) => {
+      clientOrg20.emit("join_room", "org:10:role:admin", (res) => resolve(res));
+    });
+    assert.equal(crossTenantJoinResult.success, false);
+    assert.equal(crossTenantJoinResult.error, "Unauthorized room access");
+
+    clientOrg10.disconnect();
+    clientOrg20.disconnect();
+
+    await Promise.all([
+      new Promise((r) => io1.close(r)),
+      new Promise((r) => io2.close(r)),
+      pub1.quit(),
+      sub1.quit(),
+      pub2.quit(),
+      sub2.quit(),
+      new Promise((r) => srv1.close(r)),
+      new Promise((r) => srv2.close(r))
+    ]);
+  });
 });

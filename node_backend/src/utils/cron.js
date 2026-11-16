@@ -158,6 +158,21 @@ export function initCron() {
     });
   });
 
+  // Job 6: Periodic reconciliation of published-but-unprocessed outbox events every 15 minutes
+  cron.schedule("*/15 * * * *", async () => {
+    await runWithLock("stalled_jobs_reconciliation", 600, async () => {
+      try {
+        const { default: reconciliationService } = await import("../services/reconciliation.service.js");
+        const res = await reconciliationService.reconcileUnprocessedJobs(15);
+        if (res.recovered > 0) {
+          logger.warn("CRON: Reconciled and reset %d stalled published outbox events back to PENDING.", res.recovered);
+        }
+      } catch (err) {
+        logger.error("CRON: Stalled job reconciliation failed: %s", err.message);
+      }
+    });
+  });
+
   logger.info("Background cron jobs scheduled successfully.");
 }
 

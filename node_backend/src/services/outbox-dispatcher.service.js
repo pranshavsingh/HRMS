@@ -83,8 +83,15 @@ class OutboxDispatcherService {
         for (const event of events) {
           try {
             await this.dispatchEvent(event);
-            await outboxRepository.markPublished(event.id, this.workerId);
-            processedCount++;
+            const published = await outboxRepository.markPublished(event.id, this.workerId);
+            if (!published) {
+              logger.warn(
+                "[OutboxDispatcher] markPublished affected 0 rows for Outbox ID [%d]: lease expired or claim was lost to another worker",
+                event.id
+              );
+            } else {
+              processedCount++;
+            }
           } catch (dispatchErr) {
             logger.error(
               "[OutboxDispatcher] Failed to publish outbox event ID [%d]: %s",
