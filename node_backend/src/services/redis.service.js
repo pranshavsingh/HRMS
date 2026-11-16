@@ -86,6 +86,37 @@ class RedisService {
   }
 
   /**
+   * Atomically get and delete key (for single-use tickets)
+   */
+  async getdel(key) {
+    if (!this.isReady()) return null;
+    try {
+      let data;
+      if (typeof this.client.getdel === "function") {
+        data = await this.client.getdel(key);
+      } else {
+        data = await this.client.get(key);
+        if (data) {
+          await this.client.del(key);
+        }
+      }
+      if (!data) return null;
+      return JSON.parse(data);
+    } catch (err) {
+      // Fallback if GETDEL command failed or was unsupported
+      try {
+        const data = await this.client.get(key);
+        if (data) {
+          await this.client.del(key);
+          return JSON.parse(data);
+        }
+      } catch {}
+      logger.warn("[Redis] GETDEL failed for key %s: %s", key, err.message);
+      return null;
+    }
+  }
+
+  /**
    * Delete all keys matching pattern (e.g. user:* or sse:*)
    */
   async delByPattern(pattern) {

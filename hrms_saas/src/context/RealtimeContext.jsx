@@ -48,7 +48,7 @@ export const RealtimeProvider = ({ children }) => {
       let data = null;
       try {
         data = event.data ? JSON.parse(event.data) : null;
-      } catch (err) {
+      } catch {
         data = event.data;
       }
       
@@ -115,6 +115,7 @@ export const RealtimeProvider = ({ children }) => {
   );
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useRealtime = (event, callback) => {
   const realtime = useContext(RealtimeContext);
   useEffect(() => {

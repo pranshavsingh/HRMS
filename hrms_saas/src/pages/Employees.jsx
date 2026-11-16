@@ -44,7 +44,6 @@ const initialForm = {
 
 export default function Employees() {
   const userRole = localStorage.getItem("role") || "employee";
-  const isAdmin = userRole === "admin" || userRole === "superadmin";
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -1077,7 +1076,6 @@ function MapPickerModal({ latitude, longitude, defaultLatitude, defaultLongitude
 
   useEffect(() => {
     if (window.google?.maps) {
-      setMapsLoaded(true);
       return;
     }
 

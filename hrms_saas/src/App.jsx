@@ -16,10 +16,13 @@ import TeamAnalytics from "./pages/TeamAnalytics";
 import HRDashboard from "./pages/dashboard/HRDashboard";
 import Reports from "./pages/Reports";
 import AuditLogs from "./pages/AuditLogs";
+import { AuthProvider } from "./context/AuthContext";
+
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
+      <AuthProvider>
+        <Routes>
         <Route path="/" element={<Login />} />
         <Route
           path="/dashboard"
@@ -158,6 +161,7 @@ export default function App() {
           }
         />
       </Routes>
+      </AuthProvider>
     </BrowserRouter>
   );
 }

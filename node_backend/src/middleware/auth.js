@@ -13,7 +13,6 @@ export async function authenticate(req, res, next) {
     const authHeader = req.headers.authorization || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
     
-    // Explicitly reject authentication via URL query parameters (VULN-04 fix)
     if (!token) {
       return next(new AppError("Authentication required", 401));
     }
@@ -94,4 +93,41 @@ export function authorize(allowedRoles) {
     
     next();
   };
+}
+
+/**
+ * Realtime Stream Authentication Middleware.
+ * Supports Mechanism 2 (Bearer Header) and Mechanism 3 (Single-use ephemeral ticket via GETDEL).
+ * Strictly forbids raw tokens in URL query parameters (VULN-04).
+ */
+export async function authenticateRealtime(req, res, next) {
+  try {
+    // 1. Strict rejection of raw JWT URL query parameters (VULN-04 fix)
+    if (req.query?.token || req.query?.access_token || req.query?.jwt) {
+      return next(new AppError("Raw tokens in URL query parameters are strictly forbidden", 401));
+    }
+
+    // 2. Mechanism 2: Header Bearer Auth (Primary Standard)
+    const authHeader = req.headers.authorization || "";
+    if (authHeader.startsWith("Bearer ")) {
+      return authenticate(req, res, next);
+    }
+
+    // 3. Mechanism 3: Ephemeral Single-Use Ticket (Permitted URL Query Fallback)
+    const ticketId = req.query?.ticket;
+    if (ticketId) {
+      const ticketKey = `sse:ticket:${ticketId}`;
+      const userPayload = await redisService.getdel(ticketKey);
+      if (!userPayload) {
+        return next(new AppError("Invalid, expired, or already consumed ticket", 401));
+      }
+      req.user = userPayload;
+      return next();
+    }
+
+    // 4. Missing credentials
+    return next(new AppError("Authentication required", 401));
+  } catch (err) {
+    return next(new AppError("Authentication failed", 401));
+  }
 }

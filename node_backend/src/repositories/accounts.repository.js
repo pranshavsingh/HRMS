@@ -583,11 +583,12 @@ export const accountsRepository = {
 
   async markRefreshTokenRevoked(tokenHash, replacedByHash = null, tx = null) {
     await ensureRefreshTokenTable();
-    await db.run(
-      "UPDATE accounts_refreshtoken SET is_revoked = 1, replaced_by_hash = ?, last_activity = NOW() WHERE token_hash = ?",
+    const result = await db.run(
+      "UPDATE accounts_refreshtoken SET is_revoked = 1, replaced_by_hash = ?, last_activity = NOW() WHERE token_hash = ? AND is_revoked = 0",
       [replacedByHash, tokenHash],
       tx
     );
+    return { changes: result.changes };
   },
 
   async revokeRefreshTokenFamily(familyId, tx = null) {

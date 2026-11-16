@@ -9,6 +9,8 @@ export const validate = (schema) => async (req, res, next) => {
     body: req.body,
     query: req.query,
     params: req.params,
+    cookies: req.cookies,
+    headers: req.headers,
     file: req.file,
     files: req.files
   });
@@ -187,14 +189,15 @@ export const createEmployeeSchema = z.object({
     locations: z.any().optional()
   }),
   files: z.object({
-    aadhar_file: z.array(z.any()).min(1, "Aadhar, PAN and bank details documents are required"),
-    pan_file: z.array(z.any()).min(1, "Aadhar, PAN and bank details documents are required"),
-    bank_file: z.array(z.any()).min(1, "Aadhar, PAN and bank details documents are required"),
+    aadhar_file: z.array(z.any()).optional(),
+    pan_file: z.array(z.any()).optional(),
+    bank_file: z.array(z.any()).optional(),
     cv_file: z.array(z.any()).optional(),
     voter_file: z.array(z.any()).optional(),
     dl_file: z.array(z.any()).optional()
-  }, { required_error: "Aadhar, PAN and bank details documents are required" })
+  }).optional()
 }).superRefine(async (data, ctx) => {
+  if (!data.files) return;
   const fields = ["aadhar_file", "pan_file", "bank_file", "cv_file", "voter_file", "dl_file"];
   for (const field of fields) {
     const list = data.files[field];
@@ -280,4 +283,38 @@ export const uploadDocumentSchema = z.object({
       });
     }
   }
+});
+
+// 10. Refresh Token
+export const refreshTokenSchema = z.object({
+  body: z.object({
+    refresh_token: z.string().min(1).optional(),
+    device_id: z.string().nullable().optional(),
+    device_name: z.string().nullable().optional(),
+    platform: z.enum(["web", "android", "ios", "mobile"]).optional(),
+  }).passthrough().optional().default({}),
+  cookies: z.object({
+    refreshToken: z.string().min(1).optional(),
+  }).passthrough().optional()
+}).superRefine((data, ctx) => {
+  const hasBodyToken = Boolean(data.body?.refresh_token);
+  const hasCookieToken = Boolean(data.cookies?.refreshToken);
+  if (!hasBodyToken && !hasCookieToken) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Refresh token is required",
+      path: ["refresh_token"]
+    });
+  }
+});
+
+// 11. Logout
+export const logoutSchema = z.object({
+  body: z.object({
+    refresh_token: z.string().optional(),
+    platform: z.string().optional(),
+  }).passthrough().optional().default({}),
+  cookies: z.object({
+    refreshToken: z.string().optional(),
+  }).passthrough().optional()
 });

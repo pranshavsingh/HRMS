@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle, Info, X, XCircle } from "lucide-react";
 
 const PopupContext = createContext(null);
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function usePopup() {
   const context = useContext(PopupContext);
   if (!context) {

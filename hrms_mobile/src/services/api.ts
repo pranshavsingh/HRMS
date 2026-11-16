@@ -3,7 +3,13 @@ import { Platform } from "react-native";
 import * as SecureStore from "expo-secure-store";
 
 // Use EXPO_PUBLIC_API_URL environment variable if set, otherwise fallback to local dev endpoints.
+const isProd = process.env.NODE_ENV === "production";
 const envUrl = process.env.EXPO_PUBLIC_API_URL;
+
+if (isProd && !envUrl) {
+  console.warn("[Security Alert] EXPO_PUBLIC_API_URL is not set in production build!");
+}
+
 const BASE_URL = envUrl || (Platform.OS === "android" ? "http://10.0.2.2:8000/api" : "http://localhost:8000/api");
 
 const api = axios.create({
@@ -12,6 +18,7 @@ const api = axios.create({
   headers: {
     "Content-Type": "application/json",
     "Bypass-Tunnel-Reminder": "true",
+    "X-Platform": "mobile",
   },
 });
 
@@ -86,6 +93,7 @@ api.interceptors.response.use(
             if (originalRequest.headers) {
               originalRequest.headers.Authorization = "Bearer " + token;
             }
+            originalRequest._retry = true;
             return api(originalRequest);
           })
           .catch((err) => {

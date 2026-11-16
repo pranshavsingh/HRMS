@@ -30,6 +30,9 @@ export const config = {
   cloudinaryAttendancePreset: process.env.CLOUDINARY_ATTENDANCE_PRESET || "attendance_preset",
   cloudinaryDocumentsPreset: process.env.CLOUDINARY_DOCUMENTS_PRESET || "documents_preset",
 
+  // Concurrency & Token Lifecycle Configuration
+  refreshGraceWindowSeconds: Number(process.env.REFRESH_GRACE_WINDOW_SECONDS || 15),
+
   // Phase 3 — Distributed Queue & Outbox Configuration
   queueRedisUrl: process.env.QUEUE_REDIS_URL || process.env.REDIS_URL || "redis://127.0.0.1:6379",
   queuePrefix: process.env.QUEUE_PREFIX || "hrms",

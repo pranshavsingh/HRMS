@@ -1,7 +1,11 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import API from "../api/axios";
+import { useAuth } from "../context/AuthContext";
 
 export default function Login() {
+  const { login } = useAuth();
+  const navigate = useNavigate();
   const [form, setForm] = useState({ username: "", password: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -19,12 +23,8 @@ export default function Login() {
     setError("");
     try {
       setLoading(true);
-      const res = await API.post("/auth/login/", form);
-      localStorage.setItem("token", res.data.access);
-      localStorage.setItem("refresh_token", res.data.refresh);
-      localStorage.setItem("role", res.data.user.role);
-      localStorage.setItem("username", res.data.user.username);
-      window.location.href = "/dashboard";
+      await login(form.username, form.password);
+      navigate("/dashboard");
     } catch (err) {
       setError(err.response?.data?.error || "Invalid credentials");
     } finally {

@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import cookieParser from "cookie-parser";
 import compression from "compression";
 import morgan from "morgan";
 import path from "path";
@@ -71,7 +72,7 @@ export function createApp() {
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Platform"],
     maxAge: 86400,
   };
   app.use(cors(corsOptions));
@@ -79,8 +80,9 @@ export function createApp() {
   // 4. Request Logger (Morgan)
   app.use(morgan("combined"));
 
-  // 5. Body Parsers & payload compression
+  // 5. Body Parsers, Cookie Parser & payload compression
   app.use(express.json({ limit: "5mb" }));
+  app.use(cookieParser());
   app.use(compression());
 
   // Request rewrite helper matching original setup

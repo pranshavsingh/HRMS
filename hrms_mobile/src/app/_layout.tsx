@@ -12,14 +12,15 @@ function InitialLayout() {
   useEffect(() => {
     if (isLoading) return;
 
-    // Check if the current route is within the tabs tab navigator group
-    const inTabsGroup = segments[0] === "(tabs)";
+    // Check if the current route is within authenticated workspace (tabs or modals)
+    const segs = segments as string[];
+    const inAuthGroup = segs[0] === "(tabs)" || segs[0] === "documents" || segs[0] === "my-documents";
 
-    if (!isAuthenticated && inTabsGroup) {
-      // Redirect to Login page if not authenticated
+    if (!isAuthenticated && inAuthGroup) {
+      // Redirect unauthenticated user trying to access protected screen to login
       router.replace("/");
-    } else if (isAuthenticated && !inTabsGroup) {
-      // Redirect to main tabs workspace if session is active
+    } else if (isAuthenticated && !inAuthGroup) {
+      // Redirect authenticated user away from login page to dashboard
       router.replace("/(tabs)/dashboard");
     }
   }, [isAuthenticated, isLoading, segments, router]);

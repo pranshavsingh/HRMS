@@ -384,8 +384,30 @@ jobs:
           cd node_backend
           node --test --test-timeout=30000 tests/phase3/reconciliation.test.js
 
+      - name: Execute Phase 4 E2E Test Suite (39 Suites)
+        env:
+          NODE_ENV: test
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          MYSQL_CONNECTION_LIMIT: 30
+          DB_CLIENT: mysql
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+          QUEUE_REDIS_URL: redis://127.0.0.1:6379
+          OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
+        run: |
+          cd node_backend
+          npm run test:e2e
+
   frontend-build:
-    name: Frontend Build Verification
+    name: Frontend Quality & Build Verification
     runs-on: ubuntu-latest
 
     steps:
@@ -404,7 +426,44 @@ jobs:
           cd hrms_saas
           npm ci
 
+      - name: ESLint Code Quality Gate (0 Errors)
+        run: |
+          cd hrms_saas
+          npm run lint
+
       - name: Build React + Vite Web App
         run: |
           cd hrms_saas
           npm run build
+
+  mobile-build:
+    name: Mobile Client Verification (TypeScript & Bundle)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: hrms_mobile/package-lock.json
+
+      - name: Install mobile dependencies
+        run: |
+          cd hrms_mobile
+          npm ci
+
+      - name: TypeScript Static Verification
+        run: |
+          cd hrms_mobile
+          npx tsc --noEmit
+
+      - name: Export Expo Static Android Bundle
+        env:
+          EXPO_PUBLIC_API_URL: https://api.hrms.internal/api
+        run: |
+          cd hrms_mobile
+          npx expo export --platform android

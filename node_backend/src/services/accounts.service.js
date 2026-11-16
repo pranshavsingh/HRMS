@@ -154,11 +154,13 @@ export const accountsService = {
     }
 
     // Token reuse detection: if token is already revoked, potential theft replay!
+    const graceWindowMs = (config.refreshGraceWindowSeconds || 30) * 1000;
+
     if (tokenRecord.is_revoked === 1 || tokenRecord.is_revoked === true) {
-      // Check concurrency grace window (15 seconds):
+      // Check concurrency grace window:
       const lastActivity = new Date(tokenRecord.last_activity).getTime();
       const nowTime = Date.now();
-      if (nowTime - lastActivity < 15000 && tokenRecord.replaced_by_hash) {
+      if (nowTime - lastActivity < graceWindowMs && tokenRecord.replaced_by_hash) {
         // Concurrency grace window: token was rotated just moments ago (likely concurrent request).
         // Return valid new access token and refresh: null (do not return the dead/revoked refresh token)
         const user = await accountsRepository.findById(payload.userId);
@@ -228,20 +230,68 @@ export const accountsService = {
     const newRefreshHash = crypto.createHash("sha256").update(newRefresh).digest("hex");
     const newRefreshExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    // Rotate refresh token atomically: mark old as revoked and insert new with same family
-    await db.transaction(async (tx) => {
-      await accountsRepository.markRefreshTokenRevoked(refreshHash, newRefreshHash, tx);
-      await accountsRepository.insertRefreshToken(user.id, newRefreshHash, newRefreshExpires, {
-        deviceId: deviceInfo.deviceId || tokenRecord.device_id,
-        deviceName: deviceInfo.deviceName || tokenRecord.device_name,
-        platform: deviceInfo.platform || tokenRecord.platform,
-        ipAddress: deviceInfo.ipAddress || tokenRecord.ip_address,
-      }, familyId, tx);
-    });
+    // Rotate refresh token atomically using CAS: mark old as revoked only if currently unrevoked
+    let rotationWon = false;
+    try {
+      await db.transaction(async (tx) => {
+        const revResult = await accountsRepository.markRefreshTokenRevoked(refreshHash, newRefreshHash, tx);
+        const changes = (typeof revResult === "object" && revResult !== null) ? revResult.changes : revResult;
+        if (changes === 0) {
+          throw new Error("CONCURRENT_ROTATION_LOST");
+        }
+        await accountsRepository.insertRefreshToken(user.id, newRefreshHash, newRefreshExpires, {
+          deviceId: deviceInfo.deviceId || tokenRecord.device_id,
+          deviceName: deviceInfo.deviceName || tokenRecord.device_name,
+          platform: deviceInfo.platform || tokenRecord.platform,
+          ipAddress: deviceInfo.ipAddress || tokenRecord.ip_address,
+        }, familyId, tx);
+        rotationWon = true;
+      });
+    } catch (err) {
+      if (err.message === "CONCURRENT_ROTATION_LOST") {
+        rotationWon = false;
+      } else {
+        throw err;
+      }
+    }
+
+    if (!rotationWon) {
+      // Transaction aborted/rolled back. Re-fetch committed record from MySQL to evaluate grace window.
+      const reloadedRecord = await accountsRepository.findRefreshTokenByHash(refreshHash);
+      if (reloadedRecord) {
+        const lastActivity = new Date(reloadedRecord.last_activity).getTime();
+        const nowTime = Date.now();
+        if (nowTime - lastActivity < graceWindowMs && reloadedRecord.replaced_by_hash) {
+          return {
+            access,
+            refresh: null,
+            concurrent_refresh: true,
+            user: {
+              id: user.id,
+              username: user.username,
+              email: user.email,
+              role: resolvedRole,
+              first_name: user.first_name,
+              last_name: user.last_name
+            }
+          };
+        }
+      }
+
+      // Collided outside grace window or unrotated
+      if (payload.familyId) {
+        await accountsRepository.revokeRefreshTokenFamily(payload.familyId);
+      }
+      await accountsRepository.deleteRefreshTokensByUserId(payload.userId);
+      await redisService.del(`user:session:${payload.userId}`);
+      await redisService.set(`user:revoked:${payload.userId}`, Date.now(), 86400);
+      throw new AppError("Token reuse detected. All sessions in this family revoked.", 401);
+    }
 
     return {
       access,
       refresh: newRefresh,
+      concurrent_refresh: false,
       user: {
         id: user.id,
         username: user.username,
@@ -253,18 +303,57 @@ export const accountsService = {
     };
   },
 
-  async logoutSession(refreshToken) {
-    if (!refreshToken) return { message: "Logged out" };
-    try {
-      const refreshHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
-      const tokenRecord = await accountsRepository.findRefreshTokenByHash(refreshHash);
-      if (tokenRecord?.family_id) {
-        await accountsRepository.revokeRefreshTokenFamily(tokenRecord.family_id);
+  async logoutSession(refreshToken, accessTokenPayload = null, reqUser = null) {
+    let tokenRecord = null;
+    let refreshHash = null;
+
+    if (refreshToken) {
+      try {
+        refreshHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
+        tokenRecord = await accountsRepository.findRefreshTokenByHash(refreshHash);
+      } catch (err) {
+        // Suppress
       }
-      await accountsRepository.deleteRefreshTokenByHash(refreshHash);
-    } catch (err) {
-      // Suppress errors
     }
+
+    // 1. Blacklist access token JTI with safe positive TTL
+    if (accessTokenPayload?.jti && accessTokenPayload?.exp) {
+      try {
+        const remainingSeconds = accessTokenPayload.exp - Math.floor(Date.now() / 1000);
+        if (remainingSeconds > 0) {
+          const ttl = Math.min(900, Math.max(1, remainingSeconds));
+          await redisService.set(`token:blacklist:${accessTokenPayload.jti}`, "1", ttl);
+        }
+      } catch (err) {
+        logger.warn("[Logout] JTI blacklist error: %s", err.message);
+      }
+    }
+
+    // 2. Resolve target user and purge session cache and revocation marker
+    const targetUserId = reqUser?.id || accessTokenPayload?.userId || tokenRecord?.user_id;
+    if (targetUserId) {
+      try {
+        await redisService.del(`user:session:${targetUserId}`);
+        await redisService.set(`user:revoked:${targetUserId}`, Date.now(), 86400);
+      } catch (err) {
+        logger.warn("[Logout] Session cache purge error: %s", err.message);
+      }
+    }
+
+    // 3. MySQL family revocation and row deletion
+    if (tokenRecord) {
+      try {
+        if (tokenRecord.family_id) {
+          await accountsRepository.revokeRefreshTokenFamily(tokenRecord.family_id);
+        }
+        if (refreshHash) {
+          await accountsRepository.deleteRefreshTokenByHash(refreshHash);
+        }
+      } catch (err) {
+        logger.warn("[Logout] DB token deletion error: %s", err.message);
+      }
+    }
+
     return { message: "Logged out successfully" };
   },
 
@@ -487,7 +576,7 @@ export const accountsService = {
         
         const uploaded = [];
         for (const [field, title] of docs) {
-          const fList = files[field];
+          const fList = files ? files[field] : null;
           const f = fList ? fList[0] : null;
           if (!f) continue;
 

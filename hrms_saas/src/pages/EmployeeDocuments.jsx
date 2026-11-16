@@ -76,25 +76,6 @@ export default function EmployeeDocuments() {
     }
   };
 
-  const handleDownload = async (fileUrl, title) => {
-    try {
-      const response = await fetch(fileUrl);
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      const extension = fileUrl.split('.').pop().split('?')[0] || 'pdf';
-      link.setAttribute("download", `${title}.${extension}`);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error("Failed to download file:", err);
-      window.open(fileUrl, "_blank");
-    }
-  };
-
   useEffect(() => {
     loadEmployees();
   }, []);

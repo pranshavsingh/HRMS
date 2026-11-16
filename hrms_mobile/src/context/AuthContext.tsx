@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { AppState, AppStateStatus } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import api, { registerLogoutCallback, setAuthToken } from "../services/api";
@@ -72,6 +73,27 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     registerLogoutCallback(logout);
   }, []);
+
+  // Listen for AppState changes to validate session on foreground resume
+  useEffect(() => {
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      if (nextAppState === "active" && isAuthenticated) {
+        try {
+          const storedToken = await SecureStore.getItemAsync("token");
+          if (storedToken) {
+            setAuthToken(storedToken);
+          }
+        } catch (err) {
+          console.error("Foreground resume session check failed:", err);
+        }
+      }
+    };
+
+    const subscription = AppState.addEventListener("change", handleAppStateChange);
+    return () => {
+      subscription.remove();
+    };
+  }, [isAuthenticated]);
 
   const login = async (username: string, password: string): Promise<{ success: boolean; error?: string }> => {
     try {
