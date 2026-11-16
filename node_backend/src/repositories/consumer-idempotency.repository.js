@@ -174,6 +174,7 @@ export const consumerIdempotencyRepository = {
         AND claimed_by = ? 
         AND fencing_token = ? 
         AND status = 'PROCESSING'
+        AND lease_expires_at >= ${nowExpr}
     `;
 
     const runner = tx || db;
@@ -210,6 +211,7 @@ export const consumerIdempotencyRepository = {
         AND claimed_by = ? 
         AND fencing_token = ? 
         AND status = 'PROCESSING'
+        AND lease_expires_at >= ${nowExpr}
     `;
 
     const runner = tx || db;

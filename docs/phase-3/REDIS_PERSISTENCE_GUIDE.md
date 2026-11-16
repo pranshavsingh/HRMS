@@ -12,8 +12,8 @@
 BullMQ requires Redis persistence to ensure that background jobs, delayed tasks, and retry counters survive process restarts and power cycles.
 
 HRMS SaaS employs a **Hybrid Persistence Model**:
-1. **AOF (`appendonly yes`, `appendfsync everysec`)**: Every write is appended to the write-ahead log. Flushed to disk every second. Under catastrophic power cut, at most 1 second of non-critical state is affected.
-2. **Transactional Outbox Pre-Persistence**: Regardless of Redis state, all critical business events (OTP requests, attendance triggers, leave approvals) are committed to **MySQL first** inside the ACID database transaction. Even if Redis suffered 100% data loss, the MySQL Outbox automatically re-populates BullMQ upon reconnection.
+1. **AOF (`appendonly yes`, `appendfsync everysec`)**: Every write is appended to the write-ahead log. Flushed to disk every second. Under catastrophic power cut or abrupt kernel panic, a bounded window of at most 1 second of queue buffer writes may be lost before filesystem sync.
+2. **Transactional Outbox Pre-Persistence**: Regardless of Redis state, all critical business events (OTP requests, attendance triggers, leave approvals) are committed to **MySQL first** inside the ACID database transaction. True Zero Business Data Loss is guaranteed by the MySQL Transactional Outbox: even if Redis suffered total data loss or was rebuilt from scratch, the MySQL Outbox Dispatcher and Reconciliation Engine automatically re-dispatch all pending or unacknowledged jobs upon reconnection.
 3. **`maxmemory-policy noeviction`**: **Mandatory for BullMQ**. Redis must never evict queue keys (`bull:email-notifications:*`) to free memory. If memory fills, Redis fails new writes with an OOM error, triggering the API and Outbox Dispatcher to back off, preserving queue integrity.
 
 ---

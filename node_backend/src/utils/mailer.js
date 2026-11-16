@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 import { config } from "../config/env.js";
 
-const transporter = nodemailer.createTransport({
+export const transporter = nodemailer.createTransport({
   host: config.smtpHost,
   port: config.smtpPort,
   secure: config.smtpSecure,

@@ -14,7 +14,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 import { config } from "../../src/config/env.js";
-import { createRealtimeEnvelope, realtimeService } from "../../src/services/realtime.service.js";
+import { createRealtimeEnvelope, realtimeService, RealtimeService } from "../../src/services/realtime.service.js";
 
 async function isRedisOnline() {
   const client = new Redis(config.redisUrl || "redis://127.0.0.1:6379", {
@@ -266,55 +266,19 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
       { expiresIn: "1h" }
     );
 
-    // Setup Instance 1
+    // Setup Instance 1 using production RealtimeService
     const srv1 = http.createServer();
     await new Promise((r) => srv1.listen(0, r));
     const portSrv1 = srv1.address().port;
+    const service1 = new RealtimeService();
+    await service1.init(srv1, { redisUrl });
 
-    const io1 = new SocketIOServer(srv1, { transports: ["websocket"] });
-    const pub1 = new Redis(redisUrl, { lazyConnect: true });
-    const sub1 = pub1.duplicate();
-    await Promise.all([pub1.connect(), sub1.connect()]);
-    io1.adapter(createAdapter(pub1, sub1));
-
-    io1.use((socket, next) => {
-      socket.user = jwt.verify(socket.handshake.auth.token, config.jwtSecret);
-      next();
-    });
-    io1.on("connection", async (socket) => {
-      const u = socket.user;
-      await socket.join(`org:${u.organization_id}:role:${(u.role || "").toLowerCase()}`);
-      socket.on("join_room", (roomName, cb) => {
-        const allowed = realtimeService.canJoinRoom(u, roomName);
-        if (allowed) socket.join(roomName);
-        if (typeof cb === "function") cb({ success: allowed, error: allowed ? null : "Unauthorized room access" });
-      });
-    });
-
-    // Setup Instance 2
+    // Setup Instance 2 using production RealtimeService
     const srv2 = http.createServer();
     await new Promise((r) => srv2.listen(0, r));
     const portSrv2 = srv2.address().port;
-
-    const io2 = new SocketIOServer(srv2, { transports: ["websocket"] });
-    const pub2 = new Redis(redisUrl, { lazyConnect: true });
-    const sub2 = pub2.duplicate();
-    await Promise.all([pub2.connect(), sub2.connect()]);
-    io2.adapter(createAdapter(pub2, sub2));
-
-    io2.use((socket, next) => {
-      socket.user = jwt.verify(socket.handshake.auth.token, config.jwtSecret);
-      next();
-    });
-    io2.on("connection", async (socket) => {
-      const u = socket.user;
-      await socket.join(`org:${u.organization_id}:role:${(u.role || "").toLowerCase()}`);
-      socket.on("join_room", (roomName, cb) => {
-        const allowed = realtimeService.canJoinRoom(u, roomName);
-        if (allowed) socket.join(roomName);
-        if (typeof cb === "function") cb({ success: allowed, error: allowed ? null : "Unauthorized room access" });
-      });
-    });
+    const service2 = new RealtimeService();
+    await service2.init(srv2, { redisUrl });
 
     // Client 1 (Org 10) connects to Instance 1
     const clientOrg10 = ClientIO(`http://127.0.0.1:${portSrv1}`, {
@@ -332,8 +296,27 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
 
     await new Promise((r) => setTimeout(r, 200));
 
-    // Verify Cross-Tenant Isolation:
-    // Instance 2 broadcasts strictly to Org 10's admins
+    // Verify tenant admins are FORBIDDEN from joining un-scoped global 'role:admin' room
+    const globalJoinOrg10 = await new Promise((resolve) => {
+      clientOrg10.emit("join_room", "role:admin", (res) => resolve(res));
+    });
+    assert.equal(globalJoinOrg10.success, false, "Tenant admin must NOT be permitted to join global un-scoped role:admin room");
+    assert.equal(globalJoinOrg10.error, "Unauthorized room access");
+
+    const globalJoinOrg20 = await new Promise((resolve) => {
+      clientOrg20.emit("join_room", "role:admin", (res) => resolve(res));
+    });
+    assert.equal(globalJoinOrg20.success, false, "Tenant admin from Org 20 must NOT join global role:admin room");
+
+    // Cross-tenant join attempt: Client 2 tries to join Org 10's role room
+    const crossTenantJoinResult = await new Promise((resolve) => {
+      clientOrg20.emit("join_room", "org:10:role:admin", (res) => resolve(res));
+    });
+    assert.equal(crossTenantJoinResult.success, false, "Cross-tenant join must be rejected");
+    assert.equal(crossTenantJoinResult.error, "Unauthorized room access");
+
+    // Verify Cross-Tenant Message Isolation:
+    // Instance 2 broadcasts strictly to Org 10's admins using production emitToRole
     let org20Received = false;
     clientOrg20.on("CONFIDENTIAL_TENANT_EVENT", () => {
       org20Received = true;
@@ -347,34 +330,24 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
       });
     });
 
-    // Emitted across nodes: from Instance 2 to org:10:role:admin
-    io2.to("org:10:role:admin").emit("CONFIDENTIAL_TENANT_EVENT", { tenantId: 10, secret: "payroll_batch_ok" });
+    // Emitted across nodes: from Instance 2 to Org 10 role room via service2
+    service2.emitToRole("admin", "CONFIDENTIAL_TENANT_EVENT", { tenantId: 10, secret: "payroll_batch_ok" }, null, 10);
 
-    const receivedOrg10 = await org10ReceivedPromise;
-    assert.equal(receivedOrg10.tenantId, 10);
-    assert.equal(receivedOrg10.secret, "payroll_batch_ok");
+    const receivedEnvelope = await org10ReceivedPromise;
+    assert.ok(receivedEnvelope);
+    assert.equal(receivedEnvelope.payload.tenantId, 10);
+    assert.equal(receivedEnvelope.payload.secret, "payroll_batch_ok");
 
     // Allow time to guarantee Client 2 never receives Org 10's message
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(org20Received, false, "Client in Org 20 must NOT receive events dispatched to Org 10 role room");
 
-    // Client 2 (Org 20) attempts unauthorized dynamic join to Org 10's room
-    const crossTenantJoinResult = await new Promise((resolve) => {
-      clientOrg20.emit("join_room", "org:10:role:admin", (res) => resolve(res));
-    });
-    assert.equal(crossTenantJoinResult.success, false);
-    assert.equal(crossTenantJoinResult.error, "Unauthorized room access");
-
     clientOrg10.disconnect();
     clientOrg20.disconnect();
 
     await Promise.all([
-      new Promise((r) => io1.close(r)),
-      new Promise((r) => io2.close(r)),
-      pub1.quit(),
-      sub1.quit(),
-      pub2.quit(),
-      sub2.quit(),
+      service1.close(),
+      service2.close(),
       new Promise((r) => srv1.close(r)),
       new Promise((r) => srv2.close(r))
     ]);

@@ -11,8 +11,11 @@ dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 import { db, closePool } from "../../src/db/index.js";
 import outboxRepository from "../../src/repositories/outbox.repository.js";
 import consumerIdempotencyRepository from "../../src/repositories/consumer-idempotency.repository.js";
+import accountsRepository from "../../src/repositories/accounts.repository.js";
 import { sendOtpEmailHandler } from "../../src/jobs/handlers/send-otp-email.handler.js";
 import { encryptPayload } from "../../src/utils/crypto.js";
+import { transporter } from "../../src/utils/mailer.js";
+import { config } from "../../src/config/env.js";
 
 describe("P3.4 — Failure Injection & Edge Case Resilience Test Suite", () => {
   const createdIds = [];
@@ -434,6 +437,109 @@ describe("P3.4 — Failure Injection & Edge Case Resilience Test Suite", () => {
     assert.equal(duplicateClaim.acquired, false, "Completed job must permanently reject new claims");
     assert.equal(duplicateClaim.status, "COMPLETED");
     assert.equal(duplicateClaim.reason, "ALREADY_COMPLETED");
+  });
+
+  it("should execute sendOtpEmailHandler end-to-end and fence out zombie worker whose lease expired post-delivery", async () => {
+    const testJobId = `job_e2e_crash_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+    testJobIds.push(testJobId);
+
+    const testEmail = `e2e_crash_${Date.now()}@hrms.internal`;
+    const testOtp = "776655";
+    const otpHash = crypto.createHmac("sha256", config.otpSecret).update(`${testEmail}:${testOtp}`).digest("hex");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    // Seed valid OTP record in database
+    await accountsRepository.deleteOtpByEmail(testEmail);
+    await accountsRepository.insertOtp(testEmail, otpHash, expiresAt);
+
+    const workerA = "worker_e2e_zombie";
+    const workerB = "worker_e2e_recovery";
+
+    const jobDataWorkerA = {
+      id: testJobId,
+      processedBy: workerA,
+      data: {
+        outboxEventId: 99995,
+        eventType: "AUTH_PASSWORD_RESET_OTP_REQUESTED",
+        payload: encryptPayload({
+          email: testEmail,
+          otp: testOtp,
+          otpHash,
+          userId: 9006
+        })
+      },
+      attemptsMade: 0,
+      opts: { attempts: 5 }
+    };
+
+    const originalSendMail = transporter.sendMail;
+    let sendMailCalls = 0;
+
+    try {
+      // Mock transporter to simulate delivery acceptance by SMTP server,
+      // but Worker A's lease expires before it can execute completeExecution
+      transporter.sendMail = async () => {
+        sendMailCalls++;
+        // Simulate elapsed lease time: set lease_expires_at in past
+        const isMysql = Boolean(process.env.MYSQL_HOST) || process.env.DB_CLIENT === "mysql";
+        if (isMysql) {
+          await db.run(
+            "UPDATE consumer_processed_jobs SET lease_expires_at = DATE_SUB(NOW(), INTERVAL 20 SECOND) WHERE job_id = ?",
+            [testJobId]
+          );
+        } else {
+          await db.run(
+            "UPDATE consumer_processed_jobs SET lease_expires_at = datetime('now', '-20 seconds') WHERE job_id = ?",
+            [testJobId]
+          );
+        }
+        return { messageId: "<simulated_smtp_delivery_msg_1@hostinger.com>" };
+      };
+
+      // 1. Worker A executes sendOtpEmailHandler end-to-end
+      const resA = await sendOtpEmailHandler(jobDataWorkerA);
+
+      // Worker A delivered to SMTP, but completeExecution failed because lease expired!
+      assert.equal(resA.success, false, "Worker A must not report success when lease expired");
+      assert.equal(resA.fencedOut, true, "Worker A must be flagged as fenced out");
+      assert.equal(resA.reason, "LEASE_EXPIRED_OR_FENCED", "Failure reason must be LEASE_EXPIRED_OR_FENCED");
+
+      // Verify DB record status is still PROCESSING (not completed by zombie Worker A)
+      const interRecord = await consumerIdempotencyRepository.findRecord(testJobId, "Send Password Reset OTP Email");
+      assert.equal(interRecord.status, "PROCESSING", "Job must remain in PROCESSING state for recovery");
+      assert.equal(interRecord.fencing_token, 1, "Fencing token remains 1");
+
+      // 2. Worker B takes over execution (e.g. BullMQ redelivery or peer recovery)
+      transporter.sendMail = async () => {
+        sendMailCalls++;
+        return { messageId: "<simulated_smtp_delivery_msg_2@hostinger.com>" };
+      };
+
+      const jobDataWorkerB = {
+        ...jobDataWorkerA,
+        processedBy: workerB,
+        attemptsMade: 1
+      };
+
+      const resB = await sendOtpEmailHandler(jobDataWorkerB);
+      assert.equal(resB.success, true, "Worker B must recover and complete successfully");
+      assert.equal(resB.recipient, testEmail);
+
+      // Verify DB record is now COMPLETED with Worker B and incremented fencing token
+      const completedRecord = await consumerIdempotencyRepository.findRecord(testJobId, "Send Password Reset OTP Email");
+      assert.equal(completedRecord.status, "COMPLETED");
+      assert.equal(completedRecord.fencing_token, 2, "Fencing token must be incremented to 2");
+      assert.equal(completedRecord.claimed_by, workerB);
+
+      // 3. A 3rd redundant delivery attempt (e.g. stale BullMQ replay)
+      const resC = await sendOtpEmailHandler(jobDataWorkerA);
+      assert.equal(resC.duplicate, true, "Subsequent delivery must be detected as duplicate");
+      assert.equal(resC.skipped, true);
+      assert.equal(resC.reason, "ALREADY_PROCESSED");
+    } finally {
+      transporter.sendMail = originalSendMail;
+      await accountsRepository.deleteOtpByEmail(testEmail);
+    }
   });
 
   it("should fence outbox dead-letter transitions against unleased workers", async () => {

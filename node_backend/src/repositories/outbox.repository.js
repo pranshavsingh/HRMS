@@ -243,9 +243,10 @@ export const outboxRepository = {
             claimed_until = NULL,
             updated_at = ${nowExpr}
         WHERE id = ? 
-          AND status = 'CLAIMED' 
-          AND claimed_by = ? 
-          AND claimed_until >= ${nowExpr}
+          AND (
+            (status = 'CLAIMED' AND claimed_by = ? AND claimed_until >= ${nowExpr})
+            OR status IN ('PUBLISHED', 'PENDING')
+          )
       `;
       params = [sanitizedError, id, workerId];
     } else {
@@ -256,7 +257,8 @@ export const outboxRepository = {
             claimed_by = NULL, 
             claimed_until = NULL,
             updated_at = ${nowExpr}
-        WHERE id = ?
+        WHERE id = ? 
+          AND (status != 'CLAIMED' OR claimed_until < ${nowExpr})
       `;
       params = [sanitizedError, id];
     }

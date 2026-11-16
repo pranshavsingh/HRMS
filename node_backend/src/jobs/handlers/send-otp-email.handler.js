@@ -49,7 +49,7 @@ export async function sendOtpEmailHandler(job) {
   } catch (err) {
     logger.error("[JobHandler:sendOtpEmail] Poison payload decryption error for JobID [%s]: %s", jobId, err.message);
     if (outboxEventId) {
-      await outboxRepository.markDeadLetter(outboxEventId, `Poison payload: ${err.message}`).catch(() => {});
+      await outboxRepository.markDeadLetter(outboxEventId, `Poison payload: ${err.message}`, workerId).catch(() => {});
     }
     await consumerIdempotencyRepository.markDeadLetter(jobId, HANDLER_NAME, workerId, fencingToken, err.message).catch(() => {});
     return { status: "DEAD_LETTER", reason: "PAYLOAD_DECRYPTION_FAILED", error: err.message };
@@ -60,7 +60,7 @@ export async function sendOtpEmailHandler(job) {
   if (!email || !otp) {
     const errorMsg = "Poison payload: missing required email or OTP field.";
     if (outboxEventId) {
-      await outboxRepository.markDeadLetter(outboxEventId, errorMsg).catch(() => {});
+      await outboxRepository.markDeadLetter(outboxEventId, errorMsg, workerId).catch(() => {});
     }
     await consumerIdempotencyRepository.markDeadLetter(jobId, HANDLER_NAME, workerId, fencingToken, errorMsg).catch(() => {});
     return { status: "DEAD_LETTER", reason: "MISSING_REQUIRED_FIELDS", error: errorMsg };

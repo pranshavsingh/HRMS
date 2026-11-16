@@ -81,6 +81,24 @@ jobs:
           cd node_backend
           npm run db:migrate
 
+      - name: Configure and Verify Production Redis Persistence (AOF & noeviction)
+        run: |
+          sudo apt-get install -y redis-tools || true
+          redis-cli -h 127.0.0.1 -p 6379 config set appendonly yes
+          redis-cli -h 127.0.0.1 -p 6379 config set appendfsync everysec
+          redis-cli -h 127.0.0.1 -p 6379 config set maxmemory 512mb
+          redis-cli -h 127.0.0.1 -p 6379 config set maxmemory-policy noeviction
+          # Verify configuration
+          AOF=$(redis-cli -h 127.0.0.1 -p 6379 config get appendonly | sed -n '2p')
+          POLICY=$(redis-cli -h 127.0.0.1 -p 6379 config get maxmemory-policy | sed -n '2p')
+          SYNC=$(redis-cli -h 127.0.0.1 -p 6379 config get appendfsync | sed -n '2p')
+          echo "Redis appendonly: $AOF"
+          echo "Redis maxmemory-policy: $POLICY"
+          echo "Redis appendfsync: $SYNC"
+          test "$AOF" = "yes"
+          test "$POLICY" = "noeviction"
+          test "$SYNC" = "everysec"
+
       - name: Run Automated Security Test Suite
         env:
           NODE_ENV: test

@@ -30,7 +30,7 @@ export function createRealtimeEnvelope({
   };
 }
 
-class RealtimeService {
+export class RealtimeService {
   constructor() {
     this.io = null;
     this.pubClient = null;
@@ -141,14 +141,16 @@ class RealtimeService {
         socket.join(`org:${user.organization_id}:role:${role}`);
       }
 
-      // Auto-join role-based room (e.g. role:admin, role:hr, role:employee)
-      if (role) {
-        socket.join(`role:${role}`);
-      }
-
       // Auto-join organization/tenant room if available
       if (user.organization_id) {
         socket.join(`org:${user.organization_id}`);
+      }
+
+      // CRITICAL SECURITY FIX: Sockets belonging to a tenant organization MUST NEVER
+      // join global un-scoped role rooms (e.g. 'role:admin') to prevent cross-tenant leakage!
+      // Only system-level superadmins without a tenant may join global role rooms.
+      if (role && !user.organization_id && ["superadmin", "system"].includes(role)) {
+        socket.join(`role:${role}`);
       }
 
       // Explicit room joining authorization gate
@@ -212,15 +214,20 @@ class RealtimeService {
       return true;
     }
 
-    // 3. Role-based rooms require matching user role
-    const role = (user.role || "").toLowerCase();
-    if (type === "role" && role === String(id).toLowerCase()) {
-      return true;
+    // 3. Global un-scoped role rooms: Strictly restricted to system superadmins with no tenant association
+    if (type === "role") {
+      const role = (user.role || "").toLowerCase();
+      if (!user.organization_id && ["superadmin", "system"].includes(role) && role === String(id).toLowerCase()) {
+        return true;
+      }
+      // Tenant users are strictly FORBIDDEN from joining un-scoped global role rooms
+      return false;
     }
 
-    // 4. Admins and HR have access to administrative event rooms
-    if (["admin", "hr", "manager"].includes(role) && ["attendance", "leave", "notifications"].includes(roomName)) {
-      return true;
+    // 4. Admins and HR have access to administrative event rooms (only if superadmin or matching org)
+    if (["attendance", "leave", "notifications"].includes(roomName)) {
+      const role = (user.role || "").toLowerCase();
+      return !user.organization_id && ["superadmin", "system"].includes(role);
     }
 
     return false;
