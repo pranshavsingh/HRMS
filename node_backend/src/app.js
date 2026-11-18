@@ -99,8 +99,20 @@ export function createApp() {
   };
   app.use(cors(corsOptions));
 
-  // 4. Request Logger (Morgan)
-  app.use(morgan("combined"));
+  // 4. Request Logger (Morgan) - Skip internal healthcheck and metrics polling to keep logs clean
+  app.use(
+    morgan("combined", {
+      skip: (req) => {
+        const url = req.url || "";
+        return (
+          url === "/health" ||
+          url.startsWith("/health/") ||
+          url === "/metrics" ||
+          url.startsWith("/metrics?")
+        );
+      },
+    })
+  );
 
   // 5. Body Parsers, Cookie Parser & payload compression
   app.use(express.json({ limit: "5mb" }));
