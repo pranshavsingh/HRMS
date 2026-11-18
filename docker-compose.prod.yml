@@ -6,7 +6,6 @@ services:
   # ============================================================================
   mysql:
     image: mysql:8.0
-    container_name: hrms_prod_mysql
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
@@ -22,6 +21,8 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-replace_with_strong_mysql_password}
     volumes:
       - mysql_data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
     networks:
       - hrms_internal
     healthcheck:
@@ -36,7 +37,6 @@ services:
   # ============================================================================
   redis:
     image: redis:7-alpine
-    container_name: hrms_prod_redis
     restart: unless-stopped
     command: >
       redis-server
@@ -59,10 +59,7 @@ services:
   # 3. Node.js Backend API Service
   # ============================================================================
   backend:
-    build:
-      context: ./node_backend
-      dockerfile: Dockerfile
-    container_name: hrms_prod_backend
+    image: hrms-production-backend:latest
     restart: unless-stopped
     depends_on:
       mysql:
@@ -100,6 +97,7 @@ services:
       - hrms_internal
       - coolify
     labels:
+      - "coolify.managed=true"
       - "traefik.enable=true"
       - "traefik.docker.network=coolify"
       - "traefik.http.routers.hrms-be-sslip-http.entryPoints=http"
@@ -128,10 +126,7 @@ services:
   # 4. Background BullMQ Queue & Cron Worker
   # ============================================================================
   worker:
-    build:
-      context: ./node_backend
-      dockerfile: Dockerfile
-    container_name: hrms_prod_worker
+    image: hrms-production-worker:latest
     restart: unless-stopped
     command: ["npm", "run", "start:worker"]
     depends_on:
@@ -170,15 +165,18 @@ services:
       - uploads_data:/app/src/uploads
     networks:
       - hrms_internal
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'process.exit(0)'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   # ============================================================================
   # 5. React Web Frontend (Nginx Alpine)
   # ============================================================================
   frontend:
-    build:
-      context: ./hrms_saas
-      dockerfile: Dockerfile
-    container_name: hrms_prod_frontend
+    image: hrms-production-frontend:latest
     restart: unless-stopped
     depends_on:
       backend:
@@ -187,6 +185,7 @@ services:
       - hrms_internal
       - coolify
     labels:
+      - "coolify.managed=true"
       - "traefik.enable=true"
       - "traefik.docker.network=coolify"
       - "traefik.http.routers.hrms-fe-sslip-http.entryPoints=http"
@@ -211,15 +210,42 @@ services:
       retries: 3
       start_period: 5s
 
+  # ============================================================================
+  # 6. phpMyAdmin Database GUI
+  # ============================================================================
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      UPLOAD_LIMIT: 64M
+    ports:
+      - "8085:80"
+    networks:
+      - hrms_internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -f http://127.0.0.1:80/ > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
 # ==============================================================================
 # Persistent Named Volumes (Safe Across Rebuilds and Container Reboots)
 # ==============================================================================
 volumes:
   mysql_data:
+    external: true
     name: hrms_mysql_data
   redis_data:
+    external: true
     name: hrms_redis_data
   uploads_data:
+    external: true
     name: hrms_uploads_data
 
 # ==============================================================================
