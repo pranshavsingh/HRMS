@@ -148,6 +148,15 @@ export function createApp() {
   app.use("/api/attendance", attendanceRoutes);
   app.use("/api/leave", leaveRoutes);
   app.use("/api/shifts", shiftRoutes);
+  app.use("/api/workforce/shifts", shiftRoutes);
+  app.use("/api/workforce/holidays", companyHolidayRoutes);
+  app.use("/api/workforce/policies", companyPolicyRoutes);
+  app.use("/api/workforce/weekly-off-policies", weeklyOffPolicyRoutes);
+  app.use("/api/workforce/assignments", shiftAssignmentRoutes);
+  app.use("/api/workforce/rotations", rotationRoutes);
+  app.use("/api/workforce/rosters", rosterRoutes);
+  app.use("/api/workforce/sites", siteRoutes);
+  app.use("/api/sites", siteRoutes);
 
   // System Liveness check
   app.get("/health", (_req, res) => res.json({ status: "alive", uptime: process.uptime() }));
