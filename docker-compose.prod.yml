@@ -85,7 +85,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       OTP_SECRET: ${OTP_SECRET}
       OUTBOX_ENCRYPTION_KEY: ${OUTBOX_ENCRYPTION_KEY}
-      CORS_ORIGIN: ${CORS_ORIGIN:-https://sseone.in,https://www.sseone.in,https://api.sseone.in,http://hrms.201.18.198.223.sslip.io}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://sseone.io,https://www.sseone.io,https://api.sseone.io,https://sseone.in,https://www.sseone.in,https://api.sseone.in,http://hrms.201.18.198.223.sslip.io}
       MEDIA_ROOT: ./src/uploads
       RUN_MIGRATIONS: "true"
       SMTP_HOST: ${SMTP_HOST:-smtp.hostinger.com}
@@ -93,7 +93,7 @@ services:
       SMTP_SECURE: ${SMTP_SECURE:-true}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
-      MAIL_FROM: ${MAIL_FROM:-HRMS <noreply@sseone.in>}
+      MAIL_FROM: ${MAIL_FROM:-HRMS <noreply@sseone.io>}
     volumes:
       - uploads_data:/app/src/uploads
     networks:
@@ -107,10 +107,10 @@ services:
       - "traefik.http.routers.hrms-be-sslip-http.service=hrms-be-svc"
       - "traefik.http.routers.hrms-be-http.entryPoints=http"
       - "traefik.http.routers.hrms-be-http.middlewares=redirect-to-https"
-      - "traefik.http.routers.hrms-be-http.rule=Host(`api.sseone.in`) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-be-http.rule=Host(`api.sseone.io`) && PathPrefix(`/`)"
       - "traefik.http.routers.hrms-be-http.service=hrms-be-svc"
       - "traefik.http.routers.hrms-be-https.entryPoints=https"
-      - "traefik.http.routers.hrms-be-https.rule=Host(`api.sseone.in`) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-be-https.rule=Host(`api.sseone.io`) && PathPrefix(`/`)"
       - "traefik.http.routers.hrms-be-https.service=hrms-be-svc"
       - "traefik.http.routers.hrms-be-https.tls=true"
       - "traefik.http.routers.hrms-be-https.tls.certresolver=letsencrypt"
@@ -157,7 +157,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       OTP_SECRET: ${OTP_SECRET}
       OUTBOX_ENCRYPTION_KEY: ${OUTBOX_ENCRYPTION_KEY}
-      CORS_ORIGIN: ${CORS_ORIGIN:-https://sseone.in,https://www.sseone.in,https://api.sseone.in,http://hrms.201.18.198.223.sslip.io}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://sseone.io,https://www.sseone.io,https://api.sseone.io,https://sseone.in,https://www.sseone.in,https://api.sseone.in,http://hrms.201.18.198.223.sslip.io}
       MEDIA_ROOT: ./src/uploads
       RUN_MIGRATIONS: "false"
       SMTP_HOST: ${SMTP_HOST:-smtp.hostinger.com}
@@ -165,7 +165,7 @@ services:
       SMTP_SECURE: ${SMTP_SECURE:-true}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
-      MAIL_FROM: ${MAIL_FROM:-HRMS <noreply@sseone.in>}
+      MAIL_FROM: ${MAIL_FROM:-HRMS <noreply@sseone.io>}
     volumes:
       - uploads_data:/app/src/uploads
     networks:
@@ -194,10 +194,10 @@ services:
       - "traefik.http.routers.hrms-fe-sslip-http.service=hrms-fe-svc"
       - "traefik.http.routers.hrms-fe-http.entryPoints=http"
       - "traefik.http.routers.hrms-fe-http.middlewares=redirect-to-https"
-      - "traefik.http.routers.hrms-fe-http.rule=(Host(`sseone.in`) || Host(`www.sseone.in`)) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-fe-http.rule=(Host(`sseone.io`) || Host(`www.sseone.io`)) && PathPrefix(`/`)"
       - "traefik.http.routers.hrms-fe-http.service=hrms-fe-svc"
       - "traefik.http.routers.hrms-fe-https.entryPoints=https"
-      - "traefik.http.routers.hrms-fe-https.rule=(Host(`sseone.in`) || Host(`www.sseone.in`)) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-fe-https.rule=(Host(`sseone.io`) || Host(`www.sseone.io`)) && PathPrefix(`/`)"
       - "traefik.http.routers.hrms-fe-https.service=hrms-fe-svc"
       - "traefik.http.routers.hrms-fe-https.tls=true"
       - "traefik.http.routers.hrms-fe-https.tls.certresolver=letsencrypt"
