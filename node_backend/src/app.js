@@ -9,6 +9,14 @@ import { config } from "./config/env.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import attendanceRoutes from "./routes/attendance.routes.js";
 import leaveRoutes from "./routes/leave.routes.js";
+import shiftRoutes from "./routes/shift.routes.js";
+import companyHolidayRoutes from "./routes/company-holiday.routes.js";
+import companyPolicyRoutes from "./routes/company-policy.routes.js";
+import weeklyOffPolicyRoutes from "./routes/weekly-off-policy.routes.js";
+import shiftAssignmentRoutes from "./routes/shift-assignment.routes.js";
+import rotationRoutes from "./routes/rotation.routes.js";
+import rosterRoutes from "./routes/roster.routes.js";
+import siteRoutes from "./routes/site.routes.js";
 import { errorHandler, AppError } from "./middleware/errorHandler.js";
 import { authenticate } from "./middleware/auth.js";
 import { getDocumentDetailRedirect } from "./controllers/accounts.controller.js";
@@ -54,8 +62,22 @@ export function createApp() {
       const normalizedOrigin = origin.trim().toLowerCase();
 
       if (isProduction) {
-        if (allowedOrigins.length > 0 && allowedOrigins.includes(normalizedOrigin)) {
-          return callback(null, true);
+        if (allowedOrigins.length > 0) {
+          if (allowedOrigins.includes(normalizedOrigin)) {
+            return callback(null, true);
+          }
+          const isDomainMatch = allowedOrigins.some((allowed) => {
+            try {
+              const allowedHost = new URL(allowed).hostname.replace(/^www\./, "");
+              const requestHost = new URL(normalizedOrigin).hostname.replace(/^www\./, "");
+              return requestHost === allowedHost || requestHost.endsWith(`.${allowedHost}`);
+            } catch {
+              return false;
+            }
+          });
+          if (isDomainMatch) {
+            return callback(null, true);
+          }
         }
         return callback(new AppError(`Origin '${origin}' is not permitted by CORS policy`, 403));
       } else {
@@ -106,11 +128,26 @@ export function createApp() {
   app.use("/api/v1/auth", accountsRoutes);
   app.use("/api/v1/attendance", attendanceRoutes);
   app.use("/api/v1/leave", leaveRoutes);
+  app.use("/api/v1/shifts", shiftRoutes);
+  app.use("/api/v1/workforce/shifts", shiftRoutes);
+  app.use("/api/v1/workforce/holidays", companyHolidayRoutes);
+  app.use("/api/v1/workforce/policies", companyPolicyRoutes);
+  app.use("/api/v1/workforce/weekly-off-policies", weeklyOffPolicyRoutes);
+  app.use("/api/v1/workforce/assignments", shiftAssignmentRoutes);
+  app.use("/api/v1/workforce/rotations", rotationRoutes);
+  app.use("/api/v1/workforce/rosters", rosterRoutes);
+  app.use("/api/v1/workforce/sites", siteRoutes);
+
+  // Direct and backward compatibility fallback routes
+  app.use("/api/v1/assignments", shiftAssignmentRoutes);
+  app.use("/api/v1/rotations", rotationRoutes);
+  app.use("/api/v1/rosters", rosterRoutes);
 
   // Backward compatibility fallback routes
   app.use("/api/auth", accountsRoutes);
   app.use("/api/attendance", attendanceRoutes);
   app.use("/api/leave", leaveRoutes);
+  app.use("/api/shifts", shiftRoutes);
 
   // System Liveness check
   app.get("/health", (_req, res) => res.json({ status: "alive", uptime: process.uptime() }));
