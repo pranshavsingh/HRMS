@@ -467,3 +467,62 @@ jobs:
         run: |
           cd hrms_mobile
           npx expo export --platform android
+
+  docker-validation:
+    name: Docker Container & Compose Validation
+    runs-on: ubuntu-latest
+    needs: [backend-security, frontend-build]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Production Docker Compose Configuration
+        run: |
+          docker compose -f docker-compose.prod.yml config
+
+      - name: Build Backend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./node_backend
+          file: ./node_backend/Dockerfile
+          push: false
+          tags: hrms-backend:ci-test
+
+      - name: Build Frontend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./hrms_saas
+          file: ./hrms_saas/Dockerfile
+          push: false
+          tags: hrms-frontend:ci-test
+
+  deploy-coolify:
+    name: Trigger Coolify Production Deployment
+    runs-on: ubuntu-latest
+    needs: [backend-security, frontend-build, docker-validation]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Deploy to Coolify via Webhook
+        env:
+          COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK_URL }}
+        run: |
+          if [ -z "$COOLIFY_WEBHOOK" ]; then
+            echo "::warning ::COOLIFY_WEBHOOK_URL secret is not set. Skipping automatic deployment trigger. Configure this secret in GitHub repo settings once your Coolify service is created."
+            exit 0
+          fi
+          echo "Triggering Coolify production deployment..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$COOLIFY_WEBHOOK")
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "Coolify response: $BODY (HTTP $HTTP_STATUS)"
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            echo "✅ Coolify deployment webhook triggered successfully!"
+          else
+            echo "❌ Deployment webhook failed with HTTP status $HTTP_STATUS"
+            exit 1
+          fi

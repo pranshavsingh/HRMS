@@ -23,10 +23,13 @@ const statements = sql
 const conn = await pool.getConnection();
 try {
   for (let stmt of statements) {
+    // Strip comments if present
+    const cleanedStmt = stmt.replace(/^(\s*--[^\n]*\n)+/, "").trim();
+
     // If it's a CREATE INDEX IF NOT EXISTS statement, convert for MySQL 8.0 compatibility:
     // MySQL 8.0 doesn't support IF NOT EXISTS in CREATE INDEX.
-    if (stmt.toUpperCase().startsWith("CREATE INDEX IF NOT EXISTS")) {
-      const match = stmt.match(/CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+([`\w]+)\s+ON\s+([`\w]+)/i);
+    if (/^CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS/i.test(cleanedStmt)) {
+      const match = cleanedStmt.match(/CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+([`\w]+)\s+ON\s+([`\w]+)/i);
       if (match) {
         const [, indexName, tableName] = match;
         const [existing] = await conn.query(
@@ -36,7 +39,7 @@ try {
         if (existing.length > 0) {
           continue; // Index already exists
         }
-        stmt = stmt.replace(/CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS/i, "CREATE INDEX");
+        stmt = cleanedStmt.replace(/CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS/i, "CREATE INDEX");
       }
     }
 

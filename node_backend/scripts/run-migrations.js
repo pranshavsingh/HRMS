@@ -15,22 +15,44 @@ function computeChecksum(content) {
 }
 
 function parseSqlStatements(content) {
-  // Strip comments (-- ...) and split statements by semicolon
   const lines = content.split("\n");
-  const filtered = lines
-    .map((line) => {
-      const commentIdx = line.indexOf("--");
-      if (commentIdx >= 0) {
-        return line.substring(0, commentIdx);
-      }
-      return line;
-    })
-    .join("\n");
+  const statements = [];
+  let currentDelimiter = ";";
+  let buffer = "";
 
-  return filtered
-    .split(";")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  for (let rawLine of lines) {
+    const commentIdx = rawLine.indexOf("--");
+    const line = commentIdx >= 0 ? rawLine.substring(0, commentIdx) : rawLine;
+    const trimmed = line.trim();
+
+    if (trimmed.toUpperCase().startsWith("DELIMITER ")) {
+      if (buffer.trim().length > 0) {
+        statements.push(buffer.trim());
+        buffer = "";
+      }
+      currentDelimiter = trimmed.substring(10).trim();
+      continue;
+    }
+
+    buffer += line + "\n";
+
+    if (currentDelimiter && buffer.includes(currentDelimiter)) {
+      const parts = buffer.split(currentDelimiter);
+      for (let i = 0; i < parts.length - 1; i++) {
+        const stmt = parts[i].trim();
+        if (stmt.length > 0) {
+          statements.push(stmt);
+        }
+      }
+      buffer = parts[parts.length - 1];
+    }
+  }
+
+  if (buffer.trim().length > 0) {
+    statements.push(buffer.trim());
+  }
+
+  return statements;
 }
 
 async function runMigrations() {
@@ -43,9 +65,10 @@ async function runMigrations() {
     return;
   }
 
+  const maxVersion = process.env.MAX_MIGRATION_VERSION || null;
   const migrationFiles = fs
     .readdirSync(migrationsDir)
-    .filter((f) => f.endsWith(".sql"))
+    .filter((f) => f.endsWith(".sql") && (!maxVersion || f.split("_")[0] <= maxVersion))
     .sort();
 
   console.log(`[Migration] Found ${migrationFiles.length} migration file(s):`, migrationFiles.join(", "));
@@ -115,6 +138,15 @@ async function runMigrations() {
         return rows.length > 0;
       }
 
+      // Helper to check table existence
+      async function tableExists(table) {
+        const [rows] = await conn.query(
+          "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+          [table]
+        );
+        return rows.length > 0;
+      }
+
       // Helper to check index existence
       async function indexExists(table, indexName) {
         const [rows] = await conn.query(
@@ -124,25 +156,260 @@ async function runMigrations() {
         return rows.length > 0;
       }
 
+      // Helper to get index columns
+      async function getIndexColumns(table, indexName) {
+        const [rows] = await conn.query(
+          "SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? ORDER BY SEQ_IN_INDEX ASC",
+          [table, indexName]
+        );
+        return rows.map((r) => r.COLUMN_NAME);
+      }
+
+      // Helper to check foreign key existence
+      async function foreignKeyExists(table, fkName) {
+        const [rows] = await conn.query(
+          "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = ? AND CONSTRAINT_TYPE = 'FOREIGN KEY'",
+          [table, fkName]
+        );
+        return rows.length > 0;
+      }
+
+      // Helper to get complete column metadata
+      async function getColumnDefinition(table, columnName) {
+        const [rows] = await conn.query(
+          `SELECT 
+             COLUMN_NAME,
+             DATA_TYPE,
+             COLUMN_TYPE,
+             CHARACTER_MAXIMUM_LENGTH,
+             NUMERIC_PRECISION,
+             NUMERIC_SCALE,
+             IS_NULLABLE,
+             COLUMN_DEFAULT,
+             EXTRA
+           FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND TABLE_NAME = ?
+             AND COLUMN_NAME = ?`,
+          [table, columnName]
+        );
+        if (rows.length === 0) return null;
+        return rows[0];
+      }
+
+      // Helper to verify column definition and fail closed on incompatibility
+      async function verifyColumnDefinition(table, spec) {
+        const actual = await getColumnDefinition(table, spec.name);
+        if (!actual) return false; // Column absent
+
+        const issues = [];
+        if (spec.dataType && actual.DATA_TYPE.toLowerCase() !== spec.dataType.toLowerCase()) {
+          issues.push(`data type mismatch (expected: ${spec.dataType}, found: ${actual.DATA_TYPE})`);
+        }
+        if (spec.isNullable && actual.IS_NULLABLE.toUpperCase() !== spec.isNullable.toUpperCase()) {
+          issues.push(`nullability mismatch (expected: ${spec.isNullable}, found: ${actual.IS_NULLABLE})`);
+        }
+        if (spec.columnType && actual.COLUMN_TYPE.toLowerCase() !== spec.columnType.toLowerCase()) {
+          issues.push(`column type mismatch (expected: ${spec.columnType}, found: ${actual.COLUMN_TYPE})`);
+        }
+        if (spec.columnDefault !== undefined) {
+          const normalizeDef = (val) => {
+            if (val === null || val === undefined || String(val).toUpperCase() === "NULL") return null;
+            return String(val).replace(/^['`\(]|['`\)]$/g, "").trim().toLowerCase();
+          };
+          const actualDef = normalizeDef(actual.COLUMN_DEFAULT);
+          const expectedDef = normalizeDef(spec.columnDefault);
+          if (actualDef !== expectedDef) {
+            issues.push(`default value mismatch (expected: ${spec.columnDefault}, found: ${actual.COLUMN_DEFAULT})`);
+          }
+        }
+
+        if (issues.length > 0) {
+          throw new Error(
+            `MIGRATION VERIFICATION FAILED: Column '${spec.name}' on '${table}' has incompatible definition: ${issues.join("; ")}. Manual intervention required.`
+          );
+        }
+        return true;
+      }
+
+      // Helper to get complete foreign key definition
+      async function getForeignKeyDefinition(table, fkName) {
+        const [rows] = await conn.query(
+          `SELECT 
+             kcu.CONSTRAINT_NAME,
+             kcu.TABLE_NAME,
+             kcu.COLUMN_NAME,
+             kcu.REFERENCED_TABLE_NAME,
+             kcu.REFERENCED_COLUMN_NAME,
+             kcu.ORDINAL_POSITION,
+             rc.DELETE_RULE,
+             rc.UPDATE_RULE
+           FROM information_schema.KEY_COLUMN_USAGE kcu
+           JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+             ON kcu.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA
+             AND kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
+             AND kcu.TABLE_NAME = rc.TABLE_NAME
+           WHERE kcu.CONSTRAINT_SCHEMA = DATABASE()
+             AND kcu.TABLE_NAME = ?
+             AND kcu.CONSTRAINT_NAME = ?
+           ORDER BY kcu.ORDINAL_POSITION ASC`,
+          [table, fkName]
+        );
+        if (rows.length === 0) return null;
+        return {
+          name: rows[0].CONSTRAINT_NAME,
+          table: rows[0].TABLE_NAME,
+          referencedTable: rows[0].REFERENCED_TABLE_NAME,
+          columns: rows.map((r) => r.COLUMN_NAME),
+          referencedColumns: rows.map((r) => r.REFERENCED_COLUMN_NAME),
+          deleteRule: rows[0].DELETE_RULE,
+          updateRule: rows[0].UPDATE_RULE,
+        };
+      }
+
+      // Helper to verify foreign key definition and fail closed on incompatibility
+      async function verifyForeignKeyDefinition(table, spec) {
+        const actual = await getForeignKeyDefinition(table, spec.name);
+        if (!actual) return false; // Foreign key absent
+
+        // In MySQL InnoDB, RESTRICT and NO ACTION are functionally equivalent
+        const normalizeRule = (r) => {
+          const rule = (r || "").toUpperCase();
+          return rule === "NO ACTION" ? "RESTRICT" : rule;
+        };
+
+        const issues = [];
+        if (actual.table.toLowerCase() !== spec.table.toLowerCase()) {
+          issues.push(`source table mismatch (expected: ${spec.table}, found: ${actual.table})`);
+        }
+        if (actual.referencedTable.toLowerCase() !== spec.referencedTable.toLowerCase()) {
+          issues.push(`referenced table mismatch (expected: ${spec.referencedTable}, found: ${actual.referencedTable})`);
+        }
+        if (actual.columns.join(",").toLowerCase() !== spec.columns.join(",").toLowerCase()) {
+          issues.push(`source columns mismatch (expected: [${spec.columns.join(", ")}], found: [${actual.columns.join(", ")}])`);
+        }
+        if (actual.referencedColumns.join(",").toLowerCase() !== spec.referencedColumns.join(",").toLowerCase()) {
+          issues.push(`referenced columns mismatch (expected: [${spec.referencedColumns.join(", ")}], found: [${actual.referencedColumns.join(", ")}])`);
+        }
+        if (spec.deleteRule && normalizeRule(actual.deleteRule) !== normalizeRule(spec.deleteRule)) {
+          issues.push(`ON DELETE rule mismatch (expected: ${spec.deleteRule}, found: ${actual.deleteRule})`);
+        }
+        if (spec.updateRule && normalizeRule(actual.updateRule) !== normalizeRule(spec.updateRule)) {
+          issues.push(`ON UPDATE rule mismatch (expected: ${spec.updateRule}, found: ${actual.updateRule})`);
+        }
+
+        if (issues.length > 0) {
+          throw new Error(
+            `MIGRATION VERIFICATION FAILED: Foreign key '${spec.name}' on '${table}' has incompatible definition: ${issues.join("; ")}. Manual intervention required.`
+          );
+        }
+        return true;
+      }
+
+      function splitAlterClauses(body) {
+        const clauses = [];
+        let current = "";
+        let depth = 0;
+        let inQuote = null;
+
+        for (let i = 0; i < body.length; i++) {
+          const ch = body[i];
+          if (inQuote) {
+            current += ch;
+            if (ch === inQuote && body[i - 1] !== "\\") {
+              inQuote = null;
+            }
+          } else {
+            if (ch === "'" || ch === '"' || ch === "`") {
+              inQuote = ch;
+              current += ch;
+            } else if (ch === "(") {
+              depth++;
+              current += ch;
+            } else if (ch === ")") {
+              depth--;
+              current += ch;
+            } else if (ch === "," && depth === 0) {
+              if (current.trim().length > 0) {
+                clauses.push(current.trim());
+              }
+              current = "";
+            } else {
+              current += ch;
+            }
+          }
+        }
+        if (current.trim().length > 0) {
+          clauses.push(current.trim());
+        }
+        return clauses;
+      }
+
       // Helper to safely execute a SQL statement on MySQL
       async function executeStatementMysql(rawStmt) {
         let stmt = rawStmt.trim();
-        const indexMatch = stmt.match(/CREATE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([`\w]+)\s+ON\s+([`\w]+)/i);
+
+        // 1. Check if standalone CREATE [UNIQUE] INDEX [IF NOT EXISTS]
+        const indexMatch = stmt.match(/^CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([`\w]+)\s+ON\s+([`\w]+)/i);
         if (indexMatch) {
-          const [, indexName, tableName] = indexMatch;
+          const [, isUnique, indexName, tableName] = indexMatch;
           const cleanTable = tableName.replace(/`/g, "");
           const cleanIndex = indexName.replace(/`/g, "");
           if (await indexExists(cleanTable, cleanIndex)) {
             console.log(`  - Index ${cleanIndex} already exists on ${cleanTable} (skipped)`);
             return;
           }
-          stmt = stmt.replace(/CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS/i, "CREATE INDEX");
+          stmt = stmt.replace(/CREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS/i, isUnique ? "CREATE UNIQUE INDEX" : "CREATE INDEX");
+        }
+
+        // 2. Check if ALTER TABLE with IF NOT EXISTS clauses (MySQL 8.0 compatibility)
+        const alterMatch = stmt.match(/^ALTER\s+TABLE\s+([`\w]+)\s+([\s\S]+)$/i);
+        if (alterMatch && /IF\s+NOT\s+EXISTS/i.test(stmt)) {
+          const cleanTable = alterMatch[1].replace(/`/g, "");
+          const rawClauses = splitAlterClauses(alterMatch[2]);
+          const keptClauses = [];
+
+          for (const clause of rawClauses) {
+            const addColMatch = clause.match(/^ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+([`\w]+)\s+([\s\S]+)$/i);
+            const addIdxMatch = clause.match(/^ADD\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+([`\w]+)\s+([\s\S]+)$/i);
+
+            if (addColMatch) {
+              const colName = addColMatch[1].replace(/`/g, "");
+              const colDef = addColMatch[2];
+              const exists = await getColumnDefinition(cleanTable, colName);
+              if (exists) {
+                console.log(`  - Column ${colName} already exists on ${cleanTable} (skipped)`);
+              } else {
+                keptClauses.push(`ADD COLUMN ${colName} ${colDef}`);
+              }
+            } else if (addIdxMatch) {
+              const isUnique = Boolean(addIdxMatch[1]);
+              const idxName = addIdxMatch[2].replace(/`/g, "");
+              const idxDef = addIdxMatch[3];
+              const exists = await indexExists(cleanTable, idxName);
+              if (exists) {
+                console.log(`  - Index ${idxName} already exists on ${cleanTable} (skipped)`);
+              } else {
+                keptClauses.push(`ADD ${isUnique ? "UNIQUE INDEX" : "INDEX"} ${idxName} ${idxDef}`);
+              }
+            } else {
+              keptClauses.push(clause.replace(/IF\s+NOT\s+EXISTS/gi, "").trim());
+            }
+          }
+
+          if (keptClauses.length === 0) {
+            console.log(`  - All clauses in ALTER TABLE ${cleanTable} already applied (skipped)`);
+            return;
+          }
+          stmt = `ALTER TABLE ${cleanTable} ${keptClauses.join(", ")}`;
         }
 
         try {
           await conn.query(stmt);
         } catch (err) {
-          if (err.errno === 1061 || err.code === "ER_DUP_KEYNAME") {
+          if (err.errno === 1060 || err.code === "ER_DUP_FIELDNAME") {
+            console.log("  - Column already exists (skipped duplicate)");
+          } else if (err.errno === 1061 || err.code === "ER_DUP_KEYNAME") {
             console.log("  - Index already exists (skipped duplicate)");
           } else {
             throw err;
@@ -160,10 +427,17 @@ async function runMigrations() {
         if (appliedMap.has(version)) {
           const applied = appliedMap.get(version);
           if (applied.checksum !== checksum) {
-            console.warn(`[Migration Warning] Checksum mismatch for migration ${file}! Recorded: ${applied.checksum}, Current: ${checksum}`);
-          } else {
-            console.log(`[Migration] ${file}: Already applied on ${applied.applied_at} (checksum verified).`);
+            throw new Error(
+              `[CHECKSUM INTEGRITY VIOLATION] Migration '${file}' has been tampered or modified after it was applied.\n` +
+              `  Recorded checksum : ${applied.checksum}\n` +
+              `  Current checksum  : ${checksum}\n` +
+              `  Applied at        : ${applied.applied_at}\n` +
+              `This is a critical integrity error. All subsequent migrations have been blocked.\n` +
+              `Manual DBA investigation and recovery are required before migrations can proceed.\n` +
+              `Do NOT rewrite the stored checksum automatically — investigate the source of the discrepancy first.`
+            );
           }
+          console.log(`[Migration] ${file}: Already applied on ${applied.applied_at} (checksum verified).`);
           continue;
         }
 
@@ -209,6 +483,220 @@ async function runMigrations() {
           if (!(await indexExists("consumer_processed_jobs", "idx_consumer_lease"))) {
             await conn.query("CREATE INDEX idx_consumer_lease ON consumer_processed_jobs(status, lease_expires_at)");
           }
+        } else if (file.startsWith("010_")) {
+          // Parse and safely execute each statement first
+          const statements = parseSqlStatements(content);
+          for (const statement of statements) {
+            await executeStatementMysql(statement);
+          }
+
+          // Strict Specification Reconciliation & Verification for Migration 010
+          console.log("  - Running strict specification verification and reconciliation for Migration 010...");
+
+          // 1. Verify all 4 expected tables exist
+          const expectedTables = [
+            "workforce_employee_fixed_assignment",
+            "workforce_rotation_definition",
+            "workforce_rotation_step",
+            "workforce_employee_rotation",
+          ];
+          for (const tbl of expectedTables) {
+            if (!(await tableExists(tbl))) {
+              throw new Error(`MIGRATION 010 VERIFICATION FAILED: Table '${tbl}' is absent!`);
+            }
+          }
+
+          // 2. Table: workforce_employee_fixed_assignment
+          const effectiveToSpec = {
+            name: "effective_to",
+            dataType: "date",
+            isNullable: "YES",
+            columnDefault: null,
+          };
+          if (!(await verifyColumnDefinition("workforce_employee_fixed_assignment", effectiveToSpec))) {
+            console.log("  - [Repair] Adding missing column 'effective_to' on workforce_employee_fixed_assignment");
+            await conn.query("ALTER TABLE workforce_employee_fixed_assignment ADD COLUMN effective_to DATE NULL AFTER effective_from");
+            await verifyColumnDefinition("workforce_employee_fixed_assignment", effectiveToSpec);
+          }
+
+          const isActiveSpec = {
+            name: "is_active",
+            dataType: "tinyint",
+            columnType: "tinyint(1)",
+            isNullable: "NO",
+            columnDefault: "1",
+          };
+          if (!(await verifyColumnDefinition("workforce_employee_fixed_assignment", isActiveSpec))) {
+            console.log("  - [Repair] Adding missing column 'is_active' on workforce_employee_fixed_assignment");
+            await conn.query("ALTER TABLE workforce_employee_fixed_assignment ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1 AFTER effective_to");
+            await verifyColumnDefinition("workforce_employee_fixed_assignment", isActiveSpec);
+          }
+
+          // Index validation: idx_wefa_tenant_user_active
+          if (await indexExists("workforce_employee_fixed_assignment", "idx_wefa_tenant_user_active")) {
+            const cols = await getIndexColumns("workforce_employee_fixed_assignment", "idx_wefa_tenant_user_active");
+            const expectedCols = ["tenant_id", "user_id", "is_active"];
+            const matches = cols.length === expectedCols.length && cols.every((c, i) => c === expectedCols[i]);
+            if (!matches) {
+              throw new Error(`MIGRATION 010 VERIFICATION FAILED: Index 'idx_wefa_tenant_user_active' has incompatible columns [${cols.join(", ")}]. Expected [${expectedCols.join(", ")}]. Manual intervention required.`);
+            }
+          } else {
+            console.log("  - [Repair] Creating missing index 'idx_wefa_tenant_user_active'");
+            await conn.query("CREATE INDEX idx_wefa_tenant_user_active ON workforce_employee_fixed_assignment(tenant_id, user_id, is_active)");
+          }
+
+          // Foreign keys on workforce_employee_fixed_assignment
+          const fk_wefa_user_spec = {
+            name: "fk_wefa_user",
+            table: "workforce_employee_fixed_assignment",
+            columns: ["user_id"],
+            referencedTable: "accounts_user",
+            referencedColumns: ["id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_employee_fixed_assignment", fk_wefa_user_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wefa_user'");
+            await conn.query("ALTER TABLE workforce_employee_fixed_assignment ADD CONSTRAINT fk_wefa_user FOREIGN KEY (user_id) REFERENCES accounts_user(id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_employee_fixed_assignment", fk_wefa_user_spec);
+          }
+
+          const fk_wefa_shift_spec = {
+            name: "fk_wefa_shift",
+            table: "workforce_employee_fixed_assignment",
+            columns: ["tenant_id", "shift_id"],
+            referencedTable: "workforce_shift",
+            referencedColumns: ["tenant_id", "id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_employee_fixed_assignment", fk_wefa_shift_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wefa_shift'");
+            await conn.query("ALTER TABLE workforce_employee_fixed_assignment ADD CONSTRAINT fk_wefa_shift FOREIGN KEY (tenant_id, shift_id) REFERENCES workforce_shift(tenant_id, id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_employee_fixed_assignment", fk_wefa_shift_spec);
+          }
+
+          const fk_wefa_user_tenant_spec = {
+            name: "fk_wefa_user_tenant",
+            table: "workforce_employee_fixed_assignment",
+            columns: ["tenant_id", "user_id"],
+            referencedTable: "workforce_user_tenant",
+            referencedColumns: ["tenant_id", "user_id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_employee_fixed_assignment", fk_wefa_user_tenant_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wefa_user_tenant'");
+            await conn.query("ALTER TABLE workforce_employee_fixed_assignment ADD CONSTRAINT fk_wefa_user_tenant FOREIGN KEY (tenant_id, user_id) REFERENCES workforce_user_tenant(tenant_id, user_id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_employee_fixed_assignment", fk_wefa_user_tenant_spec);
+          }
+
+          // 3. Table: workforce_rotation_definition
+          const fk_wrd_tenant_spec = {
+            name: "fk_wrd_tenant",
+            table: "workforce_rotation_definition",
+            columns: ["tenant_id"],
+            referencedTable: "workforce_tenant",
+            referencedColumns: ["id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_rotation_definition", fk_wrd_tenant_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wrd_tenant'");
+            await conn.query("ALTER TABLE workforce_rotation_definition ADD CONSTRAINT fk_wrd_tenant FOREIGN KEY (tenant_id) REFERENCES workforce_tenant(id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_rotation_definition", fk_wrd_tenant_spec);
+          }
+
+          // 4. Table: workforce_rotation_step
+          const fk_wrs_rotation_spec = {
+            name: "fk_wrs_rotation",
+            table: "workforce_rotation_step",
+            columns: ["tenant_id", "rotation_id"],
+            referencedTable: "workforce_rotation_definition",
+            referencedColumns: ["tenant_id", "id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_rotation_step", fk_wrs_rotation_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wrs_rotation'");
+            await conn.query("ALTER TABLE workforce_rotation_step ADD CONSTRAINT fk_wrs_rotation FOREIGN KEY (tenant_id, rotation_id) REFERENCES workforce_rotation_definition(tenant_id, id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_rotation_step", fk_wrs_rotation_spec);
+          }
+
+          const fk_wrs_shift_spec = {
+            name: "fk_wrs_shift",
+            table: "workforce_rotation_step",
+            columns: ["tenant_id", "shift_id"],
+            referencedTable: "workforce_shift",
+            referencedColumns: ["tenant_id", "id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_rotation_step", fk_wrs_shift_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wrs_shift'");
+            await conn.query("ALTER TABLE workforce_rotation_step ADD CONSTRAINT fk_wrs_shift FOREIGN KEY (tenant_id, shift_id) REFERENCES workforce_shift(tenant_id, id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_rotation_step", fk_wrs_shift_spec);
+          }
+
+          // 5. Table: workforce_employee_rotation
+          if (await indexExists("workforce_employee_rotation", "idx_wer_tenant_user_active")) {
+            const cols = await getIndexColumns("workforce_employee_rotation", "idx_wer_tenant_user_active");
+            const expectedCols = ["tenant_id", "user_id", "is_active"];
+            const matches = cols.length === expectedCols.length && cols.every((c, i) => c === expectedCols[i]);
+            if (!matches) {
+              throw new Error(`MIGRATION 010 VERIFICATION FAILED: Index 'idx_wer_tenant_user_active' has incompatible columns [${cols.join(", ")}]. Expected [${expectedCols.join(", ")}]. Manual intervention required.`);
+            }
+          } else {
+            console.log("  - [Repair] Creating missing index 'idx_wer_tenant_user_active'");
+            await conn.query("CREATE INDEX idx_wer_tenant_user_active ON workforce_employee_rotation(tenant_id, user_id, is_active)");
+          }
+
+          const fk_wer_user_spec = {
+            name: "fk_wer_user",
+            table: "workforce_employee_rotation",
+            columns: ["user_id"],
+            referencedTable: "accounts_user",
+            referencedColumns: ["id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_employee_rotation", fk_wer_user_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wer_user'");
+            await conn.query("ALTER TABLE workforce_employee_rotation ADD CONSTRAINT fk_wer_user FOREIGN KEY (user_id) REFERENCES accounts_user(id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_employee_rotation", fk_wer_user_spec);
+          }
+
+          const fk_wer_rotation_spec = {
+            name: "fk_wer_rotation",
+            table: "workforce_employee_rotation",
+            columns: ["tenant_id", "rotation_id"],
+            referencedTable: "workforce_rotation_definition",
+            referencedColumns: ["tenant_id", "id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_employee_rotation", fk_wer_rotation_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wer_rotation'");
+            await conn.query("ALTER TABLE workforce_employee_rotation ADD CONSTRAINT fk_wer_rotation FOREIGN KEY (tenant_id, rotation_id) REFERENCES workforce_rotation_definition(tenant_id, id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_employee_rotation", fk_wer_rotation_spec);
+          }
+
+          const fk_wer_user_tenant_spec = {
+            name: "fk_wer_user_tenant",
+            table: "workforce_employee_rotation",
+            columns: ["tenant_id", "user_id"],
+            referencedTable: "workforce_user_tenant",
+            referencedColumns: ["tenant_id", "user_id"],
+            deleteRule: "RESTRICT",
+            updateRule: "RESTRICT",
+          };
+          if (!(await verifyForeignKeyDefinition("workforce_employee_rotation", fk_wer_user_tenant_spec))) {
+            console.log("  - [Repair] Adding missing foreign key 'fk_wer_user_tenant'");
+            await conn.query("ALTER TABLE workforce_employee_rotation ADD CONSTRAINT fk_wer_user_tenant FOREIGN KEY (tenant_id, user_id) REFERENCES workforce_user_tenant(tenant_id, user_id) ON DELETE RESTRICT");
+            await verifyForeignKeyDefinition("workforce_employee_rotation", fk_wer_user_tenant_spec);
+          }
+
+          console.log("  - Strict verification for Migration 010 PASSED: all 4 tables, columns, indexes, and FKs validated.");
         } else {
           // Parse and safely execute each statement
           const statements = parseSqlStatements(content);
@@ -289,10 +777,17 @@ async function runMigrations() {
         if (appliedMap.has(version)) {
           const applied = appliedMap.get(version);
           if (applied.checksum !== checksum) {
-            console.warn(`[Migration Warning] Checksum mismatch for migration ${file}! Recorded: ${applied.checksum}, Current: ${checksum}`);
-          } else {
-            console.log(`[Migration] ${file}: Already applied on ${applied.applied_at} (checksum verified).`);
+            throw new Error(
+              `[CHECKSUM INTEGRITY VIOLATION] Migration '${file}' has been tampered or modified after it was applied.\n` +
+              `  Recorded checksum : ${applied.checksum}\n` +
+              `  Current checksum  : ${checksum}\n` +
+              `  Applied at        : ${applied.applied_at}\n` +
+              `This is a critical integrity error. All subsequent migrations have been blocked.\n` +
+              `Manual DBA investigation and recovery are required before migrations can proceed.\n` +
+              `Do NOT rewrite the stored checksum automatically — investigate the source of the discrepancy first.`
+            );
           }
+          console.log(`[Migration] ${file}: Already applied on ${applied.applied_at} (checksum verified).`);
           continue;
         }
 

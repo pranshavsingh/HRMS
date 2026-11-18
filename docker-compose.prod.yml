@@ -1,0 +1,233 @@
+name: hrms-production
+
+services:
+  # ============================================================================
+  # 1. MySQL 8.0 Database (Internal Only, Persistent Storage)
+  # ============================================================================
+  mysql:
+    image: mysql:8.0
+    container_name: hrms_prod_mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --max_connections=200
+      - --sql_mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+      - --log-bin-trust-function-creators=1
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_hrms_secure_password_prod}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-hrms_prod}
+      MYSQL_USER: ${MYSQL_USER:-hrms_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-replace_with_strong_mysql_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - hrms_internal
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ============================================================================
+  # 2. Redis 7 Alpine (Internal Cache, Queue & Realtime PubSub)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: hrms_prod_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
+    networks:
+      - hrms_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ============================================================================
+  # 3. Node.js Backend API Service
+  # ============================================================================
+  backend:
+    build:
+      context: ./node_backend
+      dockerfile: Dockerfile
+    container_name: hrms_prod_backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 8000
+      DB_CLIENT: mysql
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-hrms_prod}
+      MYSQL_USER: ${MYSQL_USER:-hrms_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-replace_with_strong_mysql_password}
+      MYSQL_CONNECTION_LIMIT: 20
+      REDIS_URL: redis://redis:6379
+      QUEUE_REDIS_URL: redis://redis:6379
+      QUEUE_PREFIX: hrms_prod
+      JWT_SECRET: ${JWT_SECRET}
+      OTP_SECRET: ${OTP_SECRET}
+      OUTBOX_ENCRYPTION_KEY: ${OUTBOX_ENCRYPTION_KEY}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://sseone.in,https://www.sseone.in,https://api.sseone.in,http://hrms.201.18.198.223.sslip.io}
+      MEDIA_ROOT: ./src/uploads
+      RUN_MIGRATIONS: "true"
+      SMTP_HOST: ${SMTP_HOST:-smtp.hostinger.com}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-HRMS <noreply@sseone.in>}
+    volumes:
+      - uploads_data:/app/src/uploads
+    networks:
+      - hrms_internal
+      - coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=coolify"
+      - "traefik.http.routers.hrms-be-sslip-http.entryPoints=http"
+      - "traefik.http.routers.hrms-be-sslip-http.rule=Host(`api-hrms.201.18.198.223.sslip.io`) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-be-sslip-http.service=hrms-be-svc"
+      - "traefik.http.routers.hrms-be-http.entryPoints=http"
+      - "traefik.http.routers.hrms-be-http.middlewares=redirect-to-https"
+      - "traefik.http.routers.hrms-be-http.rule=Host(`api.sseone.in`) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-be-http.service=hrms-be-svc"
+      - "traefik.http.routers.hrms-be-https.entryPoints=https"
+      - "traefik.http.routers.hrms-be-https.rule=Host(`api.sseone.in`) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-be-https.service=hrms-be-svc"
+      - "traefik.http.routers.hrms-be-https.tls=true"
+      - "traefik.http.routers.hrms-be-https.tls.certresolver=letsencrypt"
+      - "traefik.http.services.hrms-be-svc.loadbalancer.server.port=8000"
+    ports:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================================
+  # 4. Background BullMQ Queue & Cron Worker
+  # ============================================================================
+  worker:
+    build:
+      context: ./node_backend
+      dockerfile: Dockerfile
+    container_name: hrms_prod_worker
+    restart: unless-stopped
+    command: ["npm", "run", "start:worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      IS_WORKER: "true"
+      DB_CLIENT: mysql
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-hrms_prod}
+      MYSQL_USER: ${MYSQL_USER:-hrms_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-replace_with_strong_mysql_password}
+      MYSQL_CONNECTION_LIMIT: 5
+      REDIS_URL: redis://redis:6379
+      QUEUE_REDIS_URL: redis://redis:6379
+      QUEUE_PREFIX: hrms_prod
+      JWT_SECRET: ${JWT_SECRET}
+      OTP_SECRET: ${OTP_SECRET}
+      OUTBOX_ENCRYPTION_KEY: ${OUTBOX_ENCRYPTION_KEY}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://sseone.in,https://www.sseone.in,https://api.sseone.in,http://hrms.201.18.198.223.sslip.io}
+      MEDIA_ROOT: ./src/uploads
+      RUN_MIGRATIONS: "false"
+      SMTP_HOST: ${SMTP_HOST:-smtp.hostinger.com}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-HRMS <noreply@sseone.in>}
+    volumes:
+      - uploads_data:/app/src/uploads
+    networks:
+      - hrms_internal
+
+  # ============================================================================
+  # 5. React Web Frontend (Nginx Alpine)
+  # ============================================================================
+  frontend:
+    build:
+      context: ./hrms_saas
+      dockerfile: Dockerfile
+    container_name: hrms_prod_frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - hrms_internal
+      - coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=coolify"
+      - "traefik.http.routers.hrms-fe-sslip-http.entryPoints=http"
+      - "traefik.http.routers.hrms-fe-sslip-http.rule=Host(`hrms.201.18.198.223.sslip.io`) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-fe-sslip-http.service=hrms-fe-svc"
+      - "traefik.http.routers.hrms-fe-http.entryPoints=http"
+      - "traefik.http.routers.hrms-fe-http.middlewares=redirect-to-https"
+      - "traefik.http.routers.hrms-fe-http.rule=(Host(`sseone.in`) || Host(`www.sseone.in`)) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-fe-http.service=hrms-fe-svc"
+      - "traefik.http.routers.hrms-fe-https.entryPoints=https"
+      - "traefik.http.routers.hrms-fe-https.rule=(Host(`sseone.in`) || Host(`www.sseone.in`)) && PathPrefix(`/`)"
+      - "traefik.http.routers.hrms-fe-https.service=hrms-fe-svc"
+      - "traefik.http.routers.hrms-fe-https.tls=true"
+      - "traefik.http.routers.hrms-fe-https.tls.certresolver=letsencrypt"
+      - "traefik.http.services.hrms-fe-svc.loadbalancer.server.port=80"
+    ports:
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+# ==============================================================================
+# Persistent Named Volumes (Safe Across Rebuilds and Container Reboots)
+# ==============================================================================
+volumes:
+  mysql_data:
+    name: hrms_mysql_data
+  redis_data:
+    name: hrms_redis_data
+  uploads_data:
+    name: hrms_uploads_data
+
+# ==============================================================================
+# Networks
+# ==============================================================================
+networks:
+  hrms_internal:
+    name: hrms_internal_network
+    driver: bridge
+  coolify:
+    external: true
