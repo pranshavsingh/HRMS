@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration: 019_seed_default_workforce_sites.sql
+-- Migration: 021_seed_default_workforce_sites.sql
 -- Description: Seed baseline default sites for tenant 1
 -- ============================================================================
 

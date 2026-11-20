@@ -11,7 +11,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function computeChecksum(content) {
-  return crypto.createHash("sha256").update(content, "utf8").digest("hex");
+  const normalized = content.replace(/\r\n/g, "\n");
+  return crypto.createHash("sha256").update(normalized, "utf8").digest("hex");
 }
 
 function parseSqlStatements(content) {
