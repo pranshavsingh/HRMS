@@ -117,11 +117,15 @@ describe("P1.3 — RBAC & Object-Level Authorization (IDOR) Security Suite", () 
 
     it("should BLOCK HR from modifying an employee password on update", async () => {
       const hrActor = { id: 12, role: "hr", username: "hr_user" };
+      const originalFindById = accountsRepository.findById;
+      accountsRepository.findById = async (id) => ({ id: Number(id), role: "employee" });
       let error = null;
       try {
         await accountsService.updateEmployee(486, { password: "AttemptedPassword123!" }, hrActor, 1);
       } catch (err) {
         error = err;
+      } finally {
+        accountsRepository.findById = originalFindById;
       }
       assert.ok(error, "HR must be blocked from modifying employee password");
       assert.equal(error.statusCode, 403);
@@ -130,11 +134,15 @@ describe("P1.3 — RBAC & Object-Level Authorization (IDOR) Security Suite", () 
 
     it("should validate password length when Admin updates employee password", async () => {
       const adminActor = { id: 1, role: "admin", username: "admin_user" };
+      const originalFindById = accountsRepository.findById;
+      accountsRepository.findById = async (id) => ({ id: Number(id), role: "employee" });
       let error = null;
       try {
         await accountsService.updateEmployee(486, { password: "short" }, adminActor, 1);
       } catch (err) {
         error = err;
+      } finally {
+        accountsRepository.findById = originalFindById;
       }
       assert.ok(error, "Short passwords must be rejected with 400");
       assert.equal(error.statusCode, 400);
