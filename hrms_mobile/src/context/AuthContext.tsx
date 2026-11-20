@@ -13,6 +13,7 @@ export interface User {
   role: string; // 'superadmin', 'admin', 'hr', 'manager', 'employee'
   joining_date?: string;
   is_active_employee?: boolean;
+  profile_picture?: string | null;
 }
 
 interface AuthContextType {

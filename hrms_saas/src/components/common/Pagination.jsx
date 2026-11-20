@@ -1,32 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-
-export function usePagination(items, initialPageSize = 10) {
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(initialPageSize);
-  const total = items.length;
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-
-  useEffect(() => {
-    setPage((current) => Math.min(current, pageCount));
-  }, [pageCount]);
-
-  useEffect(() => {
-    setPage(1);
-  }, [items]);
-
-  const pageItems = useMemo(
-    () => items.slice((page - 1) * pageSize, page * pageSize),
-    [items, page, pageSize]
-  );
-
-  const changePageSize = (value) => {
-    setPageSize(Number(value));
-    setPage(1);
-  };
-
-  return { page, setPage, pageSize, changePageSize, pageItems, total, pageCount };
-}
 
 export default function Pagination({
   page,

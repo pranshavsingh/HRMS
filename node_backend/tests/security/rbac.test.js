@@ -117,15 +117,11 @@ describe("P1.3 — RBAC & Object-Level Authorization (IDOR) Security Suite", () 
 
     it("should BLOCK HR from modifying an employee password on update", async () => {
       const hrActor = { id: 12, role: "hr", username: "hr_user" };
-      const originalFindById = accountsRepository.findById;
-      accountsRepository.findById = async (id) => ({ id: Number(id), role: "employee" });
       let error = null;
       try {
         await accountsService.updateEmployee(486, { password: "AttemptedPassword123!" }, hrActor, 1);
       } catch (err) {
         error = err;
-      } finally {
-        accountsRepository.findById = originalFindById;
       }
       assert.ok(error, "HR must be blocked from modifying employee password");
       assert.equal(error.statusCode, 403);
@@ -134,15 +130,11 @@ describe("P1.3 — RBAC & Object-Level Authorization (IDOR) Security Suite", () 
 
     it("should validate password length when Admin updates employee password", async () => {
       const adminActor = { id: 1, role: "admin", username: "admin_user" };
-      const originalFindById = accountsRepository.findById;
-      accountsRepository.findById = async (id) => ({ id: Number(id), role: "employee" });
       let error = null;
       try {
         await accountsService.updateEmployee(486, { password: "short" }, adminActor, 1);
       } catch (err) {
         error = err;
-      } finally {
-        accountsRepository.findById = originalFindById;
       }
       assert.ok(error, "Short passwords must be rejected with 400");
       assert.equal(error.statusCode, 400);
@@ -171,9 +163,9 @@ describe("P1.3 — RBAC & Object-Level Authorization (IDOR) Security Suite", () 
       const adminActor = { id: 1, role: "admin", username: "admin_user" };
       const originalFindProfile = accountsRepository.findProfileByUserId;
       const originalDbGet = accountsRepository.findDocumentByTitleAndUserId;
-      
+
       const empUser = { id: 486, username: "employee1", first_name: "Test", last_name: "User", email: "test@example.com", role: "employee", is_active: 1 };
-      
+
       const serialized = await accountsService.serializeStaffMember(empUser, null, 1);
       assert.ok(serialized, "Serialized employee returned");
       assert.ok("profile_picture" in serialized, "profile_picture property must be present in serialized employee");

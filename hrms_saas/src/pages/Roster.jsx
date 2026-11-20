@@ -107,7 +107,7 @@ export default function Roster() {
   // --- Modals ---
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [newAssignmentModalOpen, setNewAssignmentModalOpen] = useState(false);
-  const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [_bulkModalOpen, setBulkModalOpen] = useState(false);
   const [newRotationModalOpen, setNewRotationModalOpen] = useState(false);
   const [enrollModalOpen, setEnrollModalOpen] = useState(false);
   const [cancelModalOpen, setCancelModalOpen] = useState(false);
@@ -133,7 +133,7 @@ export default function Roster() {
   });
   const [assignmentUserError, setAssignmentUserError] = useState("");
 
-  const [bulkForm, setBulkForm] = useState({
+  const [_bulkForm, _setBulkForm] = useState({
     team_name: "",
     user_ids: [],
     shift_id: "",

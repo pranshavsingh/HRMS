@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   ArrowUpDown,
@@ -48,7 +48,7 @@ const formatDetailKey = (key) => {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
-export const renderFormattedValue = (val, depth = 0) => {
+const renderFormattedValue = (val, depth = 0) => {
   if (val === null || val === undefined) {
     return <span className="text-slate-400 italic">N/A</span>;
   }
@@ -117,7 +117,7 @@ export const renderFormattedValue = (val, depth = 0) => {
 };
 
 // Safe CSV sanitizer protecting against formula injection (=, +, -, @, \t, \r)
-export const sanitizeCsvValue = (val) => {
+const sanitizeCsvValue = (val) => {
   if (val === null || val === undefined) return '""';
   let str = typeof val === "object" ? JSON.stringify(val) : String(val);
   const trimmed = str.trimStart();

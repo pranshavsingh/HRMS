@@ -16,7 +16,8 @@ import {
 } from "lucide-react";
 import Layout from "../../components/layout/Layout";
 import Loader from "../../components/common/Loader";
-import Pagination, { usePagination } from "../../components/common/Pagination";
+import Pagination from "../../components/common/Pagination";
+import { usePagination } from "../../hooks/usePagination";
 import API from "../../api/axios";
 import { useRealtime } from "../../context/RealtimeContext";
 

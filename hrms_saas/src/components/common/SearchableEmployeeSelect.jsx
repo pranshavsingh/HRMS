@@ -29,10 +29,11 @@ export default function SearchableEmployeeSelect({
   // Focus search input when dropdown opens
   useEffect(() => {
     if (isOpen) {
-      setSearchQuery("");
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        setSearchQuery("");
         searchInputRef.current?.focus();
       }, 50);
+      return () => clearTimeout(timer);
     }
   }, [isOpen]);
 

@@ -899,6 +899,15 @@ export const accountsService = {
       throw new AppError("You cannot deactivate your own account", 400);
     }
 
+    if (data.password !== undefined && data.password !== null && data.password !== "") {
+      if (!["admin", "superadmin"].includes(actor.role)) {
+        throw new AppError("Only admin and superadmin are authorized to modify employee passwords", 403);
+      }
+      if (typeof data.password !== "string" || data.password.length < 12 || data.password.length > 128) {
+        throw new AppError("Password must be between 12 and 128 characters", 400);
+      }
+    }
+
     const user = await accountsRepository.findById(employeeId);
     
     const allowedEditableRoles = ["employee", "manager"];
@@ -914,15 +923,6 @@ export const accountsService = {
 
     if (String(actor.id) === String(employeeId) && data.role !== undefined && data.role !== user.role) {
       throw new AppError("You cannot change or demote your own role", 400);
-    }
-
-    if (data.password !== undefined && data.password !== null && data.password !== "") {
-      if (!["admin", "superadmin"].includes(actor.role)) {
-        throw new AppError("Only admin and superadmin are authorized to modify employee passwords", 403);
-      }
-      if (typeof data.password !== "string" || data.password.length < 12 || data.password.length > 128) {
-        throw new AppError("Password must be between 12 and 128 characters", 400);
-      }
     }
 
     if (data.username !== undefined && data.username !== null) data.username = String(data.username).trim();

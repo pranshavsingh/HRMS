@@ -43,7 +43,7 @@ function formatWeeklyOffDays(days) {
     try {
       parsed = JSON.parse(days);
     } catch {
-      parsed = days.replace(/[\[\]"]/g, "").split(",").map(s => Number(s.trim())).filter(n => !isNaN(n));
+      parsed = days.replace(/[[\]"]/g, "").split(",").map(s => Number(s.trim())).filter(n => !isNaN(n));
     }
   }
   if (!Array.isArray(parsed) || parsed.length === 0) return "Days not specified";

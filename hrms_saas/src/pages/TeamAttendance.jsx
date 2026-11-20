@@ -11,7 +11,8 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
-import Pagination, { usePagination } from "../components/common/Pagination";
+import Pagination from "../components/common/Pagination";
+import { usePagination } from "../hooks/usePagination";
 import API from "../api/axios";
 import { useAuth } from "../context/AuthContext";
 import { usePopup } from "../context/PopupContext";
@@ -102,7 +103,7 @@ function formatHours(value) {
 }
 
 // BUG-TA03: Safe CSV value sanitizer protecting against spreadsheet formula injection (=, +, -, @, \t, \r)
-export const sanitizeCsvValue = (val) => {
+const sanitizeCsvValue = (val) => {
   if (val === null || val === undefined) return '""';
   let str = typeof val === "object" ? JSON.stringify(val) : String(val);
   const trimmed = str.trimStart();
