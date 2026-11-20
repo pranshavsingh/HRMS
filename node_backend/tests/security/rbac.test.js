@@ -8,15 +8,21 @@ import redisService from "../../src/services/redis.service.js";
 
 describe("P1.3 — RBAC & Object-Level Authorization (IDOR) Security Suite", () => {
   let originalEnsureVisible;
+  let originalGetSiteScope;
 
   before(() => {
     originalEnsureVisible = siteService.ensureEmployeeVisible;
     siteService.ensureEmployeeVisible = async () => true;
+    originalGetSiteScope = siteService.getSiteScope;
+    siteService.getSiteScope = async () => ({ siteIds: [1, 2], unassigned: false });
   });
 
   after(async () => {
     if (originalEnsureVisible) {
       siteService.ensureEmployeeVisible = originalEnsureVisible;
+    }
+    if (originalGetSiteScope) {
+      siteService.getSiteScope = originalGetSiteScope;
     }
     if (redisService.client) {
       redisService.client.disconnect();
