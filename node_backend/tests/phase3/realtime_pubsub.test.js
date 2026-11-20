@@ -15,6 +15,8 @@ dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 import { config } from "../../src/config/env.js";
 import { createRealtimeEnvelope, realtimeService, RealtimeService } from "../../src/services/realtime.service.js";
+import { db, closePool } from "../../src/db/index.js";
+import redisService from "../../src/services/redis.service.js";
 
 async function isRedisOnline() {
   const client = new Redis(config.redisUrl || "redis://127.0.0.1:6379", {
@@ -63,6 +65,10 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
     if (server1) {
       await new Promise((resolve) => server1.close(resolve));
     }
+    if (redisService.client) {
+      try { redisService.client.disconnect(); } catch {}
+    }
+    await closePool();
   });
 
   it("should generate compliant standardized event envelope", () => {
@@ -233,10 +239,10 @@ describe("P3.7 — Distributed Realtime & Redis Pub/Sub Test Suite", () => {
     await Promise.all([
       new Promise((r) => ioA.close(r)),
       new Promise((r) => ioB.close(r)),
-      pubA.quit(),
-      subA.quit(),
-      pubB.quit(),
-      subB.quit(),
+      Promise.race([pubA.quit(), new Promise((r) => setTimeout(r, 800))]).then(() => { try { pubA.disconnect(); } catch {} }),
+      Promise.race([subA.quit(), new Promise((r) => setTimeout(r, 800))]).then(() => { try { subA.disconnect(); } catch {} }),
+      Promise.race([pubB.quit(), new Promise((r) => setTimeout(r, 800))]).then(() => { try { pubB.disconnect(); } catch {} }),
+      Promise.race([subB.quit(), new Promise((r) => setTimeout(r, 800))]).then(() => { try { subB.disconnect(); } catch {} }),
       new Promise((r) => srvA.close(r)),
       new Promise((r) => srvB.close(r))
     ]);

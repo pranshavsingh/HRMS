@@ -358,11 +358,25 @@ export class RealtimeService {
       this.io = null;
     }
     if (this.pubClient) {
-      try { await this.pubClient.quit(); } catch { this.pubClient.disconnect(); }
+      try {
+        await Promise.race([
+          this.pubClient.quit(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 1000))
+        ]);
+      } catch {
+        try { this.pubClient.disconnect(); } catch {}
+      }
       this.pubClient = null;
     }
     if (this.subClient) {
-      try { await this.subClient.quit(); } catch { this.subClient.disconnect(); }
+      try {
+        await Promise.race([
+          this.subClient.quit(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 1000))
+        ]);
+      } catch {
+        try { this.subClient.disconnect(); } catch {}
+      }
       this.subClient = null;
     }
     this.isInitialized = false;
