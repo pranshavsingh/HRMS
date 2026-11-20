@@ -52,6 +52,7 @@ r.get("/admin-summary/", authenticate, authorize(["admin", "superadmin"]), c.adm
 r.get("/managers/", authenticate, authorize(["admin", "hr", "superadmin"]), c.managers);
 r.get("/employees/", authenticate, attachTenantContext, authorize(["admin", "hr", "superadmin"]), c.employees);
 r.put("/employees/:user_id/", authenticate, attachTenantContext, authorize(["admin", "hr", "superadmin"]), validate(updateEmployeeSchema), c.updateEmployee);
+r.delete("/employees/:user_id/", authenticate, attachTenantContext, authorize(["admin", "superadmin"]), c.deleteEmployee);
 
 // Document upload & retrieval endpoints
 r.post(

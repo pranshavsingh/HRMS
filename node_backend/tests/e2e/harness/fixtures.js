@@ -74,6 +74,25 @@ export async function createTestUser({
     }
   }
 
+  try {
+    await db.run(
+      "INSERT INTO workforce_user_tenant (tenant_id, user_id, role, is_active) VALUES (1, ?, ?, 1) ON DUPLICATE KEY UPDATE is_active = 1",
+      [userId, role]
+    );
+    await db.run(
+      "INSERT INTO workforce_employee_site_assignment (tenant_id, user_id, site_id, effective_from) VALUES (1, ?, 1, '2020-01-01') ON DUPLICATE KEY UPDATE site_id = site_id",
+      [userId]
+    );
+    if (["manager", "hr"].includes(role)) {
+      await db.run(
+        "INSERT INTO workforce_site_access (tenant_id, user_id, site_id) VALUES (1, ?, 1) ON DUPLICATE KEY UPDATE site_id = site_id",
+        [userId]
+      );
+    }
+  } catch (err) {
+    // Ignore workforce table errors in disposable test DBs if tables are absent
+  }
+
   return {
     id: userId,
     username: finalUsername,
@@ -139,6 +158,9 @@ export async function seedRefreshToken({
 export async function deleteTestUser(userId) {
   if (!userId) return;
   try {
+    await db.run("DELETE FROM workforce_employee_site_assignment WHERE user_id = ?", [userId]);
+    await db.run("DELETE FROM workforce_site_access WHERE user_id = ?", [userId]);
+    await db.run("DELETE FROM workforce_user_tenant WHERE user_id = ?", [userId]);
     await db.run("DELETE FROM attendance_attendanceapproval WHERE attendance_id IN (SELECT id FROM attendance_attendance WHERE user_id = ?)", [userId]);
     await db.run("DELETE FROM attendance_attendance WHERE user_id = ?", [userId]);
     await db.run("DELETE FROM leave_leave WHERE user_id = ?", [userId]);

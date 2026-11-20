@@ -11,6 +11,7 @@ import { startTestServer, teardownAll } from "../harness/test-server.js";
 import { HttpClient } from "../harness/http-client.js";
 import { createTestUser, deleteTestUser, seedRefreshToken } from "../harness/fixtures.js";
 import { config } from "../../../src/config/env.js";
+import redisService from "../../../src/services/redis.service.js";
 
 describe("T2.04 — Clock Skew & Grace Limits", () => {
   let serverInfo;
@@ -111,6 +112,8 @@ describe("T2.04 — Clock Skew & Grace Limits", () => {
   });
 
   it("T2-TIME-04: Client clock skew +5 minutes handled safely by server validation", async () => {
+    await redisService.del(`user:revoked:${testUser.id}`);
+
     const clientAheadToken = jwt.sign(
       { userId: testUser.id, role: "employee", type: "access" },
       config.jwtSecret,

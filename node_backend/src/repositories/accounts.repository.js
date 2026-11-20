@@ -906,6 +906,12 @@ export const accountsRepository = {
     await db.run("DELETE FROM accounts_refreshtoken WHERE user_id = ?", [userId], tx);
   },
 
+  async deleteUser(userId, tx = null) {
+    await db.run("UPDATE accounts_user SET deleted_at = NOW(), is_active = 0 WHERE id = ?", [userId], tx);
+    await ensureRefreshTokenTable();
+    await db.run("DELETE FROM accounts_refreshtoken WHERE user_id = ?", [userId], tx);
+  },
+
   async updateRefreshTokenActivity(tokenHash, tx = null) {
     await ensureRefreshTokenTable();
     const now = new Date();

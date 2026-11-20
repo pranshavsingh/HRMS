@@ -259,6 +259,15 @@ export const updateEmployee = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Delete employee record (admin/superadmin only).
+ */
+export const deleteEmployee = asyncHandler(async (req, res) => {
+  const targetId = parseInt(req.params.user_id, 10);
+  const result = await accountsService.deleteEmployee(targetId, req.user);
+  res.json({ status: "success", message: "Employee deleted successfully", data: result });
+});
+
+/**
  * Upload general employee documents.
  */
 export const uploadDocument = asyncHandler(async (req, res) => {

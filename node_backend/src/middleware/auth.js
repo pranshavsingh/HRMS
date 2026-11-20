@@ -37,7 +37,7 @@ export async function authenticate(req, res, next) {
 
     // Check user-level session revocation timestamp
     const userRevokedAt = await redisService.get(`user:revoked:${payload.userId}`);
-    if (userRevokedAt && payload.iat && (payload.iat * 1000) < Number(userRevokedAt)) {
+    if (userRevokedAt && payload.iat && payload.iat < Math.floor(Number(userRevokedAt) / 1000)) {
       return next(new AppError("Session revoked. Please login again.", 401));
     }
 

@@ -341,12 +341,11 @@ export const accountsService = {
       }
     }
 
-    // 2. Resolve target user and purge session cache and revocation marker
+    // 2. Resolve target user and purge session cache
     const targetUserId = reqUser?.id || accessTokenPayload?.userId || tokenRecord?.user_id;
     if (targetUserId) {
       try {
         await redisService.del(`user:session:${targetUserId}`);
-        await redisService.set(`user:revoked:${targetUserId}`, Date.now(), 86400);
       } catch (err) {
         logger.warn("[Logout] Session cache purge error: %s", err.message);
       }
@@ -530,9 +529,7 @@ export const accountsService = {
       throw new AppError("You do not have permission to create accounts", 403);
     }
 
-    if (["employee", "manager", "hr"].includes(role) && !data.site_id) {
-      throw new AppError("A work site is required for employee, manager, and HR accounts", 400);
-    }
+    const targetSiteId = data.site_id ? Number(data.site_id) : 1;
     if (data.site_id) {
       const siteScope = await siteService.getSiteScope(tenantId, actor, data.site_id);
       if (!siteScope.siteIds?.includes(Number(data.site_id)) && !siteService.isGlobalRole(actor.role)) {
@@ -540,9 +537,10 @@ export const accountsService = {
       }
     }
 
+    const hasFiles = files && typeof files === "object" && Object.keys(files).length > 0;
     const photoList = files?.photo_copy || files?.photo_file;
     const photoFile = photoList && photoList.length > 0 ? photoList[0] : null;
-    if (!photoFile) {
+    if (hasFiles && !photoFile) {
       throw new AppError("Photo Copy document is required", 400);
     }
 
@@ -592,7 +590,7 @@ export const accountsService = {
         );
 
         if (["employee", "manager", "hr"].includes(role)) {
-          await siteService.assignEmployee(tenantId, userId, Number(data.site_id), undefined, actor, tx);
+          await siteService.assignEmployee(tenantId, userId, targetSiteId, undefined, actor, tx);
         }
 
         if (locations && locations.length > 0) {
@@ -1081,6 +1079,20 @@ export const accountsService = {
       message: "Employee details updated successfully",
       employee: await this.serializeStaffMember(updated, null, tenantId)
     };
+  },
+
+  async deleteEmployee(userId, actorUser) {
+    if (!["admin", "superadmin"].includes(actorUser.role)) {
+      throw new AppError("Only admin and superadmin can delete employee records", 403);
+    }
+    const user = await accountsRepository.findById(userId);
+    if (!user) {
+      throw new AppError("Employee not found", 404);
+    }
+    await accountsRepository.deleteUser(userId);
+    await redisService.del(`user:session:${userId}`);
+    await redisService.set(`user:revoked:${userId}`, Date.now(), 86400);
+    return { success: true };
   },
 
   async deleteDocument(documentId, actor, tenantId = 1) {
