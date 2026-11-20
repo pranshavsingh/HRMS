@@ -52,6 +52,11 @@ describe("P2.1 — Attendance & Transactional Concurrency Test Suite", () => {
       [testUserId, testManagerId]
     );
 
+    // Ensure test sites exist
+    await db.run(
+      "INSERT INTO workforce_site (id, tenant_id, code, name, address, is_active) VALUES (2, 1, 'SITE_2', 'Secondary Site', 'Branch Office', 1) ON DUPLICATE KEY UPDATE is_active = 1"
+    );
+
     // Assign site 2 to employee and site access to manager for site-scoped authorization
     await db.run(
       "INSERT INTO workforce_employee_site_assignment (tenant_id, user_id, site_id, effective_from) VALUES (1, ?, 2, '2020-01-01')",
