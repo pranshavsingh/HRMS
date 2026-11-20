@@ -64,6 +64,29 @@ describe("P2.3 — High-Concurrency & Load Simulation Test Suite", () => {
       );
     }
 
+    // Ensure company policy allows unscheduled punches for the test tenant
+    const activePolicy = await db.get(
+      "SELECT id, allow_unscheduled_punch FROM workforce_company_policy_version WHERE tenant_id = 1 AND status = 'published' ORDER BY effective_from DESC, id DESC LIMIT 1"
+    );
+    if (activePolicy && Number(activePolicy.allow_unscheduled_punch) === 0) {
+      await db.run(
+        "UPDATE workforce_company_policy_version SET effective_to = '2026-01-01' WHERE id = ?",
+        [activePolicy.id]
+      );
+      await db.run(
+        `INSERT INTO workforce_company_policy_version (
+          tenant_id, policy_id, version_number, status, effective_from, effective_to,
+          min_rest_period_minutes, grace_period_in_minutes, early_departure_grace_minutes,
+          early_departure_requires_approval, allow_unscheduled_punch,
+          overtime_enabled, overtime_min_qualifying_minutes, overtime_rounding_minutes, overtime_requires_approval,
+          published_at, published_by, created_at
+        ) VALUES (
+          1, 1, 999, 'published', '2026-01-02', NULL,
+          660, 15, 15, 1, 1, 0, 60, 15, 1, NOW(), NULL, NOW()
+        )`
+      );
+    }
+
     // Prime leave entitlement for primary test user
     await leaveService.myLeaves(testUserIds[0], { page: 1, limit: 10 });
   });

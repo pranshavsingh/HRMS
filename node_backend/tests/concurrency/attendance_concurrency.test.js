@@ -66,6 +66,29 @@ describe("P2.1 — Attendance & Transactional Concurrency Test Suite", () => {
       "INSERT INTO workforce_site_access (tenant_id, user_id, site_id) VALUES (1, ?, 2)",
       [testManagerId]
     );
+
+    // Ensure company policy allows unscheduled punches for the test tenant
+    const activePolicy = await db.get(
+      "SELECT id, allow_unscheduled_punch FROM workforce_company_policy_version WHERE tenant_id = 1 AND status = 'published' ORDER BY effective_from DESC, id DESC LIMIT 1"
+    );
+    if (activePolicy && Number(activePolicy.allow_unscheduled_punch) === 0) {
+      await db.run(
+        "UPDATE workforce_company_policy_version SET effective_to = '2026-01-01' WHERE id = ?",
+        [activePolicy.id]
+      );
+      await db.run(
+        `INSERT INTO workforce_company_policy_version (
+          tenant_id, policy_id, version_number, status, effective_from, effective_to,
+          min_rest_period_minutes, grace_period_in_minutes, early_departure_grace_minutes,
+          early_departure_requires_approval, allow_unscheduled_punch,
+          overtime_enabled, overtime_min_qualifying_minutes, overtime_rounding_minutes, overtime_requires_approval,
+          published_at, published_by, created_at
+        ) VALUES (
+          1, 1, 999, 'published', '2026-01-02', NULL,
+          660, 15, 15, 1, 1, 0, 60, 15, 1, NOW(), NULL, NOW()
+        )`
+      );
+    }
   });
 
   after(async () => {
@@ -106,9 +129,16 @@ describe("P2.1 — Attendance & Transactional Concurrency Test Suite", () => {
     const successes = results.filter((r) => r.success);
     const failures = results.filter((r) => !r.success);
 
-    assert.equal(successes.length, 1, `Expected exactly 1 punch-in to succeed, got ${successes.length}`);
+    assert.equal(
+      successes.length,
+      1,
+      `Expected exactly 1 punch-in to succeed, got ${successes.length}. Failures: ${JSON.stringify(failures.map((f) => f.error))}`
+    );
     assert.equal(failures.length, 9, `Expected exactly 9 punch-ins to fail, got ${failures.length}`);
-    assert.ok(failures.every((f) => f.error.includes("Already punched in")), "All failures must report 'Already punched in'");
+    assert.ok(
+      failures.every((f) => f.error.includes("Already punched in")),
+      `All failures must report 'Already punched in'. Got: ${JSON.stringify(failures.map((f) => f.error))}`
+    );
 
     // Verify database row count: exactly 1 open attendance record
     const openRecords = await db.all(
@@ -136,9 +166,16 @@ describe("P2.1 — Attendance & Transactional Concurrency Test Suite", () => {
     const successes = results.filter((r) => r.success);
     const failures = results.filter((r) => !r.success);
 
-    assert.equal(successes.length, 1, `Expected exactly 1 punch-out to succeed, got ${successes.length}`);
+    assert.equal(
+      successes.length,
+      1,
+      `Expected exactly 1 punch-out to succeed, got ${successes.length}. Failures: ${JSON.stringify(failures.map((f) => f.error))}`
+    );
     assert.equal(failures.length, 9, `Expected exactly 9 punch-outs to fail, got ${failures.length}`);
-    assert.ok(failures.every((f) => f.error.includes("Punch in first")), "All failures must report 'Punch in first'");
+    assert.ok(
+      failures.every((f) => f.error.includes("Punch in first")),
+      `All failures must report 'Punch in first'. Got: ${JSON.stringify(failures.map((f) => f.error))}`
+    );
 
     // Verify database record: punch_out_time must be populated
     const openRecords = await db.all(
