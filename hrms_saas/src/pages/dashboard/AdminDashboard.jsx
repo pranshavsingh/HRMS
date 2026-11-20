@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import Layout from "../../components/layout/Layout";
 import Loader from "../../components/common/Loader";
+import Pagination, { usePagination } from "../../components/common/Pagination";
 import API from "../../api/axios";
 import { useRealtime } from "../../context/RealtimeContext";
 
@@ -29,6 +30,18 @@ const emptySummary = {
   present_today: 0,
   absent_today: 0,
   today_present_employees: [],
+};
+
+const formatTimelineDate = (value) => {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
 };
 
 export default function AdminDashboard() {
@@ -45,6 +58,7 @@ export default function AdminDashboard() {
   const searchParams = new URLSearchParams(location.search);
   const view = searchParams.get("view");
   const [activeTab, setActiveTab] = useState(view === "personal" ? "personal" : "system");
+  const timelinePagination = usePagination(personalData?.daily_work || []);
 
   useEffect(() => {
     setActiveTab(view === "personal" ? "personal" : "system");
@@ -620,12 +634,12 @@ export default function AdminDashboard() {
 
                       <tbody>
                         {personalData.daily_work && personalData.daily_work.length > 0 ? (
-                          personalData.daily_work.map((item, index) => (
+                          timelinePagination.pageItems.map((item, index) => (
                             <tr
                               key={`${item.date}-${index}`}
                               className="border-t border-slate-100 transition hover:bg-slate-50/80"
                             >
-                              <td className="px-6 py-4 font-medium text-slate-900">{item.date}</td>
+                              <td className="px-6 py-4 font-medium text-slate-900">{formatTimelineDate(item.date)}</td>
                               <td className="px-6 py-4 text-slate-700">{item.punch_in || "--"}</td>
                               <td className="px-6 py-4 text-slate-700">
                                 {item.punch_out === "Pending" ? (
@@ -654,6 +668,7 @@ export default function AdminDashboard() {
                       </tbody>
                     </table>
                   </div>
+                  {personalData.daily_work?.length > 0 && <Pagination {...timelinePagination} itemLabel="days" />}
                 </section>
               </>
             ) : (

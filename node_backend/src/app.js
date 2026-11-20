@@ -9,6 +9,7 @@ import { config } from "./config/env.js";
 import accountsRoutes from "./routes/accounts.routes.js";
 import attendanceRoutes from "./routes/attendance.routes.js";
 import leaveRoutes from "./routes/leave.routes.js";
+import financialLeaveRoutes from "./routes/financial-leave.routes.js";
 import shiftRoutes from "./routes/shift.routes.js";
 import companyHolidayRoutes from "./routes/company-holiday.routes.js";
 import companyPolicyRoutes from "./routes/company-policy.routes.js";
@@ -140,6 +141,7 @@ export function createApp() {
   app.use("/api/v1/auth", accountsRoutes);
   app.use("/api/v1/attendance", attendanceRoutes);
   app.use("/api/v1/leave", leaveRoutes);
+  app.use("/api/v1/leave/policy", financialLeaveRoutes);
   app.use("/api/v1/shifts", shiftRoutes);
   app.use("/api/v1/workforce/shifts", shiftRoutes);
   app.use("/api/v1/workforce/holidays", companyHolidayRoutes);
@@ -159,6 +161,7 @@ export function createApp() {
   app.use("/api/auth", accountsRoutes);
   app.use("/api/attendance", attendanceRoutes);
   app.use("/api/leave", leaveRoutes);
+  app.use("/api/leave/policy", financialLeaveRoutes);
   app.use("/api/shifts", shiftRoutes);
   app.use("/api/workforce/shifts", shiftRoutes);
   app.use("/api/workforce/holidays", companyHolidayRoutes);

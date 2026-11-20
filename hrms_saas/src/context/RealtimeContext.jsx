@@ -1,45 +1,62 @@
-import { createContext, useContext, useEffect, useRef } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef } from "react";
+import { io } from "socket.io-client";
 import API from "../api/axios";
 
 const RealtimeContext = createContext(null);
 
 export const RealtimeProvider = ({ children }) => {
   const eventSourceRef = useRef(null);
+  const socketRef = useRef(null);
   const listenersRef = useRef({});
+  const reconnectTimerRef = useRef(null);
+  const connectionAttemptRef = useRef(0);
 
-  // Helper to get baseURL for SSE
-  const getSseUrl = () => {
-    const base = API.defaults.baseURL || "http://127.0.0.1:8000/api";
-    const token = localStorage.getItem("token") || "";
-    return `${base}/auth/realtime?token=${token}`;
-  };
+  const dispatchEvent = useCallback((type, data) => {
+    const listeners = listenersRef.current[type] || [];
+    listeners.forEach((callback) => {
+      try { callback(data); }
+      catch (error) { console.error(`[Realtime] Listener callback error for ${type}:`, error); }
+    });
+  }, []);
 
-  const connect = () => {
+  const connectSse = useCallback(async () => {
+    const attempt = ++connectionAttemptRef.current;
     const token = localStorage.getItem("token");
     if (!token) return;
 
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    eventSourceRef.current?.close();
 
-    const url = getSseUrl();
-    const es = new EventSource(url);
+    let es;
+    try {
+      // EventSource cannot send Authorization headers. Mint a short-lived,
+      // single-use ticket instead of placing the raw access token in the URL.
+      const response = await API.post("/v1/auth/realtime/ticket/");
+      const ticket = response.data?.ticket || response.data?.data?.ticket;
+      if (!ticket) throw new Error("Realtime ticket was not returned");
+      if (attempt !== connectionAttemptRef.current || !localStorage.getItem("token")) return;
+
+      const base = API.defaults.baseURL || "/api";
+      es = new EventSource(`${base}/v1/auth/realtime?ticket=${encodeURIComponent(ticket)}`);
+    } catch (error) {
+      if (attempt !== connectionAttemptRef.current) return;
+      console.warn("[Realtime] Could not open live updates; will retry.", error?.message);
+      reconnectTimerRef.current = setTimeout(() => connectSse(), 5000);
+      return;
+    }
     eventSourceRef.current = es;
 
     es.onopen = () => {
       console.log("[Realtime] Connected to live updates stream");
     };
 
-    es.onerror = (err) => {
-      console.error("[Realtime] SSE connection error:", err);
-      // Wait 5 seconds and attempt to reconnect
-      setTimeout(() => {
-        const activeToken = localStorage.getItem("token");
-        if (activeToken && (!eventSourceRef.current || eventSourceRef.current.readyState === EventSource.CLOSED)) {
-          console.log("[Realtime] Attempting reconnection...");
-          connect();
-        }
-      }, 5000);
+    es.onerror = () => {
+      if (attempt !== connectionAttemptRef.current) return;
+      es.close();
+      if (eventSourceRef.current === es) eventSourceRef.current = null;
+      if (localStorage.getItem("token")) {
+        reconnectTimerRef.current = setTimeout(() => connectSse(), 5000);
+      }
     };
 
     // Generic message handler or specific event handlers
@@ -52,30 +69,64 @@ export const RealtimeProvider = ({ children }) => {
         data = event.data;
       }
       
-      const listeners = listenersRef.current[type] || [];
-      listeners.forEach(cb => {
-        try {
-          cb(data);
-        } catch (cbErr) {
-          console.error(`[Realtime] Listener callback error for ${type}:`, cbErr);
-        }
-      });
+      dispatchEvent(type, data);
     };
 
     // Listen for core real-time events
-    const events = ["new_audit_log", "attendance_update", "leave_update", "employee_update"];
+    const events = ["new_audit_log", "attendance_update", "leave_update", "leave_notice", "employee_update", "document_update"];
     events.forEach(evt => {
       es.addEventListener(evt, handleEvent);
     });
-  };
+  }, [dispatchEvent]);
 
-  const disconnect = () => {
+  const connectSocket = useCallback((requestedTenantId) => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    socketRef.current?.disconnect();
+
+    const base = API.defaults.baseURL || "/api";
+    const origin = new URL(base, window.location.origin).origin;
+    const tenantId = localStorage.getItem("role") === "superadmin"
+      ? (requestedTenantId === undefined ? localStorage.getItem("holidayCalendarTenant") : requestedTenantId)
+      : null;
+    const socket = io(origin, {
+      auth: { token, ...(tenantId ? { tenantId } : {}) },
+      transports: ["websocket", "polling"],
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+    });
+    socketRef.current = socket;
+    socket.on("connect", () => dispatchEvent("realtime:connected", {}));
+    socket.onAny((event, data) => {
+      if (event.startsWith("holiday:")) dispatchEvent(event, data);
+    });
+    socket.on("connect_error", (error) => {
+      console.warn("[Realtime] Socket.IO connection failed:", error.message);
+    });
+  }, [dispatchEvent]);
+
+  const connect = useCallback(() => {
+    connectSse();
+    connectSocket();
+  }, [connectSse, connectSocket]);
+
+  const disconnect = useCallback(() => {
+    connectionAttemptRef.current += 1;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
       console.log("[Realtime] Disconnected from stream");
     }
-  };
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+  }, []);
 
   const subscribe = (event, callback) => {
     if (!listenersRef.current[event]) {
@@ -94,8 +145,11 @@ export const RealtimeProvider = ({ children }) => {
       console.log("[Realtime] Token refreshed in background. Reconnecting...");
       connect();
     };
+    const handleTenantChange = (event) => connectSocket(event.detail?.tenantId ?? null);
 
     window.addEventListener("token-refreshed", handleRefresh);
+    window.addEventListener("auth-logout", disconnect);
+    window.addEventListener("realtime-tenant-change", handleTenantChange);
 
     const token = localStorage.getItem("token");
     if (token) {
@@ -104,9 +158,11 @@ export const RealtimeProvider = ({ children }) => {
 
     return () => {
       window.removeEventListener("token-refreshed", handleRefresh);
+      window.removeEventListener("auth-logout", disconnect);
+      window.removeEventListener("realtime-tenant-change", handleTenantChange);
       disconnect();
     };
-  }, []);
+  }, [connect, connectSocket, disconnect]);
 
   return (
     <RealtimeContext.Provider value={{ connect, disconnect, subscribe }}>

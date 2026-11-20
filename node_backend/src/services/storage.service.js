@@ -74,9 +74,10 @@ class StorageService {
   /**
    * Resolves a database path to a public URL or a signed private URL.
    * @param {string} dbPath 
+   * @param {object} options
    * @returns {string|null} URL
    */
-  getUrl(dbPath) {
+  getUrl(dbPath, options = {}) {
     if (!dbPath) return null;
 
     if (dbPath.startsWith("cloudinary://")) {
@@ -86,7 +87,7 @@ class StorageService {
       }
       const isPrivate = publicId.startsWith("employee-documents/");
       if (isPrivate) {
-        return cloudinaryService.generateSignedUrl(publicId);
+        return cloudinaryService.generateSignedUrl(publicId, options);
       }
       return `https://res.cloudinary.com/${config.cloudinaryCloudName}/image/upload/${publicId}.webp`;
     }

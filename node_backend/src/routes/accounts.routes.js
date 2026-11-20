@@ -1,19 +1,21 @@
 import { Router } from "express";
 import { authenticate, authorize, authenticateRealtime } from "../middleware/auth.js";
 import { upload } from "../middleware/upload.js";
-import { 
-  validate, 
-  loginSchema, 
+import {
+  validate,
+  loginSchema,
   refreshTokenSchema,
   logoutSchema,
-  requestOtpSchema, 
-  verifyOtpSchema, 
-  resetPasswordSchema, 
+  requestOtpSchema,
+  verifyOtpSchema,
+  resetPasswordSchema,
   changePasswordSchema,
-  createEmployeeSchema, 
-  uploadDocumentSchema 
+  createEmployeeSchema,
+  updateEmployeeSchema,
+  uploadDocumentSchema
 } from "../middleware/validation.js";
 import * as c from "../controllers/accounts.controller.js";
+import { attachTenantContext } from "../utils/tenant.js";
 
 const r = Router();
 
@@ -30,8 +32,11 @@ r.post("/change-password/", authenticate, validate(changePasswordSchema), c.chan
 r.post(
   "/create-employee/",
   authenticate,
+  attachTenantContext,
   authorize(["admin", "hr", "superadmin"]),
   upload.fields([
+    { name: "photo_copy", maxCount: 1 },
+    { name: "photo_file", maxCount: 1 },
     { name: "aadhar_file", maxCount: 1 },
     { name: "pan_file", maxCount: 1 },
     { name: "bank_file", maxCount: 1 },
@@ -45,9 +50,8 @@ r.post(
 
 r.get("/admin-summary/", authenticate, authorize(["admin", "superadmin"]), c.adminSummary);
 r.get("/managers/", authenticate, authorize(["admin", "hr", "superadmin"]), c.managers);
-r.get("/employees/", authenticate, authorize(["admin", "hr", "superadmin"]), c.employees);
-r.put("/employees/:user_id/", authenticate, authorize(["admin", "hr", "superadmin"]), c.updateEmployee);
-r.delete("/employees/:user_id/", authenticate, authorize(["admin", "hr", "superadmin"]), c.deleteEmployee);
+r.get("/employees/", authenticate, attachTenantContext, authorize(["admin", "hr", "superadmin"]), c.employees);
+r.put("/employees/:user_id/", authenticate, attachTenantContext, authorize(["admin", "hr", "superadmin"]), validate(updateEmployeeSchema), c.updateEmployee);
 
 // Document upload & retrieval endpoints
 r.post(
@@ -59,7 +63,7 @@ r.post(
 );
 
 r.get("/documents/my/", authenticate, c.myDocuments);
-r.get("/documents/:user_id/", authenticate, authorize(["admin", "hr", "manager", "superadmin"]), c.employeeDocuments);
+r.get("/documents/:user_id/", authenticate, attachTenantContext, authorize(["admin", "hr", "manager", "superadmin"]), c.employeeDocuments);
 
 // Cloudinary signature, direct document registration, and secure detail endpoints
 import rateLimit from "express-rate-limit";
@@ -74,7 +78,8 @@ const signatureLimiter = rateLimit({
 r.get("/cloudinary/signature/", authenticate, signatureLimiter, c.getCloudinarySignature);
 r.post("/documents/register/", authenticate, c.registerDirectDocument);
 r.get("/documents/detail/:id/", authenticate, c.getDocumentDetailRedirect);
-r.delete("/documents/:id/", authenticate, authorize(["superadmin"]), c.deleteDocument);
+r.get("/documents/download/:id/", authenticate, attachTenantContext, c.downloadDocument);
+r.delete("/documents/:id/", authenticate, attachTenantContext, authorize(["superadmin"]), c.deleteDocument);
 r.get("/audit-logs/", authenticate, authorize(["superadmin"]), c.getAuditLogs);
 r.post("/realtime/ticket/", authenticate, c.createRealtimeTicket);
 r.get("/realtime/", authenticateRealtime, c.realtimeUpdatesStream);

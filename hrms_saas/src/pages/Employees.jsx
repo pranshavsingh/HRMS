@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import {
+  AlertCircle,
   Briefcase,
   Calendar,
   CheckCircle2,
@@ -8,6 +9,7 @@ import {
   ChevronRight,
   ChevronUp,
   Eye,
+  EyeOff,
   FileBadge2,
   FileText,
   MapPin,
@@ -28,8 +30,11 @@ import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
 import API from "../api/axios";
 import { useRealtime } from "../context/RealtimeContext";
+import { useSite } from "../context/SiteContext";
+import { useAuth } from "../context/AuthContext";
 
 const documentLabels = [
+  { key: "photo_copy", label: "Photo Copy", required: true },
   { key: "aadhar_file", label: "Aadhar Card", required: true },
   { key: "pan_file", label: "PAN Card", required: true },
   { key: "bank_file", label: "Bank Details", required: true },
@@ -45,6 +50,7 @@ const initialForm = {
   email: "",
   password: "",
   role: "employee",
+  site_id: "",
   manager: "",
   team_name: "",
   joining_date: "",
@@ -125,7 +131,10 @@ function getAvatarStyle(role, name = "") {
 }
 
 export default function Employees() {
-  const userRole = localStorage.getItem("role") || "employee";
+  const { role: authRole, user: authUser } = useAuth();
+  const userRole = authRole || localStorage.getItem("role") || "employee";
+  const currentUserId = authUser?.id || (localStorage.getItem("user") ? JSON.parse(localStorage.getItem("user"))?.id : null);
+  const { sites, querySiteId } = useSite();
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -137,47 +146,102 @@ export default function Employees() {
   const [existingDocuments, setExistingDocuments] = useState([]);
   const [form, setForm] = useState(initialForm);
   const [files, setFiles] = useState({});
+  const [fileInputKey, setFileInputKey] = useState(0);
   const [editingId, setEditingId] = useState(null);
   const [message, setMessage] = useState("");
   const [statusDialog, setStatusDialog] = useState(null);
   const [noticePopup, setNoticePopup] = useState(null);
   const [mapPickerTarget, setMapPickerTarget] = useState(null);
 
-  // UI state for Directory, Collapsible Form & Pagination
+  // UI state for Directory, Collapsible Form & Server Pagination
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [teamFilter, setTeamFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [metrics, setMetrics] = useState({ total: 0, active: 0, inactive: 0, managers: 0, employees: 0, hr: 0, admin: 0 });
+  const [availableTeams, setAvailableTeams] = useState([]);
   const [viewingEmployee, setViewingEmployee] = useState(null);
 
   const formCardRef = useRef(null);
+  const documentAbortRef = useRef(null);
+  const activeEditingIdRef = useRef(null);
 
   const showPopup = (text, type = "error", title = type === "error" ? "Action failed" : "Success") => {
     setNoticePopup({ text, type, title });
   };
 
-  const loadData = async () => {
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearch(searchTerm);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [searchTerm]);
+
+  const loadData = useCallback(async () => {
     try {
+      setLoading(true);
+      const params = {
+        page: currentPage,
+        limit: rowsPerPage,
+        search: debouncedSearch.trim() || undefined,
+        role: roleFilter !== "all" ? roleFilter : undefined,
+        team: teamFilter !== "all" ? teamFilter : undefined,
+        status: statusFilter !== "all" ? statusFilter : undefined,
+        site_id: querySiteId || undefined,
+      };
+
       const [managerRes, employeeRes] = await Promise.all([
-        API.get("/auth/managers/"),
-        API.get("/auth/employees/?limit=100"),
+        API.get("/auth/managers/", { params: { limit: 1000 } }),
+        API.get("/auth/employees/", { params }),
       ]);
       setManagers(Array.isArray(managerRes.data) ? managerRes.data : (managerRes.data?.data || []));
-      setEmployees(Array.isArray(employeeRes.data) ? employeeRes.data : (employeeRes.data?.data || []));
+
+      const empData = Array.isArray(employeeRes.data) ? employeeRes.data : (employeeRes.data?.data || []);
+      setEmployees(empData);
+
+      const pagination = employeeRes.data?.pagination;
+      const fetchedTotal = pagination?.total ?? employeeRes.data?.total_count ?? empData.length;
+      setTotalRecords(fetchedTotal);
+      setTotalPages(pagination?.totalPages ?? Math.max(1, Math.ceil(fetchedTotal / rowsPerPage)));
+
+      if (employeeRes.data?.metrics) {
+        setMetrics(employeeRes.data.metrics);
+      } else {
+        setMetrics({
+          total: fetchedTotal,
+          active: empData.filter((e) => e.is_active_employee).length,
+          inactive: empData.filter((e) => !e.is_active_employee).length,
+          managers: empData.filter((e) => e.role === "manager").length,
+          employees: empData.filter((e) => e.role === "employee").length,
+          hr: empData.filter((e) => e.role === "hr").length,
+          admin: empData.filter((e) => e.role === "admin" || e.role === "superadmin").length,
+        });
+      }
+
+      if (Array.isArray(employeeRes.data?.available_teams)) {
+        setAvailableTeams(employeeRes.data.available_teams);
+      }
     } catch (err) {
       console.log(err);
       showPopup("Unable to load employee setup data");
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentPage, rowsPerPage, debouncedSearch, roleFilter, teamFilter, statusFilter, querySiteId]);
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [loadData]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [querySiteId]);
 
   useRealtime("employee_update", loadData);
 
@@ -188,100 +252,26 @@ export default function Employees() {
     return false;
   };
 
-  const totalStaffCount = employees.length;
-  const activeStaffCount = useMemo(
-    () => employees.filter((item) => item.is_active_employee).length,
-    [employees]
-  );
-  const inactiveStaffCount = useMemo(
-    () => employees.filter((item) => !item.is_active_employee).length,
-    [employees]
-  );
-
-  const employeeCount = useMemo(
-    () => employees.filter((item) => item.role === "employee").length,
-    [employees]
-  );
-  const managerCount = useMemo(
-    () => employees.filter((item) => item.role === "manager").length,
-    [employees]
-  );
-  const hrCount = useMemo(
-    () => employees.filter((item) => item.role === "hr").length,
-    [employees]
-  );
-  const adminCount = useMemo(
-    () => employees.filter((item) => item.role === "admin" || item.role === "superadmin").length,
-    [employees]
-  );
-
-  const availableTeams = useMemo(() => {
-    const teamsSet = new Set();
-    employees.forEach((emp) => {
-      if (emp.team_name && emp.team_name.trim()) {
-        teamsSet.add(emp.team_name.trim());
-      }
-    });
-    managers.forEach((mgr) => {
-      if (mgr.team_name && mgr.team_name.trim()) {
-        teamsSet.add(mgr.team_name.trim());
-      }
-    });
-    return Array.from(teamsSet).sort();
-  }, [employees, managers]);
+  const totalStaffCount = metrics.total;
+  const activeStaffCount = metrics.active;
+  const inactiveStaffCount = metrics.inactive;
+  const managerCount = metrics.managers;
+  const employeeCount = metrics.employees;
+  const hrCount = metrics.hr;
+  const adminCount = metrics.admin;
 
   const uploadedDocumentTitles = useMemo(
     () => new Set(existingDocuments.map((document) => document.title)),
     [existingDocuments]
   );
 
-  const filteredEmployees = useMemo(() => {
-    const normalizedSearch = searchTerm.trim().toLowerCase();
-
-    return employees.filter((employee) => {
-      const matchesSearch =
-        !normalizedSearch ||
-        [
-          employee.name,
-          employee.username,
-          employee.email,
-          employee.role,
-          employee.team_name,
-          employee.manager,
-          employee.designation,
-          String(employee.id),
-        ]
-          .filter(Boolean)
-          .some((value) => value.toLowerCase().includes(normalizedSearch));
-
-      const matchesStatus =
-        statusFilter === "all" ||
-        (statusFilter === "active" && employee.is_active_employee) ||
-        (statusFilter === "inactive" && !employee.is_active_employee);
-
-      const matchesRole =
-        roleFilter === "all" || employee.role === roleFilter;
-
-      const matchesTeam =
-        teamFilter === "all" ||
-        employee.team_name === teamFilter ||
-        (employee.role === "manager" && employee.team_name === teamFilter);
-
-      return matchesSearch && matchesStatus && matchesRole && matchesTeam;
-    });
-  }, [employees, searchTerm, statusFilter, roleFilter, teamFilter]);
-
-  // Pagination calculation
-  const totalPages = Math.max(1, Math.ceil(filteredEmployees.length / rowsPerPage));
   const safeCurrentPage = Math.min(currentPage, totalPages);
   const startIndex = (safeCurrentPage - 1) * rowsPerPage;
-  const endIndex = Math.min(startIndex + rowsPerPage, filteredEmployees.length);
-  const paginatedEmployees = useMemo(() => {
-    return filteredEmployees.slice(startIndex, endIndex);
-  }, [filteredEmployees, startIndex, endIndex]);
+  const endIndex = Math.min(startIndex + rowsPerPage, totalRecords);
 
   const handleClearFilters = () => {
     setSearchTerm("");
+    setDebouncedSearch("");
     setRoleFilter("all");
     setTeamFilter("all");
     setStatusFilter("all");
@@ -325,16 +315,29 @@ export default function Employees() {
       ...current,
       locations: [
         ...current.locations,
-        { latitude: "", longitude: "", allowed_radius: "100", is_primary: false },
+        { latitude: "", longitude: "", allowed_radius: "100", is_primary: current.locations.length === 0 },
       ],
     }));
   };
 
-  const handleRemoveLocation = (index) => {
+  const handleSetPrimaryLocation = (targetIndex) => {
     setForm((current) => ({
       ...current,
-      locations: current.locations.filter((_, i) => i !== index),
+      locations: current.locations.map((loc, i) => ({
+        ...loc,
+        is_primary: i === targetIndex,
+      })),
     }));
+  };
+
+  const handleRemoveLocation = (index) => {
+    setForm((current) => {
+      const next = current.locations.filter((_, i) => i !== index);
+      if (next.length > 0 && !next.some((l) => l.is_primary)) {
+        next[0] = { ...next[0], is_primary: true };
+      }
+      return { ...current, locations: next };
+    });
   };
 
   const handleLocationChange = (index, field, value) => {
@@ -346,19 +349,52 @@ export default function Employees() {
   };
 
   const resetForm = () => {
+    if (documentAbortRef.current) {
+      documentAbortRef.current.abort();
+    }
+    activeEditingIdRef.current = null;
     setForm(initialForm);
     setFiles({});
+    setFileInputKey((k) => k + 1);
     setEditingId(null);
     setExistingDocuments([]);
     setMessage("");
   };
 
   const startEdit = async (employee) => {
+    if (documentAbortRef.current) {
+      documentAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    documentAbortRef.current = controller;
+    activeEditingIdRef.current = employee.id;
+
     setEditingId(employee.id);
     setIsFormOpen(true);
     setDocumentsLoading(true);
-    setMessage("Existing documents are protected. You can upload any missing ones.");
+    setExistingDocuments([]);
+    setMessage("Existing documents are protected. You can upload any missing ones or select a new file to replace an existing one.");
     setFiles({});
+    setFileInputKey((k) => k + 1);
+
+    const rawLocs = employee.locations && employee.locations.length > 0
+      ? employee.locations.map((loc) => ({
+          latitude: String(loc.latitude ?? ""),
+          longitude: String(loc.longitude ?? ""),
+          allowed_radius: String(loc.allowed_radius ?? 100),
+          is_primary: Boolean(loc.is_primary),
+        }))
+      : [{
+          latitude: employee.latitude !== null && employee.latitude !== undefined ? String(employee.latitude) : "",
+          longitude: employee.longitude !== null && employee.longitude !== undefined ? String(employee.longitude) : "",
+          allowed_radius: String(employee.allowed_radius ?? 100),
+          is_primary: true,
+        }];
+
+    if (!rawLocs.some((l) => l.is_primary)) {
+      rawLocs[0].is_primary = true;
+    }
+
     setForm({
       username: employee.username || "",
       first_name: employee.first_name || "",
@@ -366,36 +402,36 @@ export default function Employees() {
       email: employee.email || "",
       password: "",
       role: employee.role || "employee",
+      site_id: employee.site_id ? String(employee.site_id) : "",
       manager: employee.manager_id ? String(employee.manager_id) : "",
       team_name: employee.team_name || "",
       joining_date: employee.joining_date || "",
       leave_allotted: String(employee.leave_allotted ?? 0),
       designation: employee.designation || "",
-      locations: employee.locations && employee.locations.length > 0
-        ? employee.locations.map((loc) => ({
-            latitude: String(loc.latitude ?? ""),
-            longitude: String(loc.longitude ?? ""),
-            allowed_radius: String(loc.allowed_radius ?? 100),
-            is_primary: Boolean(loc.is_primary),
-          }))
-        : [{
-            latitude: employee.latitude !== null && employee.latitude !== undefined ? String(employee.latitude) : "",
-            longitude: employee.longitude !== null && employee.longitude !== undefined ? String(employee.longitude) : "",
-            allowed_radius: String(employee.allowed_radius ?? 100),
-            is_primary: true,
-          }],
+      locations: rawLocs,
       is_active_employee: employee.is_active_employee ?? true,
     });
 
     try {
-      const response = await API.get(`/auth/documents/${employee.id}/`);
-      setExistingDocuments(Array.isArray(response.data) ? response.data : []);
+      const response = await API.get(`/auth/documents/${employee.id}/`, {
+        signal: controller.signal,
+      });
+      if (activeEditingIdRef.current === employee.id) {
+        setExistingDocuments(Array.isArray(response.data) ? response.data : []);
+      }
     } catch (err) {
+      if (err.name === "CanceledError" || err.name === "AbortError" || API.isCancel?.(err)) {
+        return;
+      }
       console.log(err.response?.data || err.message);
-      setExistingDocuments([]);
-      showPopup("Unable to load employee documents for edit");
+      if (activeEditingIdRef.current === employee.id) {
+        setExistingDocuments([]);
+        showPopup("Unable to load employee documents for edit");
+      }
     } finally {
-      setDocumentsLoading(false);
+      if (activeEditingIdRef.current === employee.id) {
+        setDocumentsLoading(false);
+      }
     }
     setTimeout(() => {
       formCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -406,20 +442,81 @@ export default function Employees() {
     e.preventDefault();
     setMessage("");
 
-    if (!editingId && (!files.aadhar_file || !files.pan_file || !files.bank_file)) {
-      showPopup("Aadhar, PAN and bank details documents are required", "warning", "Missing documents");
+    const isEditingSelf = editingId && String(editingId) === String(currentUserId);
+    if (isEditingSelf && form.role !== (authUser?.role || userRole)) {
+      showPopup("You cannot change or demote your own role", "warning", "Action Blocked");
       return;
     }
 
-    const primaryLoc = form.locations[0];
-    if (!primaryLoc || !primaryLoc.latitude || !primaryLoc.longitude) {
+    // Input sanitization and whitespace trimming (BUG-E04)
+    const cleanUsername = (form.username || "").trim();
+    const cleanFirstName = (form.first_name || "").trim();
+    const cleanLastName = (form.last_name || "").trim();
+    const cleanEmail = (form.email || "").trim();
+    const cleanDesignation = (form.designation || "").trim();
+    const cleanTeamName = (form.team_name || "").trim();
+
+    if (!cleanUsername) {
+      showPopup("Username is required", "warning", "Validation Error");
+      return;
+    }
+    if (!cleanFirstName) {
+      showPopup("Employee first name is required", "warning", "Validation Error");
+      return;
+    }
+
+    if (["employee", "manager", "hr"].includes(form.role) && !form.site_id) {
+      showPopup("Select a work site for this employee", "warning", "Work site required");
+      return;
+    }
+
+    // Password validation (BUG-E03)
+    if (!editingId) {
+      if (!form.password || form.password.length < 12) {
+        showPopup("Password must be at least 12 characters", "warning", "Password Too Short");
+        return;
+      }
+      if (form.password.length > 128) {
+        showPopup("Password must not exceed 128 characters", "warning", "Password Too Long");
+        return;
+      }
+    } else if (form.password && form.password.trim()) {
+      if (form.password.length < 12) {
+        showPopup("New password must be at least 12 characters", "warning", "Password Too Short");
+        return;
+      }
+      if (form.password.length > 128) {
+        showPopup("New password must not exceed 128 characters", "warning", "Password Too Long");
+        return;
+      }
+    }
+
+    if (!editingId && (!files.photo_copy || !files.aadhar_file || !files.pan_file || !files.bank_file)) {
+      showPopup("Photo Copy, Aadhar, PAN and bank details documents are required", "warning", "Missing documents");
+      return;
+    }
+
+    // Primary Location Validation (BUG-E02)
+    const primaryLoc = form.locations.find((l) => l.is_primary) || form.locations[0];
+    if (!primaryLoc || primaryLoc.latitude === "" || primaryLoc.longitude === "") {
       showPopup("Primary location latitude and longitude are required", "warning", "Validation Error");
+      return;
+    }
+
+    const primLat = Number(primaryLoc.latitude);
+    const primLng = Number(primaryLoc.longitude);
+    if (isNaN(primLat) || primLat < -90 || primLat > 90) {
+      showPopup("Primary location latitude must be a valid number between -90 and 90", "warning", "Validation Error");
+      return;
+    }
+    if (isNaN(primLng) || primLng < -180 || primLng > 180) {
+      showPopup("Primary location longitude must be a valid number between -180 and 180", "warning", "Validation Error");
       return;
     }
 
     for (let i = 0; i < form.locations.length; i++) {
       const loc = form.locations[i];
-      if (i > 0) {
+      if (loc !== primaryLoc) {
         const hasLat = loc.latitude !== "";
         const hasLng = loc.longitude !== "";
         if (hasLat !== hasLng) {
@@ -441,33 +538,39 @@ export default function Employees() {
             is_primary: Boolean(loc.is_primary),
           }));
 
+        // Ensure at least one primary exists in filteredLocs
+        if (filteredLocs.length > 0 && !filteredLocs.some((l) => l.is_primary)) {
+          filteredLocs[0].is_primary = true;
+        }
+
         const primary = filteredLocs.find((l) => l.is_primary) || filteredLocs[0];
 
         const payload = {
-          username: form.username,
-          first_name: form.first_name,
-          last_name: form.last_name,
-          email: form.email,
+          username: cleanUsername,
+          first_name: cleanFirstName,
+          last_name: cleanLastName,
+          email: cleanEmail,
           role: form.role,
+          site_id: form.site_id ? Number(form.site_id) : null,
           manager: form.role === "employee" && form.manager ? Number(form.manager) : null,
-          team_name: form.role === "manager" ? form.team_name : "",
+          team_name: form.role === "manager" ? (cleanTeamName || null) : null,
           joining_date: form.joining_date || null,
           leave_allotted: form.leave_allotted === "" ? 0 : Number(form.leave_allotted),
           latitude: primary ? Number(primary.latitude) : null,
           longitude: primary ? Number(primary.longitude) : null,
           allowed_radius: primary ? Number(primary.allowed_radius) : 100,
           is_active_employee: Boolean(form.is_active_employee),
-          designation: form.designation || null,
+          designation: cleanDesignation || null,
           locations: filteredLocs,
         };
 
-        if (form.password) {
+        if (form.password && ["admin", "superadmin"].includes(userRole)) {
           payload.password = form.password;
         }
 
         const res = await API.put(`/auth/employees/${editingId}/`, payload);
         const pendingDocumentUploads = documentLabels.filter(
-          (doc) => !uploadedDocumentTitles.has(doc.label) && files[doc.key]
+          (doc) => Boolean(files[doc.key])
         );
         let uploadedCount = 0;
         let uploadError = null;
@@ -496,7 +599,7 @@ export default function Employees() {
 
         setMessage(
           uploadedCount > 0
-            ? `${res.data.message || "Employee updated successfully"} and ${uploadedCount} missing document${uploadedCount > 1 ? "s were" : " was"} uploaded.`
+            ? `${res.data.message || "Employee updated successfully"} and ${uploadedCount} document${uploadedCount > 1 ? "s were" : " was"} uploaded.`
             : res.data.message || "Employee updated successfully"
         );
         resetForm();
@@ -515,46 +618,51 @@ export default function Employees() {
 
     try {
       const formData = new FormData();
-      Object.entries(form).forEach(([key, value]) => {
-        if (key === "is_active_employee") {
-          return;
-        }
-        if (key === "team_name" && form.role !== "manager") {
-          return;
-        }
-        if (key === "manager" && form.role !== "employee") {
-          return;
-        }
-        if (key === "leave_allotted") {
-          formData.append(key, value === "" ? "0" : value);
-          return;
-        }
-        if (key === "locations") {
-          const filteredLocs = value
-            .filter((loc) => loc.latitude !== "" && loc.longitude !== "")
-            .map((loc) => ({
-              latitude: Number(loc.latitude),
-              longitude: Number(loc.longitude),
-              allowed_radius: loc.allowed_radius === "" ? 100 : Number(loc.allowed_radius),
-              is_primary: Boolean(loc.is_primary),
-            }));
-          formData.append("locations", JSON.stringify(filteredLocs));
+      formData.append("username", cleanUsername);
+      formData.append("first_name", cleanFirstName);
+      formData.append("last_name", cleanLastName);
+      formData.append("email", cleanEmail);
+      formData.append("role", form.role);
+      formData.append("password", form.password);
 
-          const primary = filteredLocs.find((l) => l.is_primary) || filteredLocs[0];
-          if (primary) {
-            formData.append("latitude", String(primary.latitude));
-            formData.append("longitude", String(primary.longitude));
-            formData.append("allowed_radius", String(primary.allowed_radius));
-          }
-          return;
-        }
-        if (key === "latitude" || key === "longitude" || key === "allowed_radius") {
-          return;
-        }
-        if (value !== "") {
-          formData.append(key, value);
-        }
-      });
+      if (["employee", "manager", "hr"].includes(form.role) && form.site_id) {
+        formData.append("site_id", form.site_id);
+      }
+      if (form.role === "manager" && cleanTeamName) {
+        formData.append("team_name", cleanTeamName);
+      }
+      if (form.role === "employee" && form.manager) {
+        formData.append("manager", form.manager);
+      }
+      if (form.joining_date) {
+        formData.append("joining_date", form.joining_date);
+      }
+      formData.append("leave_allotted", form.leave_allotted === "" ? "0" : String(form.leave_allotted));
+      if (cleanDesignation) {
+        formData.append("designation", cleanDesignation);
+      }
+
+      const filteredLocs = form.locations
+        .filter((loc) => loc.latitude !== "" && loc.longitude !== "")
+        .map((loc) => ({
+          latitude: Number(loc.latitude),
+          longitude: Number(loc.longitude),
+          allowed_radius: loc.allowed_radius === "" ? 100 : Number(loc.allowed_radius),
+          is_primary: Boolean(loc.is_primary),
+        }));
+
+      if (filteredLocs.length > 0 && !filteredLocs.some((l) => l.is_primary)) {
+        filteredLocs[0].is_primary = true;
+      }
+
+      formData.append("locations", JSON.stringify(filteredLocs));
+
+      const primary = filteredLocs.find((l) => l.is_primary) || filteredLocs[0];
+      if (primary) {
+        formData.append("latitude", String(primary.latitude));
+        formData.append("longitude", String(primary.longitude));
+        formData.append("allowed_radius", String(primary.allowed_radius));
+      }
 
       Object.entries(files).forEach(([key, file]) => {
         if (file) {
@@ -647,7 +755,7 @@ export default function Employees() {
                 Create staff accounts, assign teams, and manage employee records from one workspace
               </h1>
               <p className="mt-3 text-sm text-slate-200">
-                HR can onboard employees and managers, assign reporting teams, capture office attendance settings, and update or remove staff details without changing stored documents from this screen.
+                HR can onboard employees and managers, assign reporting teams, capture office attendance settings, and update staff details without changing stored documents from this screen.
               </p>
             </div>
 
@@ -703,7 +811,7 @@ export default function Employees() {
                   )}
                 </div>
                 <p className="mt-0.5 text-xs text-slate-500">
-                  Required joining documents: Aadhar, PAN, Bank Details. Optional: CV, Voter ID, Driving License.
+                  Required joining documents: Photo Copy, Aadhar, PAN, Bank Details. Optional: CV, Voter ID, Driving License.
                 </p>
               </div>
             </div>
@@ -740,6 +848,8 @@ export default function Employees() {
                   <SelectField
                     label="Role"
                     value={form.role}
+                    disabled={Boolean(editingId && String(editingId) === String(currentUserId))}
+                    helperText={editingId && String(editingId) === String(currentUserId) ? "You cannot modify your own role" : ""}
                     onChange={(value) => handleChange("role", value)}
                     options={[
                       { value: "employee", label: "Employee" },
@@ -755,6 +865,15 @@ export default function Employees() {
                     ]}
                     placeholder="Select role"
                   />
+                  {["employee", "manager", "hr"].includes(form.role) && (
+                    <SelectField
+                      label="Work Site"
+                      value={form.site_id}
+                      onChange={(value) => handleChange("site_id", value)}
+                      options={sites.map((site) => ({ value: String(site.id), label: site.name }))}
+                      placeholder={sites.length ? "Select work site" : "Create a site first"}
+                    />
+                  )}
                   <InputField
                     label="Username"
                     value={form.username}
@@ -782,13 +901,15 @@ export default function Employees() {
                     onChange={(value) => handleChange("designation", value)}
                     placeholder="e.g. Senior Software Engineer"
                   />
-                  <InputField
-                    label={editingId ? "Password (Leave blank to keep unchanged)" : "Password"}
-                    type="password"
-                    value={form.password}
-                    onChange={(value) => handleChange("password", value)}
-                  />
-                  {editingId && (
+                  {(!editingId || ["admin", "superadmin"].includes(userRole)) && (
+                    <PasswordField
+                      label={editingId ? "Password (Leave blank to keep unchanged)" : "Password"}
+                      value={form.password}
+                      onChange={(value) => handleChange("password", value)}
+                      placeholder={editingId ? "Enter new password" : "Min. 12 characters"}
+                    />
+                  )}
+                  {editingId && String(editingId) !== String(currentUserId) && (
                     <ToggleField
                       label="Status"
                       checked={Boolean(form.is_active_employee)}
@@ -801,10 +922,12 @@ export default function Employees() {
                       label="Assign Team / Manager"
                       value={form.manager}
                       onChange={(value) => handleChange("manager", value)}
-                      options={managers.map((manager) => ({
-                        value: String(manager.id),
-                        label: manager.team_name ? `${manager.name} - ${manager.team_name}` : manager.name,
-                      }))}
+                      options={managers
+                        .filter((manager) => !editingId || String(manager.id) !== String(editingId))
+                        .map((manager) => ({
+                          value: String(manager.id),
+                          label: manager.team_name ? `${manager.name} - ${manager.team_name}` : manager.name,
+                        }))}
                       placeholder="Select reporting manager"
                     />
                   ) : form.role === "manager" ? (
@@ -852,13 +975,24 @@ export default function Employees() {
                     {form.locations.map((loc, idx) => (
                       <div
                         key={idx}
-                        className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 relative"
+                        className={`rounded-2xl border p-4 relative transition ${
+                          loc.is_primary ? "border-cyan-300 bg-cyan-50/30" : "border-slate-200 bg-slate-50/60"
+                        }`}
                       >
                         <div className="flex items-center justify-between mb-3">
-                          <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                            {loc.is_primary ? "Location #1 (Primary)" : `Location #${idx + 1}`}
-                          </span>
-                          {!loc.is_primary && (
+                          <label className="flex items-center gap-2 cursor-pointer select-none">
+                            <input
+                              type="radio"
+                              name="primary_location_selection"
+                              checked={Boolean(loc.is_primary)}
+                              onChange={() => handleSetPrimaryLocation(idx)}
+                              className="h-4 w-4 text-cyan-600 focus:ring-cyan-500 border-slate-300"
+                            />
+                            <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                              {loc.is_primary ? `Location #${idx + 1} (Primary)` : `Location #${idx + 1}`}
+                            </span>
+                          </label>
+                          {form.locations.length > 1 && (
                             <button
                               type="button"
                               onClick={() => handleRemoveLocation(idx)}
@@ -935,7 +1069,9 @@ export default function Employees() {
                             {doc.label} {doc.required && !uploadedDocument ? "*" : "(Optional)"}
                           </span>
                           <input
+                            key={`${doc.key}-${fileInputKey}`}
                             type="file"
+                            accept={doc.key === "photo_copy" ? "image/jpeg,image/png,image/webp,image/jpg" : undefined}
                             onChange={(e) => handleFileChange(doc.key, e.target.files?.[0] || null)}
                             className={`mt-2 block w-full text-sm ${
                               uploadedDocument ? "text-emerald-800" : "text-slate-600"
@@ -1170,7 +1306,7 @@ export default function Employees() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {paginatedEmployees.length === 0 ? (
+                {employees.length === 0 ? (
                   <tr>
                     <td colSpan="8" className="px-6 py-12 text-center text-slate-500">
                       <div className="flex flex-col items-center justify-center gap-2">
@@ -1191,16 +1327,26 @@ export default function Employees() {
                     </td>
                   </tr>
                 ) : (
-                  paginatedEmployees.map((employee, idx) => {
+                  employees.map((employee, idx) => {
                     const rowNumber = startIndex + idx + 1;
                     const initials = getInitials(employee.name, employee.username);
                     const avatarStyle = getAvatarStyle(employee.role, employee.name || employee.username);
                     const roleBadgeStyle = getRoleBadgeStyle(employee.role);
+                    const displayManager = employee.manager_name || employee.manager;
                     const displayTeam =
                       employee.role === "manager"
                         ? (employee.team_name ? `Own: ${employee.team_name}` : "Own team owner")
                         : employee.role === "employee"
-                          ? employee.team_name || employee.manager || "Not assigned"
+                          ? (
+                              <div className="flex flex-col">
+                                <span className="font-medium text-slate-800">{employee.team_name || "No team assigned"}</span>
+                                {displayManager && (
+                                  <span className="text-[11px] text-slate-400">
+                                    Mgr: {displayManager}
+                                  </span>
+                                )}
+                              </div>
+                            )
                           : "N/A";
 
                     return (
@@ -1216,8 +1362,23 @@ export default function Employees() {
                         {/* 2. Staff: Avatar + Name + Email */}
                         <td className="px-5 py-3.5">
                           <div className="flex items-center gap-3">
+                            {employee.profile_picture ? (
+                              <img
+                                src={employee.profile_picture}
+                                alt={employee.name || employee.username}
+                                className="h-10 w-10 flex-shrink-0 rounded-full border border-slate-200 object-cover"
+                                onError={(e) => {
+                                  e.currentTarget.style.display = "none";
+                                  if (e.currentTarget.nextElementSibling) {
+                                    e.currentTarget.nextElementSibling.classList.remove("hidden");
+                                  }
+                                }}
+                              />
+                            ) : null}
                             <div
-                              className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border text-xs font-bold ${avatarStyle}`}
+                              className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border text-xs font-bold ${avatarStyle} ${
+                                employee.profile_picture ? "hidden" : ""
+                              }`}
                             >
                               {initials}
                             </div>
@@ -1313,7 +1474,7 @@ export default function Employees() {
                             )}
 
                             {/* Status Toggle / Options */}
-                            {canManage(employee.role) && (
+                            {canManage(employee.role) && String(employee.id) !== String(currentUserId) && (
                               <button
                                 type="button"
                                 onClick={() => openStatusDialog(employee)}
@@ -1344,11 +1505,11 @@ export default function Employees() {
             <div className="text-xs text-slate-500">
               Showing{" "}
               <span className="font-semibold text-slate-700">
-                {filteredEmployees.length === 0 ? 0 : startIndex + 1}
+                {totalRecords === 0 ? 0 : startIndex + 1}
               </span>{" "}
               –{" "}
               <span className="font-semibold text-slate-700">{endIndex}</span> of{" "}
-              <span className="font-semibold text-slate-700">{filteredEmployees.length}</span> employees
+              <span className="font-semibold text-slate-700">{totalRecords}</span> employees
             </div>
 
             {/* Right: Rows Per Page & Page Controls */}
@@ -1492,6 +1653,56 @@ function ViewEmployeeModal({ employee, canEdit, onEdit, onClose }) {
   const initials = getInitials(employee.name, employee.username);
   const avatarStyle = getAvatarStyle(employee.role, employee.name || employee.username);
   const roleBadgeStyle = getRoleBadgeStyle(employee.role);
+  const canGrantConcession = ["hr", "admin", "superadmin"].includes(localStorage.getItem("role"));
+  const [concessions, setConcessions] = useState([]);
+  const [concessionForm, setConcessionForm] = useState({ leave_type: "casual", additional_days: "", effective_date: new Date().toISOString().slice(0, 10), expiry_date: "", reason: "" });
+  const [concessionBusy, setConcessionBusy] = useState(false);
+  const [concessionError, setConcessionError] = useState("");
+
+  const loadConcessions = useCallback(async () => {
+    if (!canGrantConcession) return;
+    try {
+      const response = await API.get(`/leave/concessions/${employee.id}/`);
+      setConcessions(response.data?.records || []);
+    } catch (error) {
+      setConcessionError(error.response?.data?.error || "Unable to load leave concessions");
+    }
+  }, [canGrantConcession, employee.id]);
+  useEffect(() => { loadConcessions(); }, [loadConcessions]);
+
+  const grantConcession = async (event) => {
+    event.preventDefault();
+    setConcessionBusy(true);
+    setConcessionError("");
+    try {
+      await API.post("/leave/concessions/", {
+        employee_id: Number(employee.id),
+        leave_type: concessionForm.leave_type,
+        additional_days: Number(concessionForm.additional_days),
+        effective_date: concessionForm.effective_date,
+        expiry_date: concessionForm.expiry_date || null,
+        reason: concessionForm.reason.trim(),
+        idempotency_key: crypto.randomUUID(),
+      });
+      setConcessionForm((current) => ({ ...current, additional_days: "", expiry_date: "", reason: "" }));
+      await loadConcessions();
+    } catch (error) {
+      setConcessionError(error.response?.data?.error || "Unable to grant leave concession");
+    } finally {
+      setConcessionBusy(false);
+    }
+  };
+
+  const reverseConcession = async (concession) => {
+    const reason = window.prompt("Reason for reversing this concession:");
+    if (!reason?.trim()) return;
+    try {
+      await API.post(`/leave/concessions/${concession.id}/reverse/`, { reason: reason.trim(), idempotency_key: crypto.randomUUID() });
+      await loadConcessions();
+    } catch (error) {
+      setConcessionError(error.response?.data?.error || "Unable to reverse concession");
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
@@ -1499,8 +1710,23 @@ function ViewEmployeeModal({ employee, canEdit, onEdit, onClose }) {
         {/* Header */}
         <div className="flex items-start justify-between border-b border-slate-100 pb-5">
           <div className="flex items-center gap-4">
+            {employee.profile_picture ? (
+              <img
+                src={employee.profile_picture}
+                alt={employee.name || employee.username}
+                className="h-14 w-14 flex-shrink-0 rounded-full border border-slate-200 object-cover"
+                onError={(e) => {
+                  e.currentTarget.style.display = "none";
+                  if (e.currentTarget.nextElementSibling) {
+                    e.currentTarget.nextElementSibling.classList.remove("hidden");
+                  }
+                }}
+              />
+            ) : null}
             <div
-              className={`flex h-14 w-14 items-center justify-center rounded-full border text-base font-bold ${avatarStyle}`}
+              className={`flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-full border text-base font-bold ${avatarStyle} ${
+                employee.profile_picture ? "hidden" : ""
+              }`}
             >
               {initials}
             </div>
@@ -1567,7 +1793,7 @@ function ViewEmployeeModal({ employee, canEdit, onEdit, onClose }) {
             <div>
               <span className="text-slate-400 block font-medium">Reporting Manager</span>
               <span className="font-semibold text-slate-800 mt-0.5 block">
-                {employee.manager || (employee.role === "manager" ? "N/A (Manager)" : "None")}
+                {employee.manager_name || employee.manager || (employee.role === "manager" ? "N/A (Manager)" : "None")}
               </span>
             </div>
             <div>
@@ -1629,6 +1855,23 @@ function ViewEmployeeModal({ employee, canEdit, onEdit, onClose }) {
             </div>
           ) : null}
         </div>
+
+        {canGrantConcession && employee.role === "employee" && (
+          <section className="mt-5 rounded-2xl border border-slate-200 p-4">
+            <h3 className="text-sm font-bold text-slate-900">Leave Concession / Additional Leave Allocation</h3>
+            <form onSubmit={grantConcession} className="mt-3 grid grid-cols-2 gap-3 text-xs">
+              <label className="text-slate-600">Leave Type<select required value={concessionForm.leave_type} onChange={(e) => setConcessionForm({ ...concessionForm, leave_type: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-sm"><option value="casual">Casual Leave</option><option value="sick">Sick Leave</option><option value="paid">Paid Leave</option></select></label>
+              <label className="text-slate-600">Additional Days<input required min="0.01" max="365" step="0.01" type="number" value={concessionForm.additional_days} onChange={(e) => setConcessionForm({ ...concessionForm, additional_days: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-sm" /></label>
+              <label className="text-slate-600">Effective Date<input required type="date" value={concessionForm.effective_date} onChange={(e) => setConcessionForm({ ...concessionForm, effective_date: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-sm" /></label>
+              <label className="text-slate-600">Expiry Date (optional)<input type="date" value={concessionForm.expiry_date} onChange={(e) => setConcessionForm({ ...concessionForm, expiry_date: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-sm" /></label>
+              <label className="col-span-2 text-slate-600">Reason<input required maxLength="2000" value={concessionForm.reason} onChange={(e) => setConcessionForm({ ...concessionForm, reason: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-sm" /></label>
+              <p className="col-span-2 text-slate-500">Granted by: {localStorage.getItem("username") || "Signed-in manager"}</p>
+              {concessionError && <p className="col-span-2 text-rose-700">{concessionError}</p>}
+              <button disabled={concessionBusy} className="col-span-2 rounded-xl bg-slate-900 px-3 py-2 font-semibold text-white disabled:opacity-60">{concessionBusy ? "Saving…" : "Grant Leave"}</button>
+            </form>
+            {concessions.length > 0 && <div className="mt-4 space-y-2">{concessions.map((item) => <div key={item.id} className="flex items-center justify-between rounded-xl bg-slate-50 p-3 text-xs"><span className="capitalize">{item.leave_type}: {item.adjustment_days} days · {item.reason}</span>{!item.reverses_id && Number(item.adjustment_days) > 0 && <button onClick={() => reverseConcession(item)} className="font-semibold text-rose-700">Reverse</button>}</div>)}</div>}
+          </section>
+        )}
 
         {/* Footer Actions */}
         <div className="mt-6 flex justify-end gap-3 border-t border-slate-100 pt-4">
@@ -1699,14 +1942,68 @@ function InputField({ label, type = "text", value, onChange, placeholder = "" })
   );
 }
 
-function SelectField({ label, value, onChange, options, placeholder }) {
+function PasswordField({ label, value, onChange, placeholder = "", minLength = 12, maxLength = 128 }) {
+  const [showPassword, setShowPassword] = useState(false);
+  const length = value ? value.length : 0;
+  const isTooShort = length > 0 && length < minLength;
+  const isTooLong = length > maxLength;
+
+  return (
+    <label className="block">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-slate-700">{label}</span>
+        {length > 0 && (
+          <span className={`text-[11px] font-medium ${isTooShort || isTooLong ? "text-rose-600" : "text-emerald-600"}`}>
+            {length}/{maxLength} {isTooShort ? `(Min ${minLength})` : isTooLong ? `(Max ${maxLength})` : "✓"}
+          </span>
+        )}
+      </div>
+      <div className="relative mt-1.5">
+        <input
+          type={showPassword ? "text" : "password"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className={`w-full rounded-2xl border bg-slate-50 py-2.5 pl-3.5 pr-10 text-xs text-slate-900 outline-none transition focus:bg-white ${
+            isTooShort || isTooLong ? "border-rose-400 focus:border-rose-500" : "border-slate-200 focus:border-cyan-400"
+          }`}
+        />
+        <button
+          type="button"
+          tabIndex={-1}
+          onClick={() => setShowPassword((prev) => !prev)}
+          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition focus:outline-none"
+          aria-label={showPassword ? "Hide password" : "Show password"}
+          title={showPassword ? "Hide password" : "Show password"}
+        >
+          {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+        </button>
+      </div>
+      {isTooShort && (
+        <p className="mt-1 text-[11px] text-rose-600 font-medium">
+          Password must be at least {minLength} characters
+        </p>
+      )}
+      {isTooLong && (
+        <p className="mt-1 text-[11px] text-rose-600 font-medium">
+          Password must not exceed {maxLength} characters
+        </p>
+      )}
+    </label>
+  );
+}
+
+function SelectField({ label, value, onChange, options, placeholder, disabled = false, helperText = "" }) {
   return (
     <label className="block">
       <span className="text-xs font-semibold text-slate-700">{label}</span>
       <select
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-1.5 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-900 outline-none transition focus:border-cyan-400 focus:bg-white"
+        className={`mt-1.5 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-900 outline-none transition focus:border-cyan-400 focus:bg-white ${
+          disabled ? "opacity-60 cursor-not-allowed bg-slate-100" : ""
+        }`}
       >
         <option value="">{placeholder}</option>
         {options.map((option) => (
@@ -1715,6 +2012,7 @@ function SelectField({ label, value, onChange, options, placeholder }) {
           </option>
         ))}
       </select>
+      {helperText ? <p className="mt-1 text-[11px] text-amber-600 font-medium">{helperText}</p> : null}
     </label>
   );
 }
@@ -1833,15 +2131,37 @@ function MapPickerModal({ latitude, longitude, defaultLatitude, defaultLongitude
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [mapsLoaded, setMapsLoaded] = useState(Boolean(window.google?.maps));
+  const [mapsError, setMapsError] = useState("");
+
+  const initialLat = latitude || defaultLatitude || "22.5726";
+  const initialLng = longitude || defaultLongitude || "88.3639";
+  const [manualLat, setManualLat] = useState(String(initialLat));
+  const [manualLng, setManualLng] = useState(String(initialLng));
 
   useEffect(() => {
     if (window.google?.maps) {
+      setMapsLoaded(true);
       return;
     }
 
     let script = document.getElementById("google-maps-script");
+    const handleScriptLoad = () => {
+      setMapsLoaded(true);
+      setMapsError("");
+    };
+    const handleScriptError = () => {
+      setMapsError("Google Maps failed to load. Please verify your network connection or API key.");
+    };
+
+    window.gm_authFailure = () => {
+      setMapsError("Google Maps authentication failed (Invalid API key or unauthorized referrer).");
+    };
+
     if (!script) {
       const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || "";
+      if (!apiKey) {
+        setMapsError("Google Maps API key is not configured. You can still enter coordinates manually.");
+      }
       script = document.createElement("script");
       script.id = "google-maps-script";
       script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`;
@@ -1850,12 +2170,20 @@ function MapPickerModal({ latitude, longitude, defaultLatitude, defaultLongitude
       document.head.appendChild(script);
     }
 
-    const handleScriptLoad = () => setMapsLoaded(true);
     script.addEventListener("load", handleScriptLoad);
+    script.addEventListener("error", handleScriptError);
+
+    const timeoutTimer = setTimeout(() => {
+      if (!window.google?.maps) {
+        setMapsError((prev) => prev || "Google Maps took too long to load. You can enter coordinates manually.");
+      }
+    }, 6000);
 
     return () => {
+      clearTimeout(timeoutTimer);
       if (script) {
         script.removeEventListener("load", handleScriptLoad);
+        script.removeEventListener("error", handleScriptError);
       }
     };
   }, []);
@@ -1914,11 +2242,11 @@ function MapPickerModal({ latitude, longitude, defaultLatitude, defaultLongitude
         if (data && data.length > 0) {
           setSearchResults(data);
         } else {
-          setSearchError("No results found. You can still click or drag anywhere on the map.");
+          setSearchError("No results found. You can enter coordinates manually or click on the map.");
         }
       } catch (err) {
         console.error("Nominatim fallback failed:", err);
-        setSearchError("Location search unavailable. You can click anywhere on the map to set the pin.");
+        setSearchError("Location search unavailable. You can enter coordinates manually.");
       } finally {
         setSearchLoading(false);
       }
@@ -1947,6 +2275,8 @@ function MapPickerModal({ latitude, longitude, defaultLatitude, defaultLongitude
   const handleSelectResult = (result) => {
     const lat = parseFloat(result.lat);
     const lng = parseFloat(result.lon);
+    setManualLat(lat.toFixed(6));
+    setManualLng(lng.toFixed(6));
     if (mapRef.current && mapRef.current._selectedMarker) {
       const pos = new window.google.maps.LatLng(lat, lng);
       mapRef.current._selectedMarker.setPosition(pos);
@@ -1960,52 +2290,75 @@ function MapPickerModal({ latitude, longitude, defaultLatitude, defaultLongitude
   useEffect(() => {
     if (!mapsLoaded || !window.google?.maps) return;
 
-    const initialLat = parseFloat(latitude) || parseFloat(defaultLatitude) || 22.5726;
-    const initialLng = parseFloat(longitude) || parseFloat(defaultLongitude) || 88.3639;
+    const latNum = parseFloat(initialLat) || 22.5726;
+    const lngNum = parseFloat(initialLng) || 88.3639;
 
     const mapElement = document.getElementById(containerId);
     if (!mapElement) return;
 
-    const map = new window.google.maps.Map(mapElement, {
-      center: { lat: initialLat, lng: initialLng },
-      zoom: 15,
-      mapTypeControl: false,
-      streetViewControl: false,
-      fullscreenControl: false,
-    });
-    mapRef.current = map;
+    try {
+      const map = new window.google.maps.Map(mapElement, {
+        center: { lat: latNum, lng: lngNum },
+        zoom: 15,
+        mapTypeControl: false,
+        streetViewControl: false,
+        fullscreenControl: false,
+      });
+      mapRef.current = map;
 
-    const marker = new window.google.maps.Marker({
-      position: { lat: initialLat, lng: initialLng },
-      map: map,
-      draggable: true,
-      animation: window.google.maps.Animation.DROP,
-    });
-    map._selectedMarker = marker;
+      const marker = new window.google.maps.Marker({
+        position: { lat: latNum, lng: lngNum },
+        map: map,
+        draggable: true,
+        animation: window.google.maps.Animation.DROP,
+      });
+      map._selectedMarker = marker;
 
-    marker.addListener("dragend", () => {
-      const pos = marker.getPosition();
-      map.panTo(pos);
-    });
+      marker.addListener("dragend", () => {
+        const pos = marker.getPosition();
+        map.panTo(pos);
+        setManualLat(pos.lat().toFixed(6));
+        setManualLng(pos.lng().toFixed(6));
+      });
 
-    map.addListener("click", (e) => {
-      const pos = e.latLng;
-      marker.setPosition(pos);
-      map.panTo(pos);
-      setSearchResults([]);
-    });
-  }, [mapsLoaded, latitude, longitude, defaultLatitude, defaultLongitude]);
+      map.addListener("click", (e) => {
+        const pos = e.latLng;
+        marker.setPosition(pos);
+        map.panTo(pos);
+        setManualLat(pos.lat().toFixed(6));
+        setManualLng(pos.lng().toFixed(6));
+        setSearchResults([]);
+      });
+    } catch (err) {
+      console.error("Error initializing Google Maps:", err);
+      setMapsError("Failed to initialize Google Maps interface.");
+    }
+  }, [mapsLoaded, initialLat, initialLng]);
 
   const handleConfirm = () => {
+    let latToSave = manualLat;
+    let lngToSave = manualLng;
     if (mapRef.current && mapRef.current._selectedMarker) {
       const pos = mapRef.current._selectedMarker.getPosition();
-      onSelect(pos.lat().toFixed(6), pos.lng().toFixed(6));
+      latToSave = pos.lat().toFixed(6);
+      lngToSave = pos.lng().toFixed(6);
     }
+    const latNum = Number(latToSave);
+    const lngNum = Number(lngToSave);
+    if (isNaN(latNum) || latNum < -90 || latNum > 90) {
+      setSearchError("Latitude must be a valid number between -90 and 90");
+      return;
+    }
+    if (isNaN(lngNum) || lngNum < -180 || lngNum > 180) {
+      setSearchError("Longitude must be a valid number between -180 and 180");
+      return;
+    }
+    onSelect(String(latToSave), String(lngToSave));
   };
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 px-4">
-      <div className="w-full max-w-2xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+      <div className="w-full max-w-2xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
           <div>
             <h2 className="text-lg font-semibold text-slate-900">Select Office Location</h2>
@@ -2019,6 +2372,18 @@ function MapPickerModal({ latitude, longitude, defaultLatitude, defaultLongitude
             ✕
           </button>
         </div>
+
+        {/* Google Maps Failure Notice (BUG-E11) */}
+        {mapsError && (
+          <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50/80 p-4 text-xs text-rose-800">
+            <div className="flex items-center gap-2 font-semibold">
+              <AlertCircle size={16} className="text-rose-600 flex-shrink-0" />
+              <span>Map Load Notice</span>
+            </div>
+            <p className="mt-1 text-rose-700">{mapsError}</p>
+            <p className="mt-0.5 text-slate-600">You can manually type or adjust coordinates below and click Confirm Location.</p>
+          </div>
+        )}
 
         {/* Search Bar */}
         <form onSubmit={handleSearch} className="mb-4 relative z-[1050]">
@@ -2062,17 +2427,67 @@ function MapPickerModal({ latitude, longitude, defaultLatitude, defaultLongitude
           )}
         </form>
 
-        {/* Map Container */}
+        {/* Map Container or Manual Coordinates Fallback */}
         {!mapsLoaded ? (
-          <div className="w-full h-[350px] rounded-2xl border border-slate-200 bg-slate-50 flex items-center justify-center text-sm text-slate-500 font-semibold">
-            Loading Google Maps...
+          <div className="w-full h-[280px] rounded-2xl border border-slate-200 bg-slate-50 flex flex-col items-center justify-center p-6 text-center">
+            {mapsError ? (
+              <div className="space-y-2">
+                <AlertCircle size={32} className="mx-auto text-amber-500" />
+                <p className="text-sm font-semibold text-slate-700">Map Interface Offline</p>
+                <p className="text-xs text-slate-500 max-w-sm">Use the manual coordinate inputs below to save this location.</p>
+              </div>
+            ) : (
+              <div className="text-sm text-slate-500 font-semibold">Loading Google Maps...</div>
+            )}
           </div>
         ) : (
           <div
             id={containerId}
-            className="w-full h-[350px] rounded-2xl overflow-hidden border border-slate-200 shadow-inner"
+            className="w-full h-[320px] rounded-2xl overflow-hidden border border-slate-200 shadow-inner"
           />
         )}
+
+        {/* Manual Latitude & Longitude Inputs (Always available as fallback / fine-tuning) */}
+        <div className="mt-4 grid grid-cols-2 gap-3 rounded-2xl border border-slate-100 bg-slate-50/80 p-3">
+          <div>
+            <label className="text-[11px] font-semibold text-slate-600 block mb-1">Latitude</label>
+            <input
+              type="text"
+              value={manualLat}
+              onChange={(e) => {
+                setManualLat(e.target.value);
+                const latNum = parseFloat(e.target.value);
+                const lngNum = parseFloat(manualLng);
+                if (!isNaN(latNum) && !isNaN(lngNum) && mapRef.current && mapRef.current._selectedMarker) {
+                  const pos = new window.google.maps.LatLng(latNum, lngNum);
+                  mapRef.current._selectedMarker.setPosition(pos);
+                  mapRef.current.panTo(pos);
+                }
+              }}
+              placeholder="e.g. 22.5726"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-900 outline-none focus:border-cyan-400"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] font-semibold text-slate-600 block mb-1">Longitude</label>
+            <input
+              type="text"
+              value={manualLng}
+              onChange={(e) => {
+                setManualLng(e.target.value);
+                const latNum = parseFloat(manualLat);
+                const lngNum = parseFloat(e.target.value);
+                if (!isNaN(latNum) && !isNaN(lngNum) && mapRef.current && mapRef.current._selectedMarker) {
+                  const pos = new window.google.maps.LatLng(latNum, lngNum);
+                  mapRef.current._selectedMarker.setPosition(pos);
+                  mapRef.current.panTo(pos);
+                }
+              }}
+              placeholder="e.g. 88.3639"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-900 outline-none focus:border-cyan-400"
+            />
+          </div>
+        </div>
 
         <div className="mt-6 flex justify-end gap-3">
           <button

@@ -14,6 +14,8 @@ import accountsRepository from "../../src/repositories/accounts.repository.js";
 import outboxRepository from "../../src/repositories/outbox.repository.js";
 import { encryptPayload, decryptPayload } from "../../src/utils/crypto.js";
 import { sendOtpEmailHandler } from "../../src/jobs/handlers/send-otp-email.handler.js";
+import queueProducerService from "../../src/services/queue-producer.service.js";
+import redisService from "../../src/services/redis.service.js";
 
 describe("P3.3 — Transactional OTP Outbox & AES-256-GCM Encryption Test Suite", () => {
   let testUserId;
@@ -40,6 +42,10 @@ describe("P3.3 — Transactional OTP Outbox & AES-256-GCM Encryption Test Suite"
     if (createdOutboxIds.length > 0) {
       const placeholders = createdOutboxIds.map(() => "?").join(",");
       await db.run(`DELETE FROM outbox_events WHERE id IN (${placeholders})`, createdOutboxIds);
+    }
+    await queueProducerService.close();
+    if (redisService.client) {
+      try { redisService.client.disconnect(); } catch {}
     }
     await closePool();
   });

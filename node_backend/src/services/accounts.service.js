@@ -16,6 +16,7 @@ import { sendOtpEmail } from "../utils/mailer.js";
 import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
 import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
+import { siteService } from "./site.service.js";
 
 function makeOtp() {
   return crypto.randomInt(100000, 1000000).toString();
@@ -108,6 +109,16 @@ export const accountsService = {
 
     await accountsRepository.insertRefreshToken(user.id, refreshHash, refreshExpires, deviceInfo, familyId);
     
+    const profile = await accountsRepository.findProfileByUserId(user.id);
+    let photoPath = profile?.profile_picture;
+    if (!photoPath) {
+      const photoDoc = await db.get(
+        "SELECT file FROM accounts_employeedocument WHERE user_id=? AND (LOWER(title)='photo copy' OR LOWER(title)='photocopy') LIMIT 1",
+        [user.id]
+      );
+      photoPath = photoDoc?.file || null;
+    }
+
     return {
       access,
       refresh,
@@ -117,7 +128,8 @@ export const accountsService = {
         email: user.email,
         role: resolvedRole,
         first_name: user.first_name,
-        last_name: user.last_name
+        last_name: user.last_name,
+        profile_picture: photoPath ? storageService.getUrl(photoPath) : null
       }
     };
   },
@@ -489,22 +501,20 @@ export const accountsService = {
     return { message: "Password reset successful" };
   },
 
-  async createEmployee(data, files, actor) {
-    const {
-      username,
-      first_name,
-      last_name = "",
-      email = "",
-      role,
-      password,
-      manager,
-      team_name,
-      joining_date,
-      leave_allotted = 0,
-      latitude,
-      longitude,
-      allowed_radius = 100
-    } = data;
+  async createEmployee(data, files, actor, tenantId = 1) {
+    const username = data.username ? String(data.username).trim() : "";
+    const first_name = data.first_name ? String(data.first_name).trim() : "";
+    const last_name = data.last_name ? String(data.last_name).trim() : "";
+    const email = data.email ? String(data.email).trim() : "";
+    const role = data.role;
+    const password = data.password;
+    const manager = data.manager;
+    const team_name = data.team_name ? String(data.team_name).trim() : null;
+    const joining_date = data.joining_date;
+    const leave_allotted = data.leave_allotted || 0;
+    const latitude = data.latitude;
+    const longitude = data.longitude;
+    const allowed_radius = data.allowed_radius || 100;
 
     if (actor.role === "hr") {
       if (!["employee", "manager"].includes(role)) {
@@ -520,7 +530,32 @@ export const accountsService = {
       throw new AppError("You do not have permission to create accounts", 403);
     }
 
+    if (["employee", "manager", "hr"].includes(role) && !data.site_id) {
+      throw new AppError("A work site is required for employee, manager, and HR accounts", 400);
+    }
+    if (data.site_id) {
+      const siteScope = await siteService.getSiteScope(tenantId, actor, data.site_id);
+      if (!siteScope.siteIds?.includes(Number(data.site_id)) && !siteService.isGlobalRole(actor.role)) {
+        throw new AppError("You do not have access to the selected site", 403);
+      }
+    }
+
+    const photoList = files?.photo_copy || files?.photo_file;
+    const photoFile = photoList && photoList.length > 0 ? photoList[0] : null;
+    if (!photoFile) {
+      throw new AppError("Photo Copy document is required", 400);
+    }
+
     const managerId = role === "employee" && manager ? Number(manager) : null;
+    if (managerId) {
+      const mgr = await db.get(
+        "SELECT u.id FROM accounts_user u JOIN workforce_user_tenant wut ON wut.user_id = u.id AND wut.tenant_id = ? WHERE u.id = ? AND u.role = 'manager' AND u.is_active = 1 AND u.deleted_at IS NULL",
+        [tenantId, managerId]
+      );
+      if (!mgr) {
+        throw new AppError("Invalid reporting manager selected. The manager must be an active manager in this organization.", 400);
+      }
+    }
     const teamName = role === "manager" && team_name ? team_name : null;
     const designation = data.designation || null;
     
@@ -538,6 +573,10 @@ export const accountsService = {
       const passwordHash = await hashPassword(password);
       const employee = await db.transaction(async (tx) => {
         const userId = await accountsRepository.insertUser(passwordHash, username, first_name, last_name, email, role, tx);
+        await db.run(
+          "INSERT INTO workforce_user_tenant (tenant_id, user_id, role, is_active) VALUES (?, ?, ?, 1)",
+          [tenantId, userId, role], tx
+        );
         
         await accountsRepository.insertProfile(
           latitude,
@@ -551,6 +590,10 @@ export const accountsService = {
           designation,
           tx
         );
+
+        if (["employee", "manager", "hr"].includes(role)) {
+          await siteService.assignEmployee(tenantId, userId, Number(data.site_id), undefined, actor, tx);
+        }
 
         if (locations && locations.length > 0) {
           for (const loc of locations) {
@@ -566,6 +609,8 @@ export const accountsService = {
         }
 
         const docs = [
+          ["photo_copy", "Photo Copy"],
+          ["photo_file", "Photo Copy"],
           ["aadhar_file", "Aadhar Card"],
           ["pan_file", "PAN Card"],
           ["bank_file", "Bank Details"],
@@ -579,11 +624,16 @@ export const accountsService = {
           const fList = files ? files[field] : null;
           const f = fList ? fList[0] : null;
           if (!f) continue;
+          if (title === "Photo Copy" && uploaded.includes("Photo Copy")) continue;
 
           const relativePath = await storageService.store(f, "documents", userId);
           uploadedPaths.push(relativePath);
           await accountsRepository.insertDocument(title, relativePath, userId, tx);
           uploaded.push(title);
+
+          if (title === "Photo Copy") {
+            await db.run("UPDATE accounts_employeeprofile SET profile_picture = ? WHERE user_id = ?", [relativePath, userId], tx);
+          }
         }
 
         await auditService.log(
@@ -602,7 +652,7 @@ export const accountsService = {
       realtimeManager.broadcast("employee_update", { actorId: actor.id });
       return {
         message: `${role[0].toUpperCase()}${role.slice(1)} created successfully`,
-        employee: await this.serializeStaffMember(employee.created),
+        employee: await this.serializeStaffMember(employee.created, null, tenantId),
         uploaded_documents: employee.uploaded
       };
     } catch (err) {
@@ -628,16 +678,21 @@ export const accountsService = {
         : null;
       const userFullName = `${r.first_name || ""} ${r.last_name || ""}`.trim() || r.username;
 
+      const photoPath = r.profile_picture || r.photo_copy_file;
+
       return {
         id: r.id,
+        site_id: r.site_id == null ? null : Number(r.site_id),
         username: r.username,
         first_name: r.first_name,
         last_name: r.last_name,
         name: userFullName,
         email: r.email,
         role: r.role,
+        profile_picture: photoPath ? storageService.getUrl(photoPath) : null,
         manager: r.manager_username || null,
         manager_id: r.manager_id || null,
+        manager_name: managerName,
         team_name: r.team_name || null,
         joining_date: r.joining_date || null,
         leave_allotted: r.leave_allotted || 0,
@@ -659,8 +714,15 @@ export const accountsService = {
     });
   },
 
-  async getManagers(query = {}) {
-    const { page, limit, offset } = parsePagination(query, 50, 100);
+  async getManagers(query = {}, tenantId = null, actor = null) {
+    const managerQuery = { ...query };
+    delete managerQuery.site_id; // Work Site is strictly an informational tag/filter and must not restrict manager eligibility
+    if (tenantId && actor) {
+      const staff = await this.getEmployees({ ...managerQuery, role: "manager", limit: managerQuery.limit || 1000 }, tenantId, actor);
+      const managers = staff.data.map((m) => ({ id: m.id, username: m.username, email: m.email, name: fullName(m), team_name: m.team_name, site_id: m.site_id }));
+      return formatPaginationResponse(managers, staff.pagination.total, staff.pagination.page, staff.pagination.limit, { records: managers });
+    }
+    const { page, limit, offset } = parsePagination(managerQuery, 50, 1000);
     const [total, rows] = await Promise.all([
       accountsRepository.countActiveManagers(),
       accountsRepository.findActiveManagersPaged({ limit, offset })
@@ -677,22 +739,74 @@ export const accountsService = {
     return formatPaginationResponse(managers, total, page, limit, { records: managers });
   },
 
-  async getEmployees(query = {}) {
-    const { page, limit, offset } = parsePagination(query, 50, 100);
-    const [total, rows, totalDocuments] = await Promise.all([
-      accountsRepository.countEmployees(query),
-      accountsRepository.findEmployeesPaged({ ...query, limit, offset }),
-      accountsRepository.countTotalDocuments()
+  async getEmployees(query = {}, tenantId = 1, actor = null) {
+    const { page, limit, offset } = parsePagination(query, 50, 10000);
+    const requested = query.site_id || null;
+    const scope = actor ? await siteService.getSiteScope(tenantId, actor, requested) : { siteIds: null, unassigned: false };
+    const managerId = (actor && actor.role === "manager") ? actor.id : null;
+    const workDate = new Date().toISOString().slice(0, 10);
+
+    const [rows, total, metrics, availableTeamsRows, totalDocuments] = await Promise.all([
+      accountsRepository.findEmployeesPaged({
+        tenantId,
+        limit,
+        offset,
+        role: query.role,
+        team: query.team,
+        search: query.search || query.search_term || "",
+        status: query.status,
+        siteScope: scope,
+        managerId,
+        workDate
+      }),
+      accountsRepository.countEmployees({
+        tenantId,
+        role: query.role,
+        team: query.team,
+        search: query.search || query.search_term || "",
+        status: query.status,
+        siteScope: scope,
+        managerId,
+        workDate
+      }),
+      accountsRepository.getEmployeeMetrics({
+        tenantId,
+        siteScope: scope,
+        managerId,
+        workDate
+      }),
+      accountsRepository.findAvailableTeams({
+        tenantId,
+        siteScope: scope,
+        managerId,
+        workDate
+      }),
+      accountsRepository.countTotalDocuments({
+        tenantId,
+        siteScope: scope,
+        managerId,
+        workDate
+      })
     ]);
 
-    const userIds = rows.map((r) => r.id);
+    const pagedUserIds = rows.map((r) => r.id);
     const [docCountMap, locMap] = await Promise.all([
-      accountsRepository.findDocumentCountsByUserIds(userIds),
-      accountsRepository.findLocationsByUserIds(userIds)
+      accountsRepository.findDocumentCountsByUserIds(pagedUserIds),
+      accountsRepository.findLocationsByUserIds(pagedUserIds)
     ]);
 
     const data = this.serializeStaffMembersBatch(rows, docCountMap, locMap);
-    return formatPaginationResponse(data, total, page, limit, { records: data, total_documents: totalDocuments });
+    const available_teams = availableTeamsRows.map((r) => r.team_name).filter(Boolean);
+
+    return formatPaginationResponse(data, total, page, limit, {
+      records: data,
+      total_count: total,
+      total_documents: totalDocuments,
+      active_count: metrics.active,
+      inactive_count: metrics.inactive,
+      metrics,
+      available_teams
+    });
   },
 
   async getAdminSummary() {
@@ -777,7 +891,14 @@ export const accountsService = {
     };
   },
 
-  async updateEmployee(employeeId, data, actor) {
+  async updateEmployee(employeeId, data, actor, tenantId = 1) {
+    if (
+      String(actor.id) === String(employeeId) &&
+      (data.is_active_employee === false || data.is_active_employee === 0 || data.is_active === false || data.is_active === 0)
+    ) {
+      throw new AppError("You cannot deactivate your own account", 400);
+    }
+
     const user = await accountsRepository.findById(employeeId);
     
     const allowedEditableRoles = ["employee", "manager"];
@@ -791,17 +912,83 @@ export const accountsService = {
       throw new AppError("Employee not found or you do not have permission to edit this account type", 404);
     }
 
+    if (String(actor.id) === String(employeeId) && data.role !== undefined && data.role !== user.role) {
+      throw new AppError("You cannot change or demote your own role", 400);
+    }
+
+    if (data.username !== undefined && data.username !== null) data.username = String(data.username).trim();
+    if (data.first_name !== undefined && data.first_name !== null) data.first_name = String(data.first_name).trim();
+    if (data.last_name !== undefined && data.last_name !== null) data.last_name = String(data.last_name).trim();
+    if (data.email !== undefined && data.email !== null) data.email = String(data.email).trim();
+    if (data.team_name !== undefined && data.team_name !== null) data.team_name = String(data.team_name).trim();
+    if (data.designation !== undefined && data.designation !== null) data.designation = String(data.designation).trim();
+
+    const tenantMembership = await db.get("SELECT 1 AS present FROM workforce_user_tenant WHERE tenant_id=? AND user_id=?", [tenantId, employeeId]);
+    if (!tenantMembership) throw new AppError("Employee is not part of this organization", 404);
+    await siteService.ensureEmployeeVisible(tenantId, actor, employeeId);
+
+    if (data.is_active_employee !== undefined) {
+      data.is_active = Boolean(data.is_active_employee);
+    }
+
+    if (data.site_id !== undefined && data.site_id !== null) {
+      const scope = await siteService.getSiteScope(tenantId, actor, data.site_id);
+      if (!siteService.isGlobalRole(actor.role) && !scope.siteIds?.includes(Number(data.site_id))) throw new AppError("You do not have access to the selected site", 403);
+    }
+
     if (data.role && !allowedEditableRoles.includes(data.role)) {
       throw new AppError("You do not have permission to assign this role", 403);
     }
 
-    const oldSerialized = await this.serializeStaffMember(user);
+    if (data.manager !== undefined) {
+      const managerId = data.manager !== null && data.manager !== "" ? Number(data.manager) : null;
+      if (managerId) {
+        if (Number(managerId) === Number(employeeId)) {
+          throw new AppError("An employee cannot be their own reporting manager", 400);
+        }
+        const mgr = await db.get(
+          "SELECT u.id FROM accounts_user u JOIN workforce_user_tenant wut ON wut.user_id = u.id AND wut.tenant_id = ? WHERE u.id = ? AND u.role = 'manager' AND u.is_active = 1 AND u.deleted_at IS NULL",
+          [tenantId, managerId]
+        );
+        if (!mgr) {
+          throw new AppError("Invalid reporting manager selected. The manager must be an active manager in this organization.", 400);
+        }
+      }
+    }
+
+    if (data.password !== undefined && data.password !== null && data.password !== "") {
+      if (!["admin", "superadmin"].includes(actor.role)) {
+        throw new AppError("Only admin and superadmin are authorized to modify employee passwords", 403);
+      }
+      if (typeof data.password !== "string" || data.password.length < 12 || data.password.length > 128) {
+        throw new AppError("Password must be between 12 and 128 characters", 400);
+      }
+    }
+
+    const oldSerialized = await this.serializeStaffMember(user, null, tenantId);
 
     const updated = await db.transaction(async (tx) => {
+      if (data.role !== undefined) {
+        await db.run("UPDATE workforce_user_tenant SET role=? WHERE tenant_id=? AND user_id=?", [data.role, tenantId, employeeId], tx);
+      }
+      if (data.is_active_employee !== undefined) {
+        await db.run("UPDATE workforce_user_tenant SET is_active=? WHERE tenant_id=? AND user_id=?", [data.is_active_employee ? 1 : 0, tenantId, employeeId], tx);
+      }
+      let assignedSiteId = await siteService.getEmployeeSiteId(tenantId, employeeId, new Date().toISOString().slice(0, 10), tx);
+      if (data.site_id !== undefined && data.site_id !== null) {
+        if (Number(assignedSiteId) !== Number(data.site_id)) {
+          await siteService.assignEmployee(tenantId, employeeId, Number(data.site_id), undefined, actor, tx);
+        }
+        assignedSiteId = Number(data.site_id);
+      }
+      if (data.role !== undefined && !["hr", "manager"].includes(data.role)) {
+        // Manager demotion: role changed to non-manager -> remove obsolete manager site access
+        await db.run("DELETE FROM workforce_site_access WHERE tenant_id=? AND user_id=?", [tenantId, employeeId], tx);
+      }
       await accountsRepository.updateUser(employeeId, data, tx);
       await accountsRepository.updateProfile(employeeId, data, tx);
 
-      if (data.password) {
+      if (data.password && ["admin", "superadmin"].includes(actor.role)) {
         const passwordHash = await hashPassword(data.password);
         await db.run("UPDATE accounts_user SET password = ? WHERE id = ?", [passwordHash, employeeId], tx);
       }
@@ -831,7 +1018,7 @@ export const accountsService = {
       }
 
       const updatedUser = await accountsRepository.findById(employeeId, tx);
-      const newSerialized = await this.serializeStaffMember(updatedUser, tx);
+      const newSerialized = await this.serializeStaffMember(updatedUser, tx, tenantId);
 
       const diff = {};
       const fieldsToCompare = [
@@ -864,7 +1051,7 @@ export const accountsService = {
         }
       }
 
-      if (data.password) {
+      if (data.password && ["admin", "superadmin"].includes(actor.role)) {
         diff["password"] = { old: "******", new: "******" };
       }
 
@@ -892,47 +1079,11 @@ export const accountsService = {
     realtimeManager.broadcast("employee_update", { actorId: actor.id });
     return {
       message: "Employee details updated successfully",
-      employee: await this.serializeStaffMember(updated)
+      employee: await this.serializeStaffMember(updated, null, tenantId)
     };
   },
 
-  async deleteEmployee(employeeId, actor) {
-    const user = await accountsRepository.findById(employeeId);
-    
-    const allowedDeleteRoles = ["employee", "manager"];
-    if (actor.role === "admin") {
-      allowedDeleteRoles.push("hr");
-    } else if (actor.role === "superadmin") {
-      allowedDeleteRoles.push("hr", "admin", "superadmin");
-    }
-
-    if (!user || !allowedDeleteRoles.includes(user.role)) {
-      throw new AppError("Employee not found or you do not have permission to archive this account type", 404);
-    }
-    if (user.id === actor.id) {
-      throw new AppError("You cannot archive your own account from this page", 400);
-    }
-
-    await db.transaction(async (tx) => {
-      await accountsRepository.softDeleteUser(employeeId, tx);
-      await accountsRepository.softDeleteProfile(employeeId, tx);
-      
-      await auditService.log(
-        actor,
-        "archive_employee",
-        employeeId.toString(),
-        { username: user.username, email: user.email },
-        null,
-        tx
-      );
-    });
-
-    await redisService.del(`user:session:${employeeId}`);
-    realtimeManager.broadcast("employee_update", { actorId: actor.id });
-    return { message: "Employee archived successfully. Documents are kept safe." };
-  },
-
-  async deleteDocument(documentId, actor) {
+  async deleteDocument(documentId, actor, tenantId = 1) {
     if (actor.role !== "superadmin") {
       throw new AppError("Only super admin can delete uploaded documents", 403);
     }
@@ -941,12 +1092,17 @@ export const accountsService = {
     if (!document) {
       throw new AppError("Document not found", 404);
     }
+    const membership = await db.get("SELECT 1 AS present FROM workforce_user_tenant WHERE tenant_id=? AND user_id=?", [tenantId, document.user_id]);
+    if (!membership) throw new AppError("Document not found in this organization", 404);
 
     // Delete actual file from storage/Cloudinary
     await storageService.delete(document.file);
 
     // Delete record from database
     await db.run("DELETE FROM accounts_employeedocument WHERE id = ?", [documentId]);
+    if (document.title.toLowerCase() === "photo copy" || document.title.toLowerCase() === "photocopy") {
+      await db.run("UPDATE accounts_employeeprofile SET profile_picture = NULL WHERE user_id = ?", [document.user_id]);
+    }
 
     // Log audit activity
     await auditService.log(
@@ -956,36 +1112,51 @@ export const accountsService = {
       { title: document.title, file: document.file }
     );
 
+    realtimeManager.broadcast("employee_update", { actorId: actor.id, userId: document.user_id });
+    realtimeManager.broadcast("document_update", {
+      actorId: actor.id,
+      userId: document.user_id,
+      documentId: document.id,
+      title: document.title,
+      action: "delete"
+    });
+
     return { message: "Document deleted successfully" };
   },
 
-  async uploadDocument(data, file, actor) {
+  async uploadDocument(data, file, actor, tenantId = 1) {
     const { user, title } = data;
 
     if (String(actor.id) !== String(user) && !["admin", "hr", "superadmin"].includes(actor.role)) {
       throw new AppError("You do not have permission to manage documents for this employee", 403);
     }
+    if (String(actor.id) !== String(user)) await siteService.ensureEmployeeVisible(tenantId, actor, user);
 
     const existingDocs = await accountsRepository.findDocumentsByUserId(user);
     const duplicate = existingDocs.find((d) => d.title === title);
     if (duplicate) {
-      if (actor.role !== "superadmin") {
-        throw new AppError("Only super admin can edit or overwrite uploaded documents", 403);
+      if (!["admin", "superadmin"].includes(actor.role)) {
+        throw new AppError("Only admin and super admin can edit or overwrite uploaded documents", 403);
       }
-      await storageService.delete(duplicate.file);
-      await db.run("DELETE FROM accounts_employeedocument WHERE id = ?", [duplicate.id]);
     }
 
     const relativePath = await storageService.store(file, "documents", user);
     
     try {
       await db.transaction(async (tx) => {
-        await accountsRepository.insertDocument(title, relativePath, user, tx);
+        if (duplicate) {
+          await db.run("UPDATE accounts_employeedocument SET file=?, uploaded_at=NOW() WHERE id=?", [relativePath, duplicate.id], tx);
+        } else {
+          await accountsRepository.insertDocument(title, relativePath, user, tx);
+        }
+        if (title.toLowerCase() === "photo copy" || title.toLowerCase() === "photocopy") {
+          await db.run("UPDATE accounts_employeeprofile SET profile_picture = ? WHERE user_id = ?", [relativePath, user], tx);
+        }
         await auditService.log(
           actor,
-          "upload_employee_document",
+          duplicate ? "replace_employee_document" : "upload_employee_document",
           user.toString(),
-          { title, path: relativePath },
+          { title, path: relativePath, replacedFile: duplicate ? duplicate.file : null },
           null,
           tx
         );
@@ -999,24 +1170,39 @@ export const accountsService = {
       throw err;
     }
 
+    if (duplicate && duplicate.file) {
+      try {
+        await storageService.delete(duplicate.file);
+      } catch (cloudErr) {
+        logger.warn("[Cloudinary] Failed to delete replaced document file %s: %s", duplicate.file, cloudErr.message);
+      }
+    }
+
+    realtimeManager.broadcast("employee_update", { actorId: actor.id, userId: user });
+    realtimeManager.broadcast("document_update", {
+      actorId: actor.id,
+      userId: user,
+      title,
+      action: duplicate ? "replace" : "upload"
+    });
+
     return { message: "Document uploaded" };
   },
 
-  async registerDirectDocument(data, actor) {
+  async registerDirectDocument(data, actor, tenantId = 1) {
     const { user, title, public_id } = data;
 
     if (String(actor.id) !== String(user) && !["admin", "hr", "superadmin"].includes(actor.role)) {
       throw new AppError("You do not have permission to manage documents for this employee", 403);
     }
+    if (String(actor.id) !== String(user)) await siteService.ensureEmployeeVisible(tenantId, actor, user);
 
     const existingDocs = await accountsRepository.findDocumentsByUserId(user);
     const duplicate = existingDocs.find((d) => d.title === title);
     if (duplicate) {
-      if (actor.role !== "superadmin") {
-        throw new AppError("Only super admin can edit or overwrite uploaded documents", 403);
+      if (!["admin", "superadmin"].includes(actor.role)) {
+        throw new AppError("Only admin and super admin can edit or overwrite uploaded documents", 403);
       }
-      await storageService.delete(duplicate.file);
-      await db.run("DELETE FROM accounts_employeedocument WHERE id = ?", [duplicate.id]);
     }
 
     // Verify metadata on Cloudinary
@@ -1026,21 +1212,44 @@ export const accountsService = {
     const dbPath = `cloudinary://${public_id}`;
 
     await db.transaction(async (tx) => {
-      await accountsRepository.insertDocument(title, dbPath, user, tx);
+      if (duplicate) {
+        await db.run("UPDATE accounts_employeedocument SET file = ?, uploaded_at = NOW() WHERE id = ?", [dbPath, duplicate.id], tx);
+      } else {
+        await accountsRepository.insertDocument(title, dbPath, user, tx);
+      }
+      if (title.toLowerCase() === "photo copy" || title.toLowerCase() === "photocopy") {
+        await db.run("UPDATE accounts_employeeprofile SET profile_picture = ? WHERE user_id = ?", [dbPath, user], tx);
+      }
       await auditService.log(
         actor,
-        "register_employee_document",
+        duplicate ? "replace_employee_document" : "register_employee_document",
         user.toString(),
-        { title, path: dbPath },
+        { title, path: dbPath, replacedFile: duplicate ? duplicate.file : null },
         null,
         tx
       );
     });
 
+    if (duplicate && duplicate.file) {
+      try {
+        await storageService.delete(duplicate.file);
+      } catch (cloudErr) {
+        logger.warn("[Cloudinary] Failed to delete replaced document file %s: %s", duplicate.file, cloudErr.message);
+      }
+    }
+
+    realtimeManager.broadcast("employee_update", { actorId: actor.id, userId: user });
+    realtimeManager.broadcast("document_update", {
+      actorId: actor.id,
+      userId: user,
+      title,
+      action: duplicate ? "replace" : "upload"
+    });
+
     return { message: "Document registered successfully" };
   },
 
-  async getDocumentDetail(id, actor, ipAddress) {
+  async getDocumentDetail(id, actor, ipAddress, tenantId = 1, options = {}) {
     const document = await accountsRepository.findDocumentById(id);
     if (!document) {
       throw new AppError("Document not found", 404);
@@ -1048,9 +1257,11 @@ export const accountsService = {
 
     // Role-based Access & IDOR Verification
     const isOwner = Number(actor.id) === Number(document.user_id);
-    const isGlobalViewer = ["admin", "hr", "superadmin"].includes(actor.role);
+    await siteService.ensureEmployeeVisible(tenantId, actor, document.user_id, { requireDirectReport: actor.role === "manager" });
+    const isGlobalViewer = ["admin", "superadmin"].includes(actor.role);
+    const isHr = actor.role === "hr";
 
-    if (!isOwner && !isGlobalViewer) {
+    if (!isOwner && !isGlobalViewer && !isHr) {
       if (actor.role === "manager") {
         const empProfile = await accountsRepository.findProfileByUserId(document.user_id);
         if (!empProfile || Number(empProfile.manager_id) !== Number(actor.id)) {
@@ -1061,14 +1272,15 @@ export const accountsService = {
       }
     }
 
-    const fileUrl = storageService.getUrl(document.file);
+    const fileUrl = storageService.getUrl(document.file, options);
     if (!fileUrl) {
       throw new AppError("Failed to retrieve document path / file is missing", 404);
     }
 
+    const auditAction = (options.attachment || options.download) ? "download_employee_document" : "view_employee_document";
     await auditService.log(
       actor,
-      "view_employee_document",
+      auditAction,
       document.user_id.toString(),
       { document_id: document.id, title: document.title, file: document.file },
       ipAddress
@@ -1083,6 +1295,7 @@ export const accountsService = {
       id: d.id,
       title: d.title,
       file: storageService.getUrl(d.file),
+      download_url: storageService.getUrl(d.file, { attachment: true }),
       uploaded_at: d.uploaded_at
     }));
 
@@ -1096,12 +1309,13 @@ export const accountsService = {
     return items;
   },
 
-  async getEmployeeDocuments(employeeId, actor, query = {}) {
+  async getEmployeeDocuments(employeeId, actor, query = {}, tenantId = 1) {
     if (actor) {
       const isOwner = Number(actor.id) === Number(employeeId);
-      const isGlobalViewer = ["admin", "hr", "superadmin"].includes(actor.role);
+      const isGlobalViewer = ["admin", "superadmin"].includes(actor.role);
+      const isHr = actor.role === "hr";
 
-      if (!isOwner && !isGlobalViewer) {
+      if (!isOwner && !isGlobalViewer && !isHr) {
         if (actor.role === "manager") {
           const empProfile = await accountsRepository.findProfileByUserId(employeeId);
           if (!empProfile || Number(empProfile.manager_id) !== Number(actor.id)) {
@@ -1111,6 +1325,7 @@ export const accountsService = {
           throw new AppError("You do not have permission to view documents for this employee", 403);
         }
       }
+      await siteService.ensureEmployeeVisible(tenantId, actor, employeeId, { requireDirectReport: actor.role === "manager" });
     }
 
     const docs = await accountsRepository.findDocumentsByUserId(employeeId);
@@ -1118,6 +1333,7 @@ export const accountsService = {
       id: d.id,
       title: d.title,
       file: storageService.getUrl(d.file),
+      download_url: storageService.getUrl(d.file, { attachment: true }),
       uploaded_at: d.uploaded_at
     }));
 
@@ -1136,8 +1352,18 @@ export const accountsService = {
       throw new AppError("Only super admin can access audit logs", 403);
     }
 
-    const limit = query.limit ? Number(query.limit) : 50;
-    const page = query.page ? Number(query.page) : 1;
+    if (query.severity) {
+      const sev = String(query.severity).trim().toUpperCase();
+      if (!["INFO", "WARNING", "CRITICAL", "ALL", ""].includes(sev)) {
+        throw new AppError("Invalid severity filter. Allowed values: INFO, WARNING, CRITICAL.", 400);
+      }
+    }
+    const cleanSeverity = query.severity && query.severity.trim().toUpperCase() !== "ALL"
+      ? query.severity.trim().toUpperCase()
+      : "";
+
+    const limit = query.limit ? Math.min(Math.max(Number(query.limit), 1), 5000) : 50;
+    const page = query.page ? Math.max(Number(query.page), 1) : 1;
     const offset = (page - 1) * limit;
 
     const [logs, total] = await Promise.all([
@@ -1148,13 +1374,15 @@ export const accountsService = {
         sort: query.sort || "desc",
         startDate: query.start_date || "",
         endDate: query.end_date || "",
-        actionType: query.action || ""
+        actionType: query.action || "",
+        severity: cleanSeverity
       }),
       auditRepository.getAuditLogsCount({
         search: query.search || "",
         startDate: query.start_date || "",
         endDate: query.end_date || "",
-        actionType: query.action || ""
+        actionType: query.action || "",
+        severity: cleanSeverity
       })
     ]);
 
@@ -1188,7 +1416,7 @@ export const accountsService = {
       };
     });
 
-    const uniqueActions = await db.all("SELECT DISTINCT action FROM audit_logs ORDER BY action ASC");
+    const uniqueActions = await db.all("SELECT DISTINCT action FROM audit_logs WHERE action IS NOT NULL AND action != '' ORDER BY action ASC");
 
     const totalPages = Math.ceil(total / limit) || 1;
 
@@ -1208,12 +1436,22 @@ export const accountsService = {
     };
   },
 
-  async serializeStaffMember(user, tx = null) {
+  async serializeStaffMember(user, tx = null, tenantId = 1) {
     const p = await accountsRepository.findProfileByUserId(user.id, tx);
     const manager = p?.manager_id ? await accountsRepository.findById(p.manager_id, tx) : null;
     const docCount = await accountsRepository.findDocumentCountByUserId(user.id, tx);
     const locations = await accountsRepository.findLocationsByUserId(user.id, tx);
     
+    let photoPath = p?.profile_picture;
+    if (!photoPath) {
+      const photoDoc = await db.get(
+        "SELECT file FROM accounts_employeedocument WHERE user_id=? AND (LOWER(title)='photo copy' OR LOWER(title)='photocopy') LIMIT 1",
+        [user.id],
+        tx
+      );
+      photoPath = photoDoc?.file || null;
+    }
+
     return {
       id: user.id,
       username: user.username,
@@ -1222,8 +1460,10 @@ export const accountsService = {
       name: fullName(user),
       email: user.email,
       role: user.role,
+      profile_picture: photoPath ? storageService.getUrl(photoPath) : null,
       manager: manager?.username || null,
       manager_id: manager?.id || null,
+      manager_name: manager ? fullName(manager) : null,
       team_name: p?.team_name || null,
       joining_date: p?.joining_date || null,
       leave_allotted: p?.leave_allotted || 0,
@@ -1240,7 +1480,8 @@ export const accountsService = {
         allowed_radius: l.allowed_radius,
         is_primary: Boolean(l.is_primary)
       })),
-      is_active: Boolean(user.is_active)
+      is_active: Boolean(user.is_active),
+      site_id: await siteService.getEmployeeSiteId(tenantId, user.id)
     };
   }
 };

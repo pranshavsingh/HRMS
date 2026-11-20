@@ -1,7 +1,9 @@
 import { Link, useLocation } from "react-router-dom";
+import { useAuth } from "../../context/AuthContext";
 import {
   LayoutDashboard,
   Clock,
+  Calendar,
   History,
   FileText,
   Users,
@@ -11,11 +13,15 @@ import {
 } from "lucide-react";
 
 export default function Sidebar() {
-  const role = localStorage.getItem("role");
+  const { role: authRole } = useAuth();
+  const role = authRole || localStorage.getItem("role");
   const location = useLocation();
 
   const menuClass = (path) => {
-    const active = (location.pathname + location.search) === path || 
+    const current = location.pathname + location.search;
+    const active = current === path ||
+                   (path === "/roster?tab=calendar" && location.pathname === "/roster" && (!location.search || location.search === "?tab=calendar")) ||
+                   (path === "/roster?tab=my-schedule" && location.pathname === "/roster" && location.search === "?tab=my-schedule") ||
                    (path === "/dashboard" && location.pathname === "/dashboard" && !location.search);
     return `flex items-center gap-3 px-4 py-2 rounded-lg transition ${
       active
@@ -56,6 +62,10 @@ export default function Sidebar() {
               <Clock size={18} /> Attendance
             </Link>
 
+            <Link to="/roster?tab=my-schedule" className={menuClass("/roster?tab=my-schedule")}>
+              <Calendar size={18} /> My Schedule
+            </Link>
+
             <Link to="/history" className={menuClass("/history")}>
               <History size={18} /> History
             </Link>
@@ -89,6 +99,10 @@ export default function Sidebar() {
 
             <Link to="/team-attendance" className={menuClass("/team-attendance")}>
               <Users size={18} /> Team Attendance
+            </Link>
+
+            <Link to="/roster?tab=calendar" className={menuClass("/roster?tab=calendar")}>
+              <Calendar size={18} /> Team Roster
             </Link>
 
             <Link to="/team-analytics" className={menuClass("/team-analytics")}>
@@ -126,8 +140,20 @@ export default function Sidebar() {
               <Users size={18} /> Team Attendance
             </Link>
 
+            <Link to="/roster?tab=calendar" className={menuClass("/roster?tab=calendar")}>
+              <Calendar size={18} /> Team Roster
+            </Link>
+
+            <Link to="/team-analytics" className={menuClass("/team-analytics")}>
+              <BarChart size={18} /> Team Analytics
+            </Link>
+
             <Link to="/reports" className={menuClass("/reports")}>
               <BarChart size={18} /> Reports & Excel
+            </Link>
+
+            <Link to="/shifts" className={menuClass("/shifts")}>
+              <Clock size={18} /> Shift Management
             </Link>
           </div>
         )}
@@ -161,8 +187,20 @@ export default function Sidebar() {
               <Clock size={18} /> Emp Attendance
             </Link>
 
+            <Link to="/roster?tab=calendar" className={menuClass("/roster?tab=calendar")}>
+              <Calendar size={18} /> Team Roster
+            </Link>
+
+            <Link to="/team-analytics" className={menuClass("/team-analytics")}>
+              <BarChart size={18} /> Team Analytics
+            </Link>
+
             <Link to="/reports" className={menuClass("/reports")}>
               <BarChart size={18} /> Reports
+            </Link>
+
+            <Link to="/shifts" className={menuClass("/shifts")}>
+              <Clock size={18} /> Shift Management
             </Link>
 
             {role === "superadmin" && (

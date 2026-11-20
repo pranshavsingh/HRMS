@@ -10,6 +10,9 @@ import { AppError } from "../middleware/errorHandler.js";
 import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
 import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
+import { shiftAttendanceService } from "./shift-attendance.service.js";
+import { siteService } from "./site.service.js";
+import { financialLeaveService } from "./financial-leave.service.js";
 
 const APPROVAL_CLOSED_STATUS = "closed";
 const REVIEW_ROLES_BY_REQUESTOR = {
@@ -82,9 +85,9 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(toRad(lat1)) *
-      Math.cos(toRad(lat2)) *
-      Math.sin(dLng / 2) *
-      Math.sin(dLng / 2);
+    Math.cos(toRad(lat2)) *
+    Math.sin(dLng / 2) *
+    Math.sin(dLng / 2);
   return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
@@ -138,6 +141,13 @@ function overallAttendanceStatus(attendance) {
     return "pending";
   }
   return "approved";
+}
+
+export function getExceptionCategory(comment, type) {
+  const c = (comment || "").toLowerCase();
+  if (c.includes("early departure") || c.includes("early_departure")) return "early_departure";
+  if (c.includes("overtime")) return "overtime";
+  return type === "in" ? "location_in" : "location_out";
 }
 
 async function approvalRouteForUser(userId, tx = null) {
@@ -200,12 +210,51 @@ export const attendanceService = {
       leave_last_date: null
     };
 
+    let scheduledShift = null;
+    try {
+      const tenantRow = await db.get(
+        "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 LIMIT 1",
+        [userId]
+      );
+      const tenantId = tenantRow?.tenant_id || 1;
+      const resolved = await shiftAttendanceService.resolveShiftForPunchIn(tenantId, userId, new Date());
+      if (resolved && resolved.shift) {
+        scheduledShift = {
+          shift_id: resolved.shift.shift_id,
+          shift_name: resolved.shift.shift_name,
+          shift_code: resolved.shift.shift_code,
+          start_time: resolved.shift.start_time,
+          end_time: resolved.shift.end_time,
+          is_overnight: Boolean(resolved.shift.is_overnight),
+          work_date: resolved.workDate,
+          resolution_source: resolved.source,
+          is_unscheduled: Boolean(resolved.isUnscheduled),
+        };
+      }
+    } catch {
+      // Non-fatal for status check
+    }
+
     const latest = await attendanceRepository.findLatestAttendance(userId);
+
+    const latestShiftInfo = latest ? {
+      shift_version_id: latest.shift_version_id || null,
+      roster_entry_id: latest.roster_entry_id || null,
+      work_date: latest.work_date || latest.date || null,
+      is_unscheduled: Boolean(latest.is_unscheduled),
+      resolution_source: latest.resolution_source || null,
+      punctuality_status: latest.punctuality_status || null,
+      late_minutes: latest.late_minutes || 0,
+      early_departure_minutes: latest.early_departure_minutes || 0,
+      overtime_minutes: latest.overtime_minutes || 0,
+    } : {};
+
     if (!latest) {
       return {
         is_punched_in: false,
         punch_in_time: null,
         punch_in_status: null,
+        scheduled_shift: scheduledShift,
         ...onLeaveInfo
       };
     }
@@ -215,6 +264,8 @@ export const attendanceService = {
         is_punched_in: false,
         punch_in_time: null,
         punch_in_status: null,
+        scheduled_shift: scheduledShift,
+        ...latestShiftInfo,
         ...onLeaveInfo
       };
     }
@@ -227,6 +278,8 @@ export const attendanceService = {
         punch_in_status: latest.punch_in_status,
         punch_out_time: dbTimeToIso(latest.punch_out_time),
         punch_out_status: latest.punch_out_status,
+        scheduled_shift: scheduledShift,
+        ...latestShiftInfo,
         ...onLeaveInfo
       };
     }
@@ -236,6 +289,8 @@ export const attendanceService = {
         is_punched_in: true,
         punch_in_time: dbTimeToIso(latest.punch_in_time),
         punch_in_status: latest.punch_in_status,
+        scheduled_shift: scheduledShift,
+        ...latestShiftInfo,
         ...onLeaveInfo
       };
     }
@@ -244,6 +299,8 @@ export const attendanceService = {
       is_punched_in: false,
       punch_in_time: null,
       punch_in_status: null,
+      scheduled_shift: scheduledShift,
+      ...latestShiftInfo,
       ...onLeaveInfo
     };
   },
@@ -258,14 +315,12 @@ export const attendanceService = {
     const params = {
       folder,
       public_id: uuid,
-      upload_preset: config.cloudinaryAttendancePreset,
     };
     const signatureData = cloudinaryService.generateUploadSignature(params);
     return {
       ...signatureData,
       folder,
       public_id: uuid,
-      upload_preset: config.cloudinaryAttendancePreset,
       upload_url: `https://api.cloudinary.com/v1_1/${config.cloudinaryCloudName}/image/upload`,
     };
   },
@@ -313,7 +368,7 @@ export const attendanceService = {
         }
 
         const punchInOutside = await isOutsideAllottedArea(userId, latitude, longitude, tx);
-        const reviewers = punchInOutside ? await approvalRouteForUser(userId) : [];
+        const reviewers = punchInOutside ? await approvalRouteForUser(userId, tx) : [];
         const needsApproval = punchInOutside && reviewers.length > 0;
 
         const punchInStatus = needsApproval ? "pending" : "approved";
@@ -322,17 +377,41 @@ export const attendanceService = {
         const now = new Date();
         const dateStr = getLocalDateString();
 
+        // 5. Resolve Tenant ID
+        const tenantRow = await db.get(
+          "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 LIMIT 1",
+          [userId],
+          tx
+        );
+        const tenantId = tenantRow?.tenant_id || 1;
+
+        // 6. Tiered Shift Resolution & Punctuality Calculation
+        const resolvedShift = await shiftAttendanceService.resolveShiftForPunchIn(tenantId, userId, now, tx);
+        const punctuality = shiftAttendanceService.evaluatePunchInPunctuality(resolvedShift, now);
+        const workDate = resolvedShift.workDate || dateStr;
+        const siteId = await siteService.getEmployeeSiteId(tenantId, userId, workDate, tx);
+
         const attId = await attendanceRepository.insertAttendance({
+          tenant_id: tenantId,
+          site_id: siteId,
           date: dateStr,
+          work_date: workDate,
           punch_in_time: now,
           punch_in_photo: relativePath,
           punch_in_lat: Number(latitude),
           punch_in_lng: Number(longitude),
           punch_in_outside: Number(punchInOutside),
+          geofence_status: punchInOutside ? "outside" : "inside",
           punch_in_status: punchInStatus,
           punch_out_status: "approved",
           status: attendanceStatus,
-          user_id: userId
+          user_id: userId,
+          shift_version_id: resolvedShift.shiftVersionId || null,
+          roster_entry_id: resolvedShift.rosterEntryId || null,
+          is_unscheduled: resolvedShift.isUnscheduled ? 1 : 0,
+          resolution_source: resolvedShift.source,
+          punctuality_status: punctuality.punctualityStatus,
+          late_minutes: punctuality.lateMinutes,
         }, tx);
 
         if (needsApproval) {
@@ -360,7 +439,18 @@ export const attendanceService = {
           requires_approval: needsApproval,
           status: attendanceStatus,
           punch_in_status: punchInStatus,
-          punch_in_time: dbTimeToIso(now)
+          punch_in_time: dbTimeToIso(now),
+          // Additive shift metadata
+          work_date: workDate,
+          shift_name: resolvedShift.shift?.shift_name || null,
+          shift_code: resolvedShift.shift?.shift_code || null,
+          shift_version_id: resolvedShift.shiftVersionId || null,
+          roster_entry_id: resolvedShift.rosterEntryId || null,
+          is_unscheduled: Boolean(resolvedShift.isUnscheduled),
+          resolution_source: resolvedShift.source,
+          punctuality_status: punctuality.punctualityStatus,
+          late_minutes: punctuality.lateMinutes,
+          is_overnight: Boolean(resolvedShift.shift?.is_overnight),
         };
       });
 
@@ -403,16 +493,28 @@ export const attendanceService = {
         }
 
         const punchOutOutside = await isOutsideAllottedArea(userId, latitude, longitude, tx);
-        const reviewers = punchOutOutside ? await approvalRouteForUser(userId) : [];
-        const needsApproval = punchOutOutside && reviewers.length > 0;
+        const now = new Date();
+        const outEval = await shiftAttendanceService.evaluatePunchOut(att, now, tx);
 
-        const punchOutStatus = needsApproval ? "pending" : "approved";
+        let reviewers = [];
+        const policyApprovalRequired = Boolean(outEval.earlyDepartureRequiresApproval || outEval.overtimeRequiresApproval);
+        if (punchOutOutside || policyApprovalRequired) {
+          reviewers = await approvalRouteForUser(userId, tx);
+        }
+
+        // Geofence location approval: affects punch_out_status and overall punch approval
+        const geofenceNeedsApproval = punchOutOutside && reviewers.length > 0;
+        const punchOutStatus = geofenceNeedsApproval ? "pending" : "approved";
         const nextAttendance = {
           ...att,
           punch_out_status: punchOutStatus,
         };
         const finalStatus = overallAttendanceStatus(nextAttendance);
-        const now = new Date();
+
+        let punctualityStatus = att.punctuality_status || "on_time";
+        if (outEval.isEarlyDeparture && punctualityStatus !== "late") {
+          punctualityStatus = "early_departure";
+        }
 
         // 3. Atomic conditional update: punch_out_time must still be NULL
         const updateResult = await attendanceRepository.updateAttendance(att.id, {
@@ -423,14 +525,19 @@ export const attendanceService = {
           punch_out_outside: Number(punchOutOutside),
           punch_out_status: punchOutStatus,
           status: finalStatus,
-          is_outside_location: Number(Boolean(att.punch_in_outside) || punchOutOutside)
+          is_outside_location: Number(Boolean(att.punch_in_outside) || punchOutOutside),
+          total_hours: outEval.totalHours,
+          early_departure_minutes: outEval.earlyDepartureMinutes,
+          overtime_minutes: outEval.overtimeMinutes,
+          punctuality_status: punctualityStatus,
         }, tx, "punch_out_time IS NULL");
 
         if (updateResult.changes === 0) {
           throw new AppError("Punch in first", 400);
         }
 
-        if (needsApproval) {
+        // Geofence exception approval request
+        if (punchOutOutside && reviewers.length > 0) {
           const approvalRows = reviewers.map((reviewer) => ({
             role: reviewer.role,
             status: "pending",
@@ -443,17 +550,61 @@ export const attendanceService = {
           await attendanceRepository.insertApprovalsBatch(approvalRows, tx);
         }
 
+        // Manager policy approvals (decoupled from physical punch status)
+        if (outEval.earlyDepartureRequiresApproval && reviewers.length > 0) {
+          const earlyApprovalRows = reviewers.map((reviewer) => ({
+            role: reviewer.role,
+            status: "pending",
+            comment: `Early departure by ${outEval.earlyDepartureMinutes} minutes`,
+            created_at: now,
+            approved_by_id: reviewer.id,
+            attendance_id: att.id,
+            type: "out"
+          }));
+          await attendanceRepository.insertApprovalsBatch(earlyApprovalRows, tx);
+        }
+
+        if (outEval.overtimeRequiresApproval && reviewers.length > 0) {
+          const overtimeApprovalRows = reviewers.map((reviewer) => ({
+            role: reviewer.role,
+            status: "pending",
+            comment: `Overtime of ${outEval.overtimeMinutes} minutes`,
+            created_at: now,
+            approved_by_id: reviewer.id,
+            attendance_id: att.id,
+            type: "out"
+          }));
+          await attendanceRepository.insertApprovalsBatch(overtimeApprovalRows, tx);
+        }
+
         const updated = await attendanceRepository.findAttendanceById(att.id, tx);
-        
+        const requiresApproval = Boolean(geofenceNeedsApproval || policyApprovalRequired);
+
         return {
-          message: needsApproval ? "Punch Out submitted for approval" : "Punch Out Successful",
+          message: requiresApproval ? "Punch Out submitted for approval" : "Punch Out Successful",
           outside_location: punchOutOutside,
-          requires_approval: needsApproval,
+          requires_approval: requiresApproval,
+          requires_location_approval: geofenceNeedsApproval,
+          requires_manager_approval: policyApprovalRequired,
           final_status: updated.status,
           punch_in_status: updated.punch_in_status,
           punch_out_status: updated.punch_out_status,
-          work_hours: toHours(updated.punch_in_time, updated.punch_out_time, updated.status),
+          work_hours: outEval.totalHours,
           punch_out_time: dbTimeToIso(now),
+          // Additive shift metadata
+          total_hours: outEval.totalHours,
+          gross_minutes: outEval.grossMinutes,
+          net_minutes: outEval.netMinutes,
+          unpaid_break_minutes: outEval.unpaidBreakMinutes,
+          scheduled_net_minutes: outEval.scheduledNetMinutes,
+          early_departure_minutes: outEval.earlyDepartureMinutes,
+          is_early_departure: outEval.isEarlyDeparture,
+          overtime_minutes: outEval.overtimeMinutes,
+          is_overtime: outEval.isOvertime,
+          shift_name: outEval.shiftName,
+          shift_code: outEval.shiftCode,
+          resolution_source: att.resolution_source || null,
+          is_unscheduled: Boolean(att.is_unscheduled),
         };
       });
 
@@ -475,14 +626,21 @@ export const attendanceService = {
     }
   },
 
-  async approvals(userId, role, query = {}) {
+  async approvals(userId, role, query = {}, tenantId = 1) {
     if (!["manager", "hr", "admin", "superadmin"].includes(role)) {
       return formatPaginationResponse([], 0, 1, 50, { records: [], summary: {} });
     }
 
+    const siteScope = await siteService.getSiteScope(tenantId, { id: userId, role }, query.site_id || null);
     const rows = await attendanceRepository.findApprovalsForReviewer(userId, role);
 
-    const records = rows.map((r) => {
+    const records = [];
+    for (const r of rows) {
+      if (Number(r.tenant_id) !== Number(tenantId)) continue;
+      const effectiveSite = r.site_id == null
+        ? await siteService.getEmployeeSiteId(tenantId, r.employee_id, getYYYYMMDD(r.attendance_date))
+        : Number(r.site_id);
+      if (siteScope.unassigned ? effectiveSite !== null : (siteScope.siteIds && !siteScope.siteIds.includes(effectiveSite))) continue;
       const employeeName = `${r.employee_first_name || ""} ${r.employee_last_name || ""}`.trim() || r.employee_username;
       const managerName = r.manager_username ? `${r.manager_first_name || ""} ${r.manager_last_name || ""}`.trim() || r.manager_username : null;
       const reviewStatus = r.type === "in" ? r.punch_in_status : r.punch_out_status;
@@ -490,7 +648,12 @@ export const attendanceService = {
       const latitude = r.type === "in" ? r.punch_in_lat : r.punch_out_lat;
       const longitude = r.type === "in" ? r.punch_in_lng : r.punch_out_lng;
 
-      return {
+      const category = getExceptionCategory(r.comment, r.type);
+      let reviewLabel = r.type === "in" ? "Punch In" : "Punch Out";
+      if (category === "early_departure") reviewLabel = "Early Departure";
+      if (category === "overtime") reviewLabel = "Overtime";
+
+      records.push({
         approval_id: r.id,
         attendance_id: r.attendance_id,
         employee: r.employee_username,
@@ -498,10 +661,12 @@ export const attendanceService = {
         employee_email: r.employee_email,
         employee_role: r.employee_role,
         team_name: r.team_name,
+        site_id: effectiveSite,
         reporting_manager: managerName,
         date: r.attendance_date,
         review_type: r.type,
-        review_label: r.type === "in" ? "Punch In" : "Punch Out",
+        exception_category: category,
+        review_label: reviewLabel,
         approval_status: r.status,
         review_status: reviewStatus,
         attendance_status: r.attendance_status,
@@ -521,9 +686,9 @@ export const attendanceService = {
         final_decision: r.resolved_status || null,
         action_at: dbTimeToIso(r.resolved_action_at),
         action_by_name: r.decider_name || null,
-        can_approve: r.status === "pending" && reviewStatus === "pending" && Number(r.employee_id) !== Number(userId),
-      };
-    });
+        can_approve: r.status === "pending" && ((category === "early_departure" || category === "overtime") || reviewStatus === "pending") && Number(r.employee_id) !== Number(userId),
+      });
+    }
 
     // Deduplicate records to show each exception exactly once, prioritizing pending/active decisions
     const getStatusPriority = (status) => {
@@ -534,7 +699,7 @@ export const attendanceService = {
 
     const uniqueMap = new Map();
     for (const record of records) {
-      const key = `${record.attendance_id}-${record.review_type}`;
+      const key = `${record.attendance_id}-${record.review_type}-${record.exception_category}`;
       const existing = uniqueMap.get(key);
       if (!existing || getStatusPriority(record.approval_status) > getStatusPriority(existing.approval_status)) {
         uniqueMap.set(key, record);
@@ -542,13 +707,48 @@ export const attendanceService = {
     }
     const uniqueRecords = [...uniqueMap.values()];
 
-    const { page, limit, offset } = parsePagination(query, 50, 100);
-    const total = uniqueRecords.length;
-    const paginatedRecords = uniqueRecords.slice(offset, offset + limit);
+    let filteredRecords = uniqueRecords;
+    if (query.status && query.status !== "all") {
+      filteredRecords = filteredRecords.filter((r) => r.approval_status === query.status);
+    }
+    if (query.type && query.type !== "all") {
+      if (query.type === "in" || query.type === "location_in") {
+        filteredRecords = filteredRecords.filter((r) => r.review_type === "in" && r.exception_category === "location_in");
+      } else if (query.type === "out" || query.type === "location_out") {
+        filteredRecords = filteredRecords.filter((r) => r.review_type === "out" && r.exception_category === "location_out");
+      } else {
+        filteredRecords = filteredRecords.filter((r) => r.exception_category === query.type);
+      }
+    }
+    if (query.search && query.search.trim()) {
+      const q = query.search.trim().toLowerCase();
+      filteredRecords = filteredRecords.filter((item) =>
+        [
+          item.employee,
+          item.employee_name,
+          item.employee_email,
+          item.employee_role,
+          item.team_name,
+          item.reporting_manager,
+          item.review_label,
+          item.location_label,
+          item.action_by_name,
+          item.approval_route,
+          item.comment,
+        ]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(q))
+      );
+    }
+
+    const defaultLimit = Number(query.limit) > 0 ? Number(query.limit) : 15;
+    const { page, limit, offset } = parsePagination(query, defaultLimit, 100);
+    const total = filteredRecords.length;
+    const paginatedRecords = filteredRecords.slice(offset, offset + limit);
 
     return formatPaginationResponse(paginatedRecords, total, page, limit, {
       records: paginatedRecords,
-      all_records: uniqueRecords,
+      all_records: filteredRecords,
       summary: {
         scope_label: role === "manager"
           ? "Direct-report attendance exceptions"
@@ -565,22 +765,25 @@ export const attendanceService = {
     });
   },
 
-  async approvalAction(approvalId, status, comment = "", actor) {
+  async approvalAction(approvalId, status, comment = "", actor, tenantId = 1) {
     const response = await db.transaction(async (tx) => {
       // 1. Lock the approval row to serialize concurrent reviews
-      const ap = await attendanceRepository.findApprovalById(approvalId, tx, true);
+      const ap = await attendanceRepository.findApprovalById(approvalId, tx, true, tenantId);
       if (!ap) {
         throw new AppError("Approval not found", 404);
       }
-      if (actor.role === "superadmin") {
-        if (Number(ap.employee_id) === Number(actor.id)) {
-          throw new AppError("You cannot approve your own exception request", 403);
-        }
-      } else {
+      if (Number(ap.employee_id) === Number(actor.id)) {
+        throw new AppError("You cannot approve your own exception request", 403);
+      }
+      if (actor.role !== "superadmin") {
         if (Number(ap.approved_by_id) !== Number(actor.id)) {
           throw new AppError("This approval is not assigned to you", 403);
         }
       }
+      await siteService.ensureEmployeeVisible(tenantId, actor, ap.employee_id, {
+        requireDirectReport: actor.role === "manager",
+        workDate: getYYYYMMDD(ap.attendance_date) || undefined,
+      });
       if (ap.status !== "pending") {
         throw new AppError("This approval item is already closed", 400);
       }
@@ -608,9 +811,33 @@ export const attendanceService = {
         tx
       );
 
+      const category = getExceptionCategory(ap.comment, ap.type);
+      const isPolicyException = category === "early_departure" || category === "overtime";
+
       // 4. Handle rejection flow (reverts punch but keeps approval records)
       if (status === "rejected") {
-        if (ap.type === "in") {
+        if (isPolicyException) {
+          // Rejecting early departure or overtime: do NOT wipe punch out or photo!
+          await attendanceRepository.updatePendingApprovalsForAttendanceExcept(
+            ap.attendance_id,
+            ap.type,
+            APPROVAL_CLOSED_STATUS,
+            `Closed (${category}) after rejection by ${fullName(actor)}`,
+            actor.id,
+            ap.id,
+            tx,
+            category
+          );
+
+          const att = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
+          return {
+            message: `${category === "early_departure" ? "Early departure" : "Overtime"} rejected successfully`,
+            attendance_status: att.status,
+            review_type: ap.type,
+            review_status: "rejected",
+            work_hours: toHours(att.punch_in_time, att.punch_out_time, att.status),
+          };
+        } else if (ap.type === "in") {
           // Rejecting punch in: update status to rejected and close others instead of deleting
           await attendanceRepository.updateAttendance(ap.attendance_id, {
             punch_in_status: "rejected",
@@ -622,10 +849,11 @@ export const attendanceService = {
             ap.attendance_id,
             "in",
             APPROVAL_CLOSED_STATUS,
-            `Closed after rejection by ${fullName(actor)}`,
+            `Closed (location_in) after rejection by ${fullName(actor)}`,
             actor.id,
             ap.id,
-            tx
+            tx,
+            "location_in"
           );
 
           return {
@@ -636,11 +864,7 @@ export const attendanceService = {
             work_hours: 0,
           };
         } else {
-          // Rejecting punch out: reset punch-out fields to null and set punch_out_status = 'rejected'
-          const att = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
-          if (att && att.punch_out_photo) {
-            await storageService.delete(att.punch_out_photo);
-          }
+          // Rejecting punch out: reset punch-out fields to null (BUG-05: preserve photo for audit trail)
           await attendanceRepository.updateAttendance(ap.attendance_id, {
             punch_out_time: null,
             punch_out_photo: null,
@@ -656,10 +880,11 @@ export const attendanceService = {
             ap.attendance_id,
             "out",
             APPROVAL_CLOSED_STATUS,
-            `Closed after rejection by ${fullName(actor)}`,
+            `Closed (location_out) after rejection by ${fullName(actor)}`,
             actor.id,
             ap.id,
-            tx
+            tx,
+            "location_out"
           );
 
           const updated = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
@@ -674,22 +899,42 @@ export const attendanceService = {
       }
 
       // 5. Handle approved flow
-      if (ap.type === "in") {
+      if (isPolicyException) {
+        await attendanceRepository.updatePendingApprovalsForAttendanceExcept(
+          ap.attendance_id,
+          ap.type,
+          APPROVAL_CLOSED_STATUS,
+          `Closed (${category}) after ${status} by ${fullName(actor)}`,
+          actor.id,
+          ap.id,
+          tx,
+          category
+        );
+      } else if (ap.type === "in") {
         await attendanceRepository.updateAttendance(ap.attendance_id, { punch_in_status: status }, tx);
+        await attendanceRepository.updatePendingApprovalsForAttendanceExcept(
+          ap.attendance_id,
+          "in",
+          APPROVAL_CLOSED_STATUS,
+          `Closed (location_in) after ${status} by ${fullName(actor)}`,
+          actor.id,
+          ap.id,
+          tx,
+          "location_in"
+        );
       } else {
         await attendanceRepository.updateAttendance(ap.attendance_id, { punch_out_status: status }, tx);
+        await attendanceRepository.updatePendingApprovalsForAttendanceExcept(
+          ap.attendance_id,
+          "out",
+          APPROVAL_CLOSED_STATUS,
+          `Closed (location_out) after ${status} by ${fullName(actor)}`,
+          actor.id,
+          ap.id,
+          tx,
+          "location_out"
+        );
       }
-
-      // Close all other redundant approvals for the same attendance and type
-      await attendanceRepository.updatePendingApprovalsForAttendanceExcept(
-        ap.attendance_id,
-        ap.type,
-        APPROVAL_CLOSED_STATUS,
-        `Closed after ${status} by ${fullName(actor)}`,
-        actor.id,
-        ap.id,
-        tx
-      );
 
       // Re-calculate and update overall attendance status
       const att = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
@@ -699,7 +944,7 @@ export const attendanceService = {
       const updated = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
 
       return {
-        message: `Punch ${ap.type === "in" ? "In" : "Out"} ${status} successfully`,
+        message: `${isPolicyException ? (category === "early_departure" ? "Early Departure" : "Overtime") : ("Punch " + (ap.type === "in" ? "In" : "Out"))} ${status} successfully`,
         attendance_status: updated.status,
         review_type: ap.type,
         review_status: ap.type === "in" ? updated.punch_in_status : updated.punch_out_status,
@@ -715,44 +960,36 @@ export const attendanceService = {
     return response;
   },
 
-  async dashboard(userId) {
+  async dashboard(userId, tenantId = 1) {
     const since = new Date();
     since.setDate(since.getDate() - 7);
     const fromDate = since.toISOString().slice(0, 10);
 
     const { totalHours, daily } = await this.attendanceStatusSummary(userId, fromDate);
-    const profile = await accountsRepository.findProfileByUserId(userId);
-    
-    // Approved leaves count
-    const approvedLeaves = await db.all("SELECT from_date, to_date FROM leave_leave WHERE user_id=? AND status='approved'", [userId]);
-    const leavesTaken = approvedLeaves.reduce((sum, l) => {
-      const from = new Date(l.from_date);
-      const to = new Date(l.to_date);
-      const diff = Math.floor((to - from) / (1000 * 60 * 60 * 24)) + 1;
-      return sum + Math.max(0, diff);
-    }, 0);
+    const leaveBalance = await financialLeaveService.getBalance(userId, tenantId);
+    const leavesTaken = leaveBalance.leaves_used;
 
     return {
       total_working_hours: totalHours,
-      leave_balance: Math.max(Number(profile?.leave_allotted || 0) - leavesTaken, 0),
+      leave_balance: leaveBalance.available_balance,
       leaves_taken: leavesTaken,
       pending_approvals: await attendanceRepository.getPendingApprovalsCount(userId),
-      total_leaves_allocated: Number(profile?.leave_allotted || 0),
+      total_leaves_allocated: leaveBalance.base_entitlement,
       daily_work: daily,
     };
   },
 
-  async hrDashboard(userId, role) {
+  async hrDashboard(userId, role, tenantId = 1) {
     if (role !== "hr" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
-    const own = await this.dashboard(userId);
-    
+    const own = await this.dashboard(userId, tenantId);
+
     const totalPeopleRow = await db.get("SELECT COUNT(*) c FROM accounts_user WHERE role IN ('employee','manager') AND is_active=1 AND deleted_at IS NULL");
     const presentRow = await db.get("SELECT COUNT(DISTINCT user_id) c FROM attendance_attendance WHERE date=CURDATE() AND status NOT IN ('rejected', 'leave')");
     const pendingLeaveRow = await db.get("SELECT COUNT(*) c FROM leave_leave WHERE status='pending'");
     const pendingAttendanceRow = await db.get("SELECT COUNT(*) c FROM attendance_attendanceapproval WHERE status='pending'");
-    
+
     const recentRows = await db.all(
       `SELECT a.*, u.username as employee, u.role 
        FROM attendance_attendance a 
@@ -781,18 +1018,18 @@ export const attendanceService = {
     };
   },
 
-  async managerDashboard(userId, role) {
+  async managerDashboard(userId, role, tenantId = 1) {
     if (role !== "manager" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
 
-    const own = await this.dashboard(userId);
+    const own = await this.dashboard(userId, tenantId);
     const teamUsers = await attendanceRepository.findTeamActiveUsers(userId);
     const teamIds = teamUsers.map((u) => u.id);
 
     const presentCount = await attendanceRepository.getTeamAttendanceTodayCount(teamIds);
     const teamWeekRows = await attendanceRepository.getTeamAttendanceInLast7Days(teamIds);
-    
+
     const teamTotalHours = teamWeekRows.reduce((sum, r) => sum + toHours(r.punch_in_time, r.punch_out_time, r.status), 0);
     const pendingAttendance = await attendanceRepository.getPendingAttendanceApprovalsCount(userId);
     const pendingLeave = await attendanceRepository.getPendingLeaveApprovalsCount(userId);
@@ -817,50 +1054,209 @@ export const attendanceService = {
     };
   },
 
-  async teamAnalytics(managerId, daysQuery, role) {
+  async teamAnalytics(managerId, daysQuery, role, tenantId = 1, siteFilter = null) {
     if (role !== "manager" && role !== "hr" && role !== "admin" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
     const days = [7, 30, 90].includes(Number(daysQuery)) ? Number(daysQuery) : 30;
 
-    const members = (role === "hr" || role === "admin" || role === "superadmin")
-      ? await db.all(
-          "SELECT u.id, u.username, u.email, u.first_name, u.last_name, ep.team_name, ep.joining_date FROM accounts_user u JOIN accounts_employeeprofile ep ON ep.user_id=u.id WHERE u.role IN ('employee','manager','hr') AND ep.is_active_employee=1 AND u.deleted_at IS NULL ORDER BY u.first_name, u.username"
-        )
-      : await db.all(
-          "SELECT u.id, u.username, u.email, u.first_name, u.last_name, ep.team_name, ep.joining_date FROM accounts_user u JOIN accounts_employeeprofile ep ON ep.user_id=u.id WHERE ep.manager_id=? AND ep.is_active_employee=1 AND u.deleted_at IS NULL ORDER BY u.first_name, u.username",
-          [managerId]
-        );
+    // TA-AN01: Role-based employee visibility rules
+    // Manager & HR: see all active Employees and Managers (exclude HR, Admin, Superadmin for Manager; exclude Admin, Superadmin for HR)
+    // Admin & Superadmin: see all active Employees, Managers, and HR (exclude Admin, Superadmin)
+    let allowedRoles = [];
+    if (role === "manager" || role === "hr") {
+      allowedRoles = ["employee", "manager"];
+    } else if (role === "admin" || role === "superadmin") {
+      allowedRoles = ["employee", "manager", "hr"];
+    }
+
+    const todayStr = getYYYYMMDD(new Date());
+    const windowEndStr = todayStr;
+    const windowStartDate = new Date();
+    windowStartDate.setDate(windowStartDate.getDate() - (days - 1));
+    const windowStartStr = getYYYYMMDD(windowStartDate);
+
+    // TA-AN09: Site-level authorization and filtering
+    const siteScope = await siteService.getSiteScope(tenantId, { id: managerId, role }, siteFilter);
+
+    // TA-AN01: Single-company scope with workforce_user_tenant
+    const whereConditions = [
+      "u.deleted_at IS NULL",
+      "u.is_active = 1",
+      "ep.is_active_employee = 1",
+      `u.role IN (${allowedRoles.map(() => "?").join(",")})`,
+      "EXISTS (SELECT 1 FROM workforce_user_tenant wut WHERE wut.tenant_id = ? AND wut.user_id = u.id AND wut.is_active = 1)",
+    ];
+    const params = [...allowedRoles, tenantId];
+
+    if (siteScope) {
+      if (siteScope.unassigned) {
+        whereConditions.push(`NOT EXISTS (SELECT 1 FROM workforce_employee_site_assignment esa WHERE esa.tenant_id = ? AND esa.user_id = u.id AND esa.effective_from <= ? AND (esa.effective_to IS NULL OR esa.effective_to >= ?))`);
+        params.push(tenantId, windowEndStr, windowStartStr);
+      } else if (siteScope.siteIds) {
+        if (!siteScope.siteIds.length) {
+          whereConditions.push("1 = 0");
+        } else {
+          whereConditions.push(`EXISTS (SELECT 1 FROM workforce_employee_site_assignment esa WHERE esa.tenant_id = ? AND esa.user_id = u.id AND esa.site_id IN (${siteScope.siteIds.map(() => "?").join(",")}) AND esa.effective_from <= ? AND (esa.effective_to IS NULL OR esa.effective_to >= ?))`);
+          params.push(tenantId, ...siteScope.siteIds, windowEndStr, windowStartStr);
+        }
+      }
+    }
+
+    const members = await db.all(
+      `SELECT u.id, u.username, u.email, u.first_name, u.last_name, u.role, ep.team_name, ep.joining_date 
+       FROM accounts_user u 
+       JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
+       WHERE ${whereConditions.join(" AND ")} 
+       ORDER BY u.first_name, u.username`,
+      params
+    );
+
+    if (!members.length) {
+      return {
+        summary: {
+          period_days: days,
+          required_hours_per_day: 8,
+          team_members: 0,
+          present_today: 0,
+          on_leave_today: 0,
+          pending_review_today: 0,
+          absent_today: 0,
+          total_present_days: 0,
+          total_leave_days: 0,
+          total_work_hours: 0,
+          average_hours_per_member: 0,
+          average_hours_per_present_day: 0,
+          under_target_days: 0,
+          members_below_target: 0,
+          total_shortfall_hours: 0,
+        },
+        insights: {
+          highest_hours_member: null,
+          highest_leave_member: null,
+          most_under_target_member: null,
+        },
+        members: [],
+      };
+    }
+
     const memberIds = members.map((m) => m.id);
 
     const attendance = await attendanceRepository.getAttendanceInRange(memberIds, days);
     const leaves = await attendanceRepository.getLeavesInRange(memberIds, days);
 
+    // TA-AN04: Count actual pending approval items per member
+    const pendingAttendanceRows = await db.all(
+      `SELECT a.user_id, COUNT(*) as c 
+       FROM attendance_attendanceapproval aa 
+       JOIN attendance_attendance a ON a.id = aa.attendance_id 
+       WHERE a.user_id IN (${memberIds.map(() => "?").join(",")}) AND aa.status = 'pending' 
+       GROUP BY a.user_id`,
+      memberIds
+    );
+    const pendingAttendanceMap = new Map();
+    pendingAttendanceRows.forEach((r) => pendingAttendanceMap.set(Number(r.user_id), Number(r.c || 0)));
+
+    const pendingLeaveRows = await db.all(
+      `SELECT l.user_id, COUNT(*) as c 
+       FROM leave_leave l 
+       WHERE l.user_id IN (${memberIds.map(() => "?").join(",")}) AND l.status = 'pending' 
+       GROUP BY l.user_id`,
+      memberIds
+    );
+    const pendingLeaveMap = new Map();
+    pendingLeaveRows.forEach((r) => pendingLeaveMap.set(Number(r.user_id), Number(r.c || 0)));
+
+    const winStart = new Date(`${windowStartStr}T00:00:00Z`);
+    const winEnd = new Date(`${windowEndStr}T00:00:00Z`);
+
     const records = members.map((m) => {
       const att = attendance.filter((a) => Number(a.user_id) === Number(m.id));
       const lvs = leaves.filter((l) => Number(l.user_id) === Number(m.id));
-      const approvedDays = att.filter((a) => a.status === "approved").length;
-      const totalWorkHours = att.reduce((sum, a) => sum + toHours(a.punch_in_time, a.punch_out_time, a.status), 0);
-      const underTargetDays = att.filter((a) => a.status === "approved" && toHours(a.punch_in_time, a.punch_out_time, a.status) > 0 && toHours(a.punch_in_time, a.punch_out_time, a.status) < 8).length;
-      const shortfallHours = att.reduce((sum, a) => {
-        const h = toHours(a.punch_in_time, a.punch_out_time, a.status);
-        if (a.status === "approved" && h > 0 && h < 8) return sum + (8 - h);
+      const approvedAtt = att.filter((a) => a.status === "approved");
+      const approvedDays = approvedAtt.length;
+      const totalWorkHours = approvedAtt.reduce((sum, a) => sum + toHours(a.punch_in_time, a.punch_out_time, a.status), 0);
+
+      // TA-AN03: Only completed shifts (punch_out_time present) count as shortfall
+      const underTargetDays = approvedAtt.filter((a) => a.punch_out_time && toHours(a.punch_in_time, a.punch_out_time, a.status) > 0 && toHours(a.punch_in_time, a.punch_out_time, a.status) < 8).length;
+      const shortfallHours = approvedAtt.reduce((sum, a) => {
+        if (a.punch_out_time) {
+          const h = toHours(a.punch_in_time, a.punch_out_time, a.status);
+          if (h > 0 && h < 8) return sum + (8 - h);
+        }
         return sum;
       }, 0);
-      const leaveDays = lvs.reduce((sum, l) => {
-        const from = new Date(l.from_date);
-        const to = new Date(l.to_date);
-        return sum + Math.max(0, Math.floor((to - from) / (1000 * 60 * 60 * 24)) + 1);
-      }, 0);
+
+      // TA-AN05: Clamp leave days strictly within requested reporting window
+      const countedLeaveDates = new Set();
+      lvs.forEach((l) => {
+        if (l.status !== "approved") return;
+        const lvFrom = new Date(`${getYYYYMMDD(l.from_date)}T00:00:00Z`);
+        const lvTo = new Date(`${getYYYYMMDD(l.to_date)}T00:00:00Z`);
+
+        const cur = new Date(lvFrom > winStart ? lvFrom : winStart);
+        const end = new Date(lvTo < winEnd ? lvTo : winEnd);
+
+        while (cur <= end) {
+          countedLeaveDates.add(cur.toISOString().slice(0, 10));
+          cur.setUTCDate(cur.getUTCDate() + 1);
+        }
+      });
+      const leaveDays = countedLeaveDates.size;
+
+      // TA-AN02 & TA-AN05: Canonical today_status
+      const todayAtt = att.find((a) => getYYYYMMDD(a.work_date || a.date) === todayStr);
+      const hasApprovedLeaveToday = lvs.some((l) => {
+        const fromStr = getYYYYMMDD(l.from_date);
+        const toStr = getYYYYMMDD(l.to_date);
+        return l.status === "approved" && fromStr <= todayStr && toStr >= todayStr;
+      });
+
+      let todayStatus = "ABSENT";
+      let todayStatusCode = "A";
+
+      if (todayAtt) {
+        if (todayAtt.status === "approved") {
+          if (todayAtt.punch_out_time) {
+            todayStatus = "PRESENT";
+            todayStatusCode = "P";
+          } else {
+            todayStatus = "IN_PROGRESS";
+            todayStatusCode = "IP";
+          }
+        } else if (todayAtt.status === "pending") {
+          todayStatus = "PENDING_REVIEW";
+          todayStatusCode = "PR";
+        } else if (todayAtt.status === "rejected") {
+          todayStatus = "REJECTED";
+          todayStatusCode = "RJ";
+        } else if (todayAtt.status === "leave") {
+          todayStatus = "ON_LEAVE";
+          todayStatusCode = "L";
+        }
+      } else if (hasApprovedLeaveToday) {
+        todayStatus = "ON_LEAVE";
+        todayStatusCode = "L";
+      }
+
+      // TA-AN04: Count actual pending approval items
+      const pendingApprovalItems =
+        (pendingAttendanceMap.get(Number(m.id)) || 0) +
+        (pendingLeaveMap.get(Number(m.id)) || 0);
+
+      const fulfilledDays = approvedAtt.filter((a) => a.punch_out_time && toHours(a.punch_in_time, a.punch_out_time, a.status) >= 8).length;
+      const completionRate = approvedDays ? Number(((fulfilledDays / approvedDays) * 100).toFixed(1)) : 0;
 
       return {
         user_id: m.id,
         username: m.username,
         employee_name: fullName(m),
         email: m.email,
+        role: m.role,
         team_name: m.team_name,
         joining_date: m.joining_date,
-        today_status: "--",
+        today_status: todayStatus,
+        today_status_code: todayStatusCode,
         present_days: att.length,
         approved_days: approvedDays,
         pending_days: att.filter((a) => a.status === "pending").length,
@@ -868,12 +1264,12 @@ export const attendanceService = {
         leave_days: leaveDays,
         total_work_hours: Number(totalWorkHours.toFixed(2)),
         average_hours: approvedDays ? Number((totalWorkHours / approvedDays).toFixed(2)) : 0,
-        fulfilled_days: att.filter((a) => a.status === "approved" && toHours(a.punch_in_time, a.punch_out_time, a.status) >= 8).length,
+        fulfilled_days: fulfilledDays,
         under_target_days: underTargetDays,
         shortfall_hours: Number(shortfallHours.toFixed(2)),
-        completion_rate: approvedDays ? Number(((att.filter((a) => a.status === "approved" && toHours(a.punch_in_time, a.punch_out_time, a.status) >= 8).length / approvedDays) * 100).toFixed(1)) : 0,
-        pending_approval_items: 0,
-        last_attendance_date: att.length ? att.sort((a, b) => new Date(b.date) - new Date(a.date))[0].date : null,
+        completion_rate: completionRate,
+        pending_approval_items: pendingApprovalItems,
+        last_attendance_date: att.length ? att.sort((a, b) => new Date(b.date || b.work_date) - new Date(a.date || a.work_date))[0].date || att[0].work_date : null,
       };
     });
 
@@ -882,10 +1278,10 @@ export const attendanceService = {
         period_days: days,
         required_hours_per_day: 8,
         team_members: records.length,
-        present_today: 0,
-        on_leave_today: 0,
-        pending_review_today: 0,
-        absent_today: 0,
+        present_today: records.filter((r) => r.today_status === "PRESENT" || r.today_status === "IN_PROGRESS").length,
+        on_leave_today: records.filter((r) => r.today_status === "ON_LEAVE").length,
+        pending_review_today: records.filter((r) => r.today_status === "PENDING_REVIEW").length,
+        absent_today: records.filter((r) => r.today_status === "ABSENT").length,
         total_present_days: records.reduce((s, r) => s + r.present_days, 0),
         total_leave_days: records.reduce((s, r) => s + r.leave_days, 0),
         total_work_hours: Number(records.reduce((s, r) => s + r.total_work_hours, 0).toFixed(2)),
@@ -906,7 +1302,7 @@ export const attendanceService = {
     };
   },
 
-  async teamAttendance(managerId, queryMonth, queryEmployeeId, queryDetailStart, queryDetailEnd, role, queryPage = 1, queryLimit = 50, queryTeam = null) {
+  async teamAttendance(managerId, queryMonth, queryEmployeeId, queryDetailStart, queryDetailEnd, role, queryPage = 1, queryLimit = 50, queryTeam = null, tenantId = 1, siteFilter = null) {
     if (role !== "manager" && role !== "hr" && role !== "admin" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
@@ -915,18 +1311,23 @@ export const attendanceService = {
     const [y, m] = month.split("-").map(Number);
     const monthStart = new Date(y, m - 1, 1);
     const monthEnd = new Date(y, m, 0);
+    const lastDay = new Date(y, m, 0).getDate();
+    const monthStartStr = `${y}-${String(m).padStart(2, "0")}-01`;
+    const monthEndStr = `${y}-${String(m).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+    const siteScope = await siteService.getSiteScope(tenantId, { id: managerId, role }, siteFilter);
 
     const isGlobalViewer = role === "hr" || role === "admin" || role === "superadmin";
 
     // Build filter conditions
-    const whereConditions = ["u.deleted_at IS NULL", "ep.is_active_employee = 1"];
-    const params = [];
+    const whereConditions = ["u.deleted_at IS NULL", "u.is_active = 1", "EXISTS (SELECT 1 FROM workforce_user_tenant wut WHERE wut.tenant_id = ? AND wut.user_id = u.id AND wut.is_active = 1)"];
+    const params = [tenantId];
 
     if (!isGlobalViewer) {
+      whereConditions.push("ep.is_active_employee = 1");
       whereConditions.push("ep.manager_id = ?");
       params.push(managerId);
     } else {
-      whereConditions.push("u.role IN ('employee', 'manager', 'hr')");
+      whereConditions.push("(ep.user_id IS NULL OR ep.is_active_employee = 1)");
     }
 
     if (queryTeam) {
@@ -934,11 +1335,22 @@ export const attendanceService = {
       params.push(queryTeam);
     }
 
+    if (siteScope.unassigned) {
+      whereConditions.push(`NOT EXISTS (SELECT 1 FROM workforce_employee_site_assignment esa WHERE esa.tenant_id = ? AND esa.user_id = u.id AND esa.effective_from <= ? AND (esa.effective_to IS NULL OR esa.effective_to >= ?))`);
+      params.push(tenantId, monthEndStr, monthStartStr);
+    } else if (siteScope.siteIds) {
+      if (!siteScope.siteIds.length) whereConditions.push("1 = 0");
+      else {
+        whereConditions.push(`EXISTS (SELECT 1 FROM workforce_employee_site_assignment esa WHERE esa.tenant_id = ? AND esa.user_id = u.id AND esa.site_id IN (${siteScope.siteIds.map(() => "?").join(",")}) AND esa.effective_from <= ? AND (esa.effective_to IS NULL OR esa.effective_to >= ?))`);
+        params.push(tenantId, ...siteScope.siteIds, monthEndStr, monthStartStr);
+      }
+    }
+
     const whereClause = whereConditions.join(" AND ");
 
     // Count total matching members for pagination
     const countRow = await db.get(
-      `SELECT COUNT(*) as c FROM accounts_user u JOIN accounts_employeeprofile ep ON ep.user_id = u.id WHERE ${whereClause}`,
+      `SELECT COUNT(*) as c FROM accounts_user u LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id WHERE ${whereClause}`,
       params
     );
     const totalMembers = Number(countRow?.c || 0);
@@ -951,7 +1363,7 @@ export const attendanceService = {
 
     let memberQuery = `SELECT u.id, u.username, u.first_name, u.last_name, u.email, ep.team_name
        FROM accounts_user u 
-       JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
+       LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
        WHERE ${whereClause} 
        ORDER BY u.first_name, u.username`;
 
@@ -964,8 +1376,26 @@ export const attendanceService = {
     const members = await db.all(memberQuery, queryParams);
     const memberIds = members.map((x) => x.id);
 
-    const monthStartStr = monthStart.toISOString().slice(0, 10);
-    const monthEndStr = monthEnd.toISOString().slice(0, 10);
+    const assignmentRows = memberIds.length ? await db.all(
+      `SELECT user_id, site_id, effective_from, effective_to FROM workforce_employee_site_assignment
+       WHERE tenant_id = ? AND user_id IN (${memberIds.map(() => "?").join(",")})
+         AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?)
+       ORDER BY effective_from DESC, id DESC`,
+      [tenantId, ...memberIds, monthEndStr, monthStartStr]
+    ) : [];
+    const assignmentsByUser = new Map();
+    for (const assignment of assignmentRows) {
+      const key = Number(assignment.user_id);
+      const list = assignmentsByUser.get(key) || [];
+      list.push(assignment);
+      assignmentsByUser.set(key, list);
+    }
+    const holidayRows = await db.all(
+      `SELECT holiday_date, name, is_optional FROM workforce_company_holiday
+       WHERE tenant_id = ? AND holiday_date BETWEEN ? AND ?`,
+      [tenantId, monthStartStr, monthEndStr]
+    );
+    const holidayByDate = new Map(holidayRows.map((holiday) => [getYYYYMMDD(holiday.holiday_date), holiday]));
     const attendance = memberIds.length > 0
       ? await attendanceRepository.getAttendanceInMonth(memberIds, monthStartStr, monthEndStr)
       : [];
@@ -973,6 +1403,12 @@ export const attendanceService = {
     // O(M) Pre-indexing: group attendance by userId to eliminate O(N*M) nested filter
     const attendanceByUser = new Map();
     for (const a of attendance) {
+      if (siteScope.unassigned && a.site_id != null) continue;
+      if (siteScope.siteIds && a.site_id != null && !siteScope.siteIds.includes(Number(a.site_id))) continue;
+      if (a.site_id == null) {
+        const historicalSite = await siteService.getEmployeeSiteId(tenantId, a.user_id, getYYYYMMDD(a.work_date || a.date));
+        if (siteScope.unassigned ? historicalSite !== null : (siteScope.siteIds && !siteScope.siteIds.includes(historicalSite))) continue;
+      }
       const uid = Number(a.user_id);
       let list = attendanceByUser.get(uid);
       if (!list) {
@@ -983,304 +1419,430 @@ export const attendanceService = {
     }
 
     const registerDates = [];
-    for (let d = new Date(monthStart); d <= monthEnd; d.setDate(d.getDate() + 1)) {
+    for (let day = 1; day <= lastDay; day++) {
+      const d = new Date(y, m - 1, day);
       registerDates.push({
-        date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
-        day: d.getDate(),
+        date: `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+        day,
         weekday: d.toLocaleDateString("en-US", { weekday: "short" }),
         is_week_off: d.getDay() === 0
       });
     }
 
-    const registerRows = members.map((member) => {
-      const memberAttendance = attendanceByUser.get(Number(member.id)) || [];
-      
-      // Build a map of date -> attendance record, prioritizing approved > pending > rejected
-      const map = new Map();
-      memberAttendance.forEach((a) => {
-        const dateKey = getYYYYMMDD(a.date);
-        const existing = map.get(dateKey);
-        if (!existing) {
-          map.set(dateKey, a);
-        } else {
-          const statusPriority = { approved: 3, pending: 2, rejected: 1 };
-          const existingPriority = statusPriority[existing.status] || 0;
-          const currentPriority = statusPriority[a.status] || 0;
-          if (currentPriority > existingPriority) {
+      const todayD = new Date();
+      const todayStr = `${todayD.getFullYear()}-${String(todayD.getMonth() + 1).padStart(2, "0")}-${String(todayD.getDate()).padStart(2, "0")}`;
+
+      const registerRows = members.map((member) => {
+        const memberAttendance = attendanceByUser.get(Number(member.id)) || [];
+
+        // Build a map of date -> attendance record, prioritizing approved > pending > rejected
+        const map = new Map();
+        memberAttendance.forEach((a) => {
+          const dateKey = getYYYYMMDD(a.date);
+          const existing = map.get(dateKey);
+          if (!existing) {
             map.set(dateKey, a);
+          } else {
+            const statusPriority = { approved: 3, pending: 2, rejected: 1 };
+            const existingPriority = statusPriority[existing.status] || 0;
+            const currentPriority = statusPriority[a.status] || 0;
+            if (currentPriority > existingPriority) {
+              map.set(dateKey, a);
+            }
           }
-        }
-      });
+        });
 
-      let present = 0, leave = 0, pending = 0, absent = 0, rejected = 0, weekOff = 0, shortfall = 0, totalHours = 0;
-      const cells = registerDates.map((day) => {
-        const a = map.get(day.date);
-        let code = "A";
-        let wh = 0;
-        if (a) {
-          if (a.status === "approved" && !a.punch_out_time) code = "IP";
-          else if (a.status === "approved") code = "P";
-          else if (a.status === "pending") code = "PR";
-          else if (a.status === "rejected") code = "RJ";
-          else if (a.status === "leave") code = "L";
-          wh = toHours(a.punch_in_time, a.punch_out_time, a.status);
-        } else if (day.is_week_off) {
-          code = "WO";
-        }
+        let present = 0, leave = 0, pending = 0, absent = 0, rejected = 0, weekOff = 0, holidayCount = 0, shortfall = 0, totalHours = 0;
+        const cells = registerDates.map((day) => {
+          const assignmentForDay = (assignmentsByUser.get(Number(member.id)) || []).find((assignment) => {
+            const from = getYYYYMMDD(assignment.effective_from);
+            const to = assignment.effective_to ? getYYYYMMDD(assignment.effective_to) : "9999-12-31";
+            return from <= day.date && to >= day.date;
+          });
+          const assignedSiteForDay = assignmentForDay ? Number(assignmentForDay.site_id) : null;
+          const withinSelectedSite = siteScope.unassigned
+            ? assignedSiteForDay === null
+            : siteScope.siteIds
+              ? siteScope.siteIds.includes(assignedSiteForDay)
+              : true;
+          if (!withinSelectedSite) return { date: day.date, code: "--", work_hours: 0, punch_in: "--", punch_out: "--", status: null, holiday_name: null, holiday_optional: null, punch_in_photo: null, punch_out_photo: null };
+          const a = map.get(day.date);
+          const holiday = holidayByDate.get(day.date) || null;
+          let code = "A";
+          let wh = 0;
+          if (a) {
+            if (a.status === "approved" && !a.punch_out_time) code = "IP";
+            else if (a.status === "approved") code = "P";
+            else if (a.status === "pending") code = "PR";
+            else if (a.status === "rejected") code = "RJ";
+            else if (a.status === "leave") code = "L";
+            wh = toHours(a.punch_in_time, a.punch_out_time, a.status);
+          } else if (holiday) {
+            code = "H";
+          } else if (day.is_week_off) {
+            code = "WO";
+          }
 
-        if (code === "P") present++;
-        else if (code === "L") leave++;
-        else if (code === "PR" || code === "IP") pending++;
-        else if (code === "A") absent++;
-        else if (code === "RJ") rejected++;
-        else if (code === "WO") weekOff++;
+          if (code === "P") present++;
+          else if (code === "L") leave++;
+          else if (code === "PR" || code === "IP") pending++;
+          else if (code === "A") absent++;
+          else if (code === "RJ") rejected++;
+          else if (code === "WO") weekOff++;
+          else if (code === "H") holidayCount++;
 
-        if (a && a.status === "approved" && a.punch_out_time) {
-          totalHours += wh;
-          if (wh < 8) shortfall++;
-        }
+          if (a && a.status === "approved" && a.punch_out_time) {
+            totalHours += wh;
+            if (wh < 8) shortfall++;
+          }
+
+          return {
+            date: day.date,
+            code,
+            work_hours: wh,
+            punch_in: a?.punch_in_time ? new Date(a.punch_in_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "--",
+            punch_out: a?.punch_out_time ? new Date(a.punch_out_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "--",
+            status: a?.status || null,
+            holiday_name: code === "H" ? holiday.name : null,
+            holiday_optional: code === "H" ? Boolean(holiday.is_optional) : null,
+            punch_in_photo: storageService.getUrl(a?.punch_in_photo),
+            punch_out_photo: storageService.getUrl(a?.punch_out_photo),
+          };
+        });
+
+        const todayCell = cells.find((c) => c.date === todayStr);
+        const todayStatus = todayCell && todayCell.code !== "--" ? todayCell.code : "--";
 
         return {
-          date: day.date,
-          code,
-          work_hours: wh,
-          punch_in: a?.punch_in_time ? new Date(a.punch_in_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "--",
-          punch_out: a?.punch_out_time ? new Date(a.punch_out_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "--",
-          status: a?.status || null,
-          punch_in_photo: storageService.getUrl(a?.punch_in_photo),
-          punch_out_photo: storageService.getUrl(a?.punch_out_photo),
+          user_id: member.id,
+          username: member.username,
+          employee_name: fullName(member),
+          employee_code: member.username,
+          today_status: todayStatus,
+          pending_approval_items: 0,
+          present_marks: present,
+          leave_marks: leave,
+          pending_marks: pending,
+          absent_marks: absent,
+          rejected_marks: rejected,
+          week_off_marks: weekOff,
+          holiday_marks: holidayCount,
+          shortfall_days: shortfall,
+          total_work_hours: Number(totalHours.toFixed(2)),
+          cells,
         };
       });
 
-      return {
-        user_id: member.id,
-        username: member.username,
-        employee_name: fullName(member),
-        employee_code: member.username,
-        today_status: "--",
-        pending_approval_items: 0,
-        present_marks: present,
-        leave_marks: leave,
-        pending_marks: pending,
-        absent_marks: absent,
-        rejected_marks: rejected,
-        week_off_marks: weekOff,
-        shortfall_days: shortfall,
-        total_work_hours: Number(totalHours.toFixed(2)),
-        cells,
-      };
-    });
+      let selectedEmployeeDetail = null;
+      if (queryEmployeeId) {
+        const detailStart = queryDetailStart || monthStartStr;
+        const detailEnd = queryDetailEnd || monthEndStr;
 
-    let selectedEmployeeDetail = null;
-    if (queryEmployeeId) {
-      const detailStart = queryDetailStart || monthStartStr;
-      const detailEnd = queryDetailEnd || monthEndStr;
-
-      // IDOR Scope Check: Managers can only view details of their direct reportees
-      if (!isGlobalViewer) {
-        const empProfile = await accountsRepository.findProfileByUserId(queryEmployeeId);
-        if (!empProfile || Number(empProfile.manager_id) !== Number(managerId)) {
-          throw new AppError("You do not have permission to view attendance for this employee", 403);
+        // IDOR Scope Check: Managers can only view details of their direct reportees
+        if (!isGlobalViewer) {
+          const empProfile = await accountsRepository.findProfileByUserId(queryEmployeeId);
+          if (!empProfile || Number(empProfile.manager_id) !== Number(managerId)) {
+            throw new AppError("You do not have permission to view attendance for this employee", 403);
+          }
         }
-      }
-
-      const emp = await accountsRepository.findById(queryEmployeeId);
-      if (emp) {
-        const empAttendance = await attendanceRepository.getAttendanceByEmployeeIdAndRange(queryEmployeeId, detailStart, detailEnd);
-        const empLeaves = await attendanceRepository.getApprovedLeavesInMonthRange(queryEmployeeId, detailStart, detailEnd);
-
-        const approvedAtt = empAttendance.filter(a => a.status === 'approved');
-        const presentDays = approvedAtt.length;
-        const totalWorkHours = approvedAtt.reduce((sum, a) => sum + toHours(a.punch_in_time, a.punch_out_time, a.status), 0);
-        const shortfallDays = approvedAtt.filter(a => toHours(a.punch_in_time, a.punch_out_time, a.status) < 8).length;
-
-        let leaveDays = 0;
-        empLeaves.forEach(lv => {
-          const start = new Date(Math.max(new Date(lv.from_date), new Date(detailStart)));
-          const end = new Date(Math.min(new Date(lv.to_date), new Date(detailEnd)));
-          const diff = Math.floor((end - start) / (1000 * 60 * 60 * 24)) + 1;
-          if (diff > 0) leaveDays += diff;
-        });
-
-        const startD = new Date(detailStart);
-        const endD = new Date(detailEnd);
-        const monthlyMap = {};
-
-        for (let d = new Date(startD); d <= endD; d.setMonth(d.getMonth() + 1)) {
-          const key = d.toISOString().slice(0, 7);
-          monthlyMap[key] = {
-            month: d.toLocaleDateString("en-US", { month: "long", year: "numeric" }),
-            present_days: 0,
-            leave_days: 0,
-            total_work_hours: 0,
-            shortfall_days: 0
-          };
+        if (!memberIds.some((memberId) => Number(memberId) === Number(queryEmployeeId))) {
+          throw new AppError("You do not have permission to view attendance for this employee in the selected site", 403);
         }
 
-        approvedAtt.forEach(a => {
-          const key = getYYYYMM(a.date);
-          if (monthlyMap[key]) {
-            monthlyMap[key].present_days += 1;
-            const wh = toHours(a.punch_in_time, a.punch_out_time, a.status);
-            monthlyMap[key].total_work_hours += wh;
-            if (wh < 8) monthlyMap[key].shortfall_days += 1;
+        const emp = await accountsRepository.findById(queryEmployeeId);
+        if (emp) {
+          let empAttendance = await attendanceRepository.getAttendanceByEmployeeIdAndRange(queryEmployeeId, detailStart, detailEnd);
+          empAttendance = await Promise.all(empAttendance.map(async (record) => {
+            const recordSite = record.site_id == null
+              ? await siteService.getEmployeeSiteId(tenantId, queryEmployeeId, getYYYYMMDD(record.work_date || record.date))
+              : Number(record.site_id);
+            return siteScope.unassigned ? recordSite === null ? record : null
+              : (siteScope.siteIds && !siteScope.siteIds.includes(recordSite)) ? null : record;
+          }));
+          empAttendance = empAttendance.filter(Boolean);
+          let empLeaves = await attendanceRepository.getApprovedLeavesInMonthRange(queryEmployeeId, detailStart, detailEnd);
+          empLeaves = await Promise.all(empLeaves.map(async (leave) => {
+            const recordSite = leave.site_id == null
+              ? await siteService.getEmployeeSiteId(tenantId, queryEmployeeId, getYYYYMMDD(leave.created_at))
+              : Number(leave.site_id);
+            return siteScope.unassigned ? recordSite === null ? leave : null
+              : (siteScope.siteIds && !siteScope.siteIds.includes(recordSite)) ? null : leave;
+          }));
+          empLeaves = empLeaves.filter(Boolean);
+
+          const approvedAtt = empAttendance.filter(a => a.status === 'approved');
+          const presentDays = approvedAtt.length;
+          const totalWorkHours = approvedAtt.reduce((sum, a) => sum + toHours(a.punch_in_time, a.punch_out_time, a.status), 0);
+          // BUG-TA02: Only count completed shifts (punch_out_time present) as shortfall days
+          const shortfallDays = approvedAtt.filter(a => a.punch_out_time && toHours(a.punch_in_time, a.punch_out_time, a.status) < 8).length;
+
+          const [sY, sM] = detailStart.split("-").map(Number);
+          const [eY, eM] = detailEnd.split("-").map(Number);
+          const monthlyMap = {};
+
+          let curY = sY;
+          let curM = sM;
+          while (curY < eY || (curY === eY && curM <= eM)) {
+              const key = `${curY}-${String(curM).padStart(2, "0")}`;
+              const d = new Date(curY, curM - 1, 1);
+              monthlyMap[key] = {
+                month: d.toLocaleDateString("en-US", { month: "long", year: "numeric" }),
+                present_days: 0,
+                leave_days: 0,
+                total_work_hours: 0,
+                shortfall_days: 0
+              };
+              curM++;
+              if (curM > 12) {
+                curM = 1;
+                curY++;
+              }
+            }
+
+            // BUG-TA01: Distribute approved leaves accurately into monthlyMap and avoid double counting
+            const countedLeaveDates = new Set();
+            empLeaves.forEach(lv => {
+              if (lv.status !== "approved") return;
+              const fromStr = getYYYYMMDD(lv.from_date);
+              const toStr = getYYYYMMDD(lv.to_date);
+              const startStr = fromStr > detailStart ? fromStr : detailStart;
+              const endStr = toStr < detailEnd ? toStr : detailEnd;
+              if (startStr <= endStr) {
+                const [startYear, startMonth, startDay] = startStr.split("-").map(Number);
+                const [endYear, endMonth, endDay] = endStr.split("-").map(Number);
+                const cur = new Date(startYear, startMonth - 1, startDay);
+                const endDate = new Date(endYear, endMonth - 1, endDay);
+
+                while (cur <= endDate) {
+                  const y = cur.getFullYear();
+                  const m = cur.getMonth() + 1;
+                  const d = cur.getDate();
+                  const dateStr = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+                  if (!countedLeaveDates.has(dateStr)) {
+                    countedLeaveDates.add(dateStr);
+                    const monthKey = `${y}-${String(m).padStart(2, "0")}`;
+                    if (monthlyMap[monthKey]) {
+                      monthlyMap[monthKey].leave_days += 1;
+                    }
+                  }
+                  cur.setDate(cur.getDate() + 1);
+                }
+              }
+            });
+            const leaveDays = countedLeaveDates.size;
+
+            approvedAtt.forEach(a => {
+              const key = getYYYYMM(a.date);
+              if (monthlyMap[key]) {
+                monthlyMap[key].present_days += 1;
+                const wh = toHours(a.punch_in_time, a.punch_out_time, a.status);
+                monthlyMap[key].total_work_hours += wh;
+                // BUG-TA02: Only completed shifts with punch_out_time count as shortfall in monthly breakdown
+                if (a.punch_out_time && wh < 8) monthlyMap[key].shortfall_days += 1;
+              }
+            });
+
+            Object.keys(monthlyMap).forEach(key => {
+              monthlyMap[key].total_work_hours = Number(monthlyMap[key].total_work_hours.toFixed(2));
+            });
+
+            const history = empAttendance.map(a => {
+              return {
+                date: getYYYYMMDD(a.date),
+                work_date: a.work_date || getYYYYMMDD(a.date),
+                shift_version_id: a.shift_version_id || null,
+                roster_entry_id: a.roster_entry_id || null,
+                is_unscheduled: Boolean(a.is_unscheduled),
+                resolution_source: a.resolution_source || null,
+                punctuality_status: a.punctuality_status || null,
+                late_minutes: Number(a.late_minutes || 0),
+                early_departure_minutes: Number(a.early_departure_minutes || 0),
+                overtime_minutes: Number(a.overtime_minutes || 0),
+                status: a.status,
+                punch_in: a.punch_in_time ? new Date(a.punch_in_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) : "--",
+                punch_out: a.punch_out_time ? new Date(a.punch_out_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) : "--",
+                work_hours: toHours(a.punch_in_time, a.punch_out_time, a.status),
+                // BUG-TA02: Only completed approved shifts with punch_out_time count as under_target
+                under_target: a.status === "approved" && Boolean(a.punch_out_time) && toHours(a.punch_in_time, a.punch_out_time, a.status) > 0 && toHours(a.punch_in_time, a.punch_out_time, a.status) < 8,
+                punch_in_status: a.punch_in_status,
+                punch_out_status: a.punch_out_status,
+                punch_in_photo: storageService.getUrl(a.punch_in_photo),
+                punch_out_photo: storageService.getUrl(a.punch_out_photo),
+              };
+            });
+
+            selectedEmployeeDetail = {
+              employee_name: fullName(emp),
+              username: emp.username,
+              range_start: detailStart,
+              range_end: detailEnd,
+              summary: {
+                present_days: presentDays,
+                leave_days: leaveDays,
+                total_work_hours: Number(totalWorkHours.toFixed(2)),
+                shortfall_days: shortfallDays,
+              },
+              monthly_breakdown: Object.values(monthlyMap),
+              history: history.sort((a, b) => new Date(b.date) - new Date(a.date)),
+            };
+          }
+        }
+
+        // Compute summary totals for all members
+        let totalPresentMarks = 0;
+        let totalLeaveMarks = 0;
+        let totalPendingMarks = 0;
+        let totalAbsentMarks = 0;
+        let totalShortfallDays = 0;
+        let totalWorkHours = 0;
+        let presentTodayCount = 0;
+
+        registerRows.forEach((row) => {
+          totalPresentMarks += row.present_marks || 0;
+          totalLeaveMarks += row.leave_marks || 0;
+          totalPendingMarks += row.pending_marks || 0;
+          totalAbsentMarks += row.absent_marks || 0;
+          totalShortfallDays += row.shortfall_days || 0;
+          totalWorkHours += row.total_work_hours || 0;
+
+          const todayCell = row.cells.find(c => c.date === todayStr);
+          if (todayCell && (todayCell.code === "P" || todayCell.code === "IP")) {
+            presentTodayCount++;
           }
         });
 
-        Object.keys(monthlyMap).forEach(key => {
-          monthlyMap[key].total_work_hours = Number(monthlyMap[key].total_work_hours.toFixed(2));
-        });
+        return {
+          summary: {
+            month,
+            month_label: new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" }),
+            team_members: members.length,
+            present_today: presentTodayCount,
+            total_present_marks: totalPresentMarks,
+            total_leave_marks: totalLeaveMarks,
+            total_pending_marks: totalPendingMarks,
+            total_absent_marks: totalAbsentMarks,
+            total_shortfall_days: totalShortfallDays,
+            total_work_hours: Number(totalWorkHours.toFixed(2)),
+          },
+          employees: members.map(m => ({
+            user_id: m.id,
+            employee_name: fullName(m),
+            username: m.username
+          })),
+          register_dates: registerDates,
+          register_rows: registerRows,
+          selected_employee_detail: selectedEmployeeDetail,
+          pagination: {
+            page: isAll ? 1 : pageNum,
+            limit: isAll ? totalMembers : limitNum,
+            total: totalMembers,
+            total_pages: isAll ? 1 : Math.ceil(totalMembers / limitNum),
+          },
+        };
+      },
 
-        const history = empAttendance.map(a => {
+  async attendanceStatusSummary(userId, fromDate) {
+        const allRows = await attendanceRepository.getAttendanceRecordsSince(userId, fromDate);
+        const rows = allRows.filter((r) => r.status !== "rejected");
+        let totalHours = 0;
+        const daily = rows.map((att) => {
+          const punchInIso = dbTimeToIso(att.punch_in_time);
+          const punchOutIso = dbTimeToIso(att.punch_out_time);
+          const workHours = toHours(punchInIso, punchOutIso, att.status);
+          totalHours += workHours;
           return {
-            date: getYYYYMMDD(a.date),
-            status: a.status,
-            punch_in: a.punch_in_time ? new Date(a.punch_in_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) : "--",
-            punch_out: a.punch_out_time ? new Date(a.punch_out_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) : "--",
-            work_hours: toHours(a.punch_in_time, a.punch_out_time, a.status),
-            punch_in_status: a.punch_in_status,
-            punch_out_status: a.punch_out_status,
-            punch_in_photo: storageService.getUrl(a.punch_in_photo),
-            punch_out_photo: storageService.getUrl(a.punch_out_photo),
+            date: att.date,
+            punch_in: att.punch_in_status === "pending"
+              ? "Pending"
+              : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : null),
+            punch_out: att.punch_out_status === "pending"
+              ? "Pending"
+              : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : (att.punch_in_time ? "Pending" : null)),
+            work_hours: workHours,
+            status: att.status,
           };
         });
 
-        selectedEmployeeDetail = {
-          employee_name: fullName(emp),
-          username: emp.username,
-          range_start: detailStart,
-          range_end: detailEnd,
-          summary: {
-            present_days: presentDays,
-            leave_days: leaveDays,
-            total_work_hours: Number(totalWorkHours.toFixed(2)),
-            shortfall_days: shortfallDays,
-          },
-          monthly_breakdown: Object.values(monthlyMap),
-          history: history.sort((a, b) => new Date(b.date) - new Date(a.date)),
-        };
-      }
-    }
-
-    // Compute summary totals for all members
-    let totalPresentMarks = 0;
-    let totalLeaveMarks = 0;
-    let totalPendingMarks = 0;
-    let totalAbsentMarks = 0;
-    let totalShortfallDays = 0;
-    let totalWorkHours = 0;
-    let presentTodayCount = 0;
-
-    const todayStr = new Date().toISOString().slice(0, 10);
-
-    registerRows.forEach((row) => {
-      totalPresentMarks += row.present_marks || 0;
-      totalLeaveMarks += row.leave_marks || 0;
-      totalPendingMarks += row.pending_marks || 0;
-      totalAbsentMarks += row.absent_marks || 0;
-      totalShortfallDays += row.shortfall_days || 0;
-      totalWorkHours += row.total_work_hours || 0;
-
-      const todayCell = row.cells.find(c => c.date === todayStr);
-      if (todayCell && (todayCell.code === "P" || todayCell.code === "IP")) {
-        presentTodayCount++;
-      }
-    });
-
-    return {
-      summary: {
-        month,
-        month_label: monthStart.toLocaleDateString("en-US", { month: "long", year: "numeric" }),
-        team_members: members.length,
-        present_today: presentTodayCount,
-        total_present_marks: totalPresentMarks,
-        total_leave_marks: totalLeaveMarks,
-        total_pending_marks: totalPendingMarks,
-        total_absent_marks: totalAbsentMarks,
-        total_shortfall_days: totalShortfallDays,
-        total_work_hours: Number(totalWorkHours.toFixed(2)),
+        return { rows, totalHours: Number(totalHours.toFixed(2)), daily };
       },
-      employees: members.map(m => ({
-        user_id: m.id,
-        employee_name: fullName(m),
-        username: m.username
-      })),
-      register_dates: registerDates,
-      register_rows: registerRows,
-      selected_employee_detail: selectedEmployeeDetail,
-      pagination: {
-        page: isAll ? 1 : pageNum,
-        limit: isAll ? totalMembers : limitNum,
-        total: totalMembers,
-        total_pages: isAll ? 1 : Math.ceil(totalMembers / limitNum),
-      },
-    };
-  },
-
-  async attendanceStatusSummary(userId, fromDate) {
-    const allRows = await attendanceRepository.getAttendanceRecordsSince(userId, fromDate);
-    const rows = allRows.filter((r) => r.status !== "rejected");
-    let totalHours = 0;
-    const daily = rows.map((att) => {
-      const punchInIso = dbTimeToIso(att.punch_in_time);
-      const punchOutIso = dbTimeToIso(att.punch_out_time);
-      const workHours = toHours(punchInIso, punchOutIso, att.status);
-      totalHours += workHours;
-      return {
-        date: att.date,
-        punch_in: att.punch_in_status === "pending"
-          ? "Pending"
-          : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : null),
-        punch_out: att.punch_out_status === "pending"
-          ? "Pending"
-          : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : (att.punch_in_time ? "Pending" : null)),
-        work_hours: workHours,
-        status: att.status,
-      };
-    });
-
-    return { rows, totalHours: Number(totalHours.toFixed(2)), daily };
-  },
 
   async getHistory(userId, query = {}) {
-    const { page, limit, offset } = parsePagination(query, 50, 100);
-    const countRow = await db.get(
-      "SELECT COUNT(*) as c FROM attendance_attendance WHERE user_id=? AND status <> 'rejected'",
-      [userId]
-    );
-    const total = Number(countRow?.c || 0);
+    const defaultLimit = (query.start_date && query.end_date) ? 500 : 50;
+    const { page, limit, offset } = parsePagination(query, defaultLimit, 500);
 
-    const rows = await db.all(
-      `SELECT * FROM attendance_attendance 
-       WHERE user_id=? AND status <> 'rejected' 
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (query.start_date && !dateRegex.test(query.start_date)) {
+          throw new AppError("Invalid start_date format (expected YYYY-MM-DD)", 400);
+        }
+        if (query.end_date && !dateRegex.test(query.end_date)) {
+          throw new AppError("Invalid end_date format (expected YYYY-MM-DD)", 400);
+        }
+        if (query.start_date && query.end_date && query.start_date > query.end_date) {
+          throw new AppError("start_date cannot be after end_date", 400);
+        }
+
+        const whereConditions = ["user_id = ?"];
+        const params = [userId];
+
+        if (query.start_date && query.end_date) {
+          whereConditions.push("date BETWEEN ? AND ?");
+          params.push(query.start_date, query.end_date);
+        } else if (query.start_date) {
+          whereConditions.push("date >= ?");
+          params.push(query.start_date);
+        } else if (query.end_date) {
+          whereConditions.push("date <= ?");
+          params.push(query.end_date);
+        }
+
+        const whereClause = whereConditions.join(" AND ");
+
+        const countRow = await db.get(
+          `SELECT COUNT(*) as c FROM attendance_attendance WHERE ${whereClause}`,
+          params
+        );
+        const total = Number(countRow?.c || 0);
+
+        const rows = await db.all(
+          `SELECT * FROM attendance_attendance 
+       WHERE ${whereClause} 
        ORDER BY date DESC, punch_in_time DESC 
        LIMIT ? OFFSET ?`,
-      [userId, limit, offset]
-    );
+          [...params, limit, offset]
+        );
 
-    const daily = rows.map((att) => {
-      const punchInIso = dbTimeToIso(att.punch_in_time);
-      const punchOutIso = dbTimeToIso(att.punch_out_time);
-      const workHours = toHours(punchInIso, punchOutIso, att.status);
-      return {
-        id: att.id,
-        date: att.date,
-        punch_in: att.punch_in_status === "pending"
-          ? "Pending"
-          : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : null),
-        punch_out: att.punch_out_status === "pending"
-          ? "Pending"
-          : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : (att.punch_in_time ? "Pending" : null)),
-        work_hours: workHours,
-        status: att.status,
-        punch_in_outside: Boolean(att.punch_in_outside),
-        punch_out_outside: Boolean(att.punch_out_outside),
-        punch_in_photo: storageService.getUrl(att.punch_in_photo),
-        punch_out_photo: storageService.getUrl(att.punch_out_photo),
-      };
-    });
+        const daily = rows.map((att) => {
+          const punchInIso = dbTimeToIso(att.punch_in_time);
+          const punchOutIso = dbTimeToIso(att.punch_out_time);
+          const workHours = toHours(punchInIso, punchOutIso, att.status);
+          return {
+            id: att.id,
+            date: att.date,
+            work_date: att.work_date || att.date,
+            shift_version_id: att.shift_version_id || null,
+            roster_entry_id: att.roster_entry_id || null,
+            is_unscheduled: Boolean(att.is_unscheduled),
+            resolution_source: att.resolution_source || null,
+            punctuality_status: att.punctuality_status || null,
+            late_minutes: Number(att.late_minutes || 0),
+            early_departure_minutes: Number(att.early_departure_minutes || 0),
+            overtime_minutes: Number(att.overtime_minutes || 0),
+            punch_in: att.punch_in_status === "pending"
+              ? "Pending"
+              : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : null),
+            punch_out: att.punch_out_status === "pending"
+              ? "Pending"
+              : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : (att.punch_in_time && att.status === "pending" ? "Pending" : null)),
+            work_hours: workHours,
+            status: att.status,
+            punch_in_outside: Boolean(att.punch_in_outside),
+            punch_out_outside: Boolean(att.punch_out_outside),
+            punch_in_photo: storageService.getUrl(att.punch_in_photo),
+            punch_out_photo: storageService.getUrl(att.punch_out_photo),
+          };
+        });
 
-    return formatPaginationResponse(daily, total, page, limit, { records: daily });
+return formatPaginationResponse(daily, total, page, limit, { records: daily });
   }
 };
 

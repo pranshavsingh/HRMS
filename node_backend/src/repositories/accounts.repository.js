@@ -166,6 +166,14 @@ async function ensureAccountsSchema() {
     // Suppress error
   }
   try {
+    const columns = await db.all("SHOW COLUMNS FROM accounts_employeeprofile LIKE 'profile_picture'");
+    if (columns.length === 0) {
+      await db.run("ALTER TABLE accounts_employeeprofile ADD COLUMN profile_picture VARCHAR(500) NULL");
+    }
+  } catch (err) {
+    // Suppress error
+  }
+  try {
     await db.run(`
       CREATE TABLE IF NOT EXISTS accounts_employeelocation (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -290,10 +298,27 @@ export const accountsRepository = {
     );
   },
 
-  async findEmployeesPaged({ limit = 50, offset = 0, role = null, team = null, search = "", status = null } = {}, tx = null) {
-    await ensureAccountsSchema();
-    const whereConditions = ["u.deleted_at IS NULL", "u.role IN ('employee','manager','hr','admin','superadmin')"];
-    const params = [];
+  _buildEmployeeWhere({
+    tenantId = 1,
+    role = null,
+    team = null,
+    search = "",
+    status = null,
+    siteScope = { siteIds: null, unassigned: false },
+    managerId = null,
+    workDate = new Date().toISOString().slice(0, 10)
+  }) {
+    const whereConditions = [
+      "u.deleted_at IS NULL",
+      "u.role IN ('employee','manager','hr','admin','superadmin')",
+      "wut.tenant_id = ?"
+    ];
+    const params = [tenantId];
+
+    if (managerId) {
+      whereConditions.push("ep.manager_id = ?");
+      params.push(managerId);
+    }
 
     if (role && role !== "all") {
       whereConditions.push("u.role = ?");
@@ -301,84 +326,285 @@ export const accountsRepository = {
     }
 
     if (team && team !== "all") {
-      whereConditions.push("ep.team_name = ?");
+      whereConditions.push("COALESCE(ep.team_name, m_ep.team_name) = ?");
       params.push(team);
     }
 
     if (status === "active") {
-      whereConditions.push("u.is_active = 1");
+      whereConditions.push("u.is_active = 1 AND (ep.is_active_employee IS NULL OR ep.is_active_employee = 1) AND wut.is_active = 1");
     } else if (status === "inactive") {
-      whereConditions.push("u.is_active = 0");
+      whereConditions.push("(u.is_active = 0 OR ep.is_active_employee = 0 OR wut.is_active = 0)");
+    }
+
+    if (siteScope) {
+      if (siteScope.unassigned) {
+        whereConditions.push(`NOT EXISTS (
+          SELECT 1 FROM workforce_employee_site_assignment esa
+          WHERE esa.tenant_id = ? AND esa.user_id = u.id AND esa.effective_from <= ?
+            AND (esa.effective_to IS NULL OR esa.effective_to >= ?)
+        )`);
+        params.push(tenantId, workDate, workDate);
+      } else if (Array.isArray(siteScope.siteIds)) {
+        if (siteScope.siteIds.length === 0) {
+          whereConditions.push("1 = 0");
+        } else {
+          const sitePlaceholders = siteScope.siteIds.map(() => "?").join(",");
+          whereConditions.push(`EXISTS (
+            SELECT 1 FROM workforce_employee_site_assignment esa
+            WHERE esa.tenant_id = ? AND esa.user_id = u.id AND esa.site_id IN (${sitePlaceholders})
+              AND esa.effective_from <= ?
+              AND (esa.effective_to IS NULL OR esa.effective_to >= ?)
+          )`);
+          params.push(tenantId, ...siteScope.siteIds, workDate, workDate);
+        }
+      }
     }
 
     if (search && search.trim()) {
-      const term = `%${search.trim().toLowerCase()}%`;
-      whereConditions.push("(LOWER(u.username) LIKE ? OR LOWER(u.first_name) LIKE ? OR LOWER(u.last_name) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(ep.team_name) LIKE ?)");
-      params.push(term, term, term, term, term);
+      const trimmedSearch = search.trim().toLowerCase();
+      const term = `%${trimmedSearch}%`;
+      const words = trimmedSearch.split(/\s+/).filter(Boolean);
+
+      if (words.length > 1) {
+        const w1 = `%${words[0]}%`;
+        const w2 = `%${words[words.length - 1]}%`;
+        whereConditions.push(`(
+          LOWER(u.username) LIKE ? OR
+          LOWER(u.first_name) LIKE ? OR
+          LOWER(u.last_name) LIKE ? OR
+          LOWER(u.email) LIKE ? OR
+          LOWER(COALESCE(ep.team_name, m_ep.team_name)) LIKE ? OR
+          (LOWER(u.first_name) LIKE ? AND LOWER(u.last_name) LIKE ?) OR
+          LOWER(m.username) LIKE ? OR
+          LOWER(m.first_name) LIKE ? OR
+          LOWER(m.last_name) LIKE ? OR
+          (LOWER(m.first_name) LIKE ? AND LOWER(m.last_name) LIKE ?)
+        )`);
+        params.push(term, term, term, term, term, w1, w2, term, term, term, w1, w2);
+      } else {
+        whereConditions.push(`(
+          LOWER(u.username) LIKE ? OR
+          LOWER(u.first_name) LIKE ? OR
+          LOWER(u.last_name) LIKE ? OR
+          LOWER(u.email) LIKE ? OR
+          LOWER(COALESCE(ep.team_name, m_ep.team_name)) LIKE ? OR
+          LOWER(m.username) LIKE ? OR
+          LOWER(m.first_name) LIKE ? OR
+          LOWER(m.last_name) LIKE ?
+        )`);
+        params.push(term, term, term, term, term, term, term, term);
+      }
     }
 
-    const whereClause = whereConditions.join(" AND ");
+    return {
+      whereClause: whereConditions.join(" AND "),
+      params
+    };
+  },
+
+  async findEmployeesPaged({
+    tenantId = 1,
+    limit = 50,
+    offset = 0,
+    role = null,
+    team = null,
+    search = "",
+    status = null,
+    siteScope = { siteIds: null, unassigned: false },
+    managerId = null,
+    workDate = new Date().toISOString().slice(0, 10)
+  } = {}, tx = null) {
+    await ensureAccountsSchema();
+    const { whereClause, params } = this._buildEmployeeWhere({
+      tenantId,
+      role,
+      team,
+      search,
+      status,
+      siteScope,
+      managerId,
+      workDate
+    });
+
+    const selectParams = [tenantId, workDate, workDate, ...params, limit, offset];
 
     const sql = `
       SELECT 
         u.id, u.username, u.first_name, u.last_name, u.email, u.role, u.is_active, u.is_staff, u.is_superuser, u.date_joined,
-        ep.manager_id, ep.team_name, ep.joining_date, ep.leave_allotted, ep.is_active_employee,
-        ep.latitude, ep.longitude, ep.allowed_radius, ep.designation,
-        m.username as manager_username, m.first_name as manager_first_name, m.last_name as manager_last_name
+        wut.is_active as tenant_is_active,
+        ep.manager_id, COALESCE(ep.team_name, m_ep.team_name) as team_name, ep.joining_date, ep.leave_allotted, ep.is_active_employee,
+        ep.latitude, ep.longitude, ep.allowed_radius, ep.designation, ep.profile_picture,
+        d.file as photo_copy_file,
+        m.username as manager_username, m.first_name as manager_first_name, m.last_name as manager_last_name,
+        (
+          SELECT esa.site_id FROM workforce_employee_site_assignment esa
+          WHERE esa.tenant_id = ? AND esa.user_id = u.id AND esa.effective_from <= ?
+            AND (esa.effective_to IS NULL OR esa.effective_to >= ?)
+          ORDER BY esa.effective_from DESC, esa.id DESC LIMIT 1
+        ) as site_id
       FROM accounts_user u
+      JOIN workforce_user_tenant wut ON wut.user_id = u.id
       LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id
+      LEFT JOIN accounts_employeeprofile m_ep ON m_ep.user_id = ep.manager_id
+      LEFT JOIN (
+        SELECT user_id, MAX(file) as file 
+        FROM accounts_employeedocument 
+        WHERE LOWER(title) = 'photo copy' OR LOWER(title) = 'photocopy'
+        GROUP BY user_id
+      ) d ON d.user_id = u.id
       LEFT JOIN accounts_user m ON m.id = ep.manager_id
       WHERE ${whereClause}
       ORDER BY u.id DESC
       LIMIT ? OFFSET ?
     `;
 
-    params.push(limit, offset);
-    return db.all(sql, params, tx);
+    return db.all(sql, selectParams, tx);
   },
 
-  async countEmployees({ role = null, team = null, search = "", status = null } = {}, tx = null) {
+  async countEmployees({
+    tenantId = 1,
+    role = null,
+    team = null,
+    search = "",
+    status = null,
+    siteScope = { siteIds: null, unassigned: false },
+    managerId = null,
+    workDate = new Date().toISOString().slice(0, 10)
+  } = {}, tx = null) {
     await ensureAccountsSchema();
-    const whereConditions = ["u.deleted_at IS NULL", "u.role IN ('employee','manager','hr','admin','superadmin')"];
-    const params = [];
+    const { whereClause, params } = this._buildEmployeeWhere({
+      tenantId,
+      role,
+      team,
+      search,
+      status,
+      siteScope,
+      managerId,
+      workDate
+    });
 
-    if (role && role !== "all") {
-      whereConditions.push("u.role = ?");
-      params.push(role);
-    }
+    const sql = `
+      SELECT COUNT(DISTINCT u.id) as c 
+      FROM accounts_user u 
+      JOIN workforce_user_tenant wut ON wut.user_id = u.id
+      LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
+      LEFT JOIN accounts_employeeprofile m_ep ON m_ep.user_id = ep.manager_id
+      LEFT JOIN accounts_user m ON m.id = ep.manager_id
+      WHERE ${whereClause}
+    `;
 
-    if (team && team !== "all") {
-      whereConditions.push("ep.team_name = ?");
-      params.push(team);
-    }
-
-    if (status === "active") {
-      whereConditions.push("u.is_active = 1");
-    } else if (status === "inactive") {
-      whereConditions.push("u.is_active = 0");
-    }
-
-    if (search && search.trim()) {
-      const term = `%${search.trim().toLowerCase()}%`;
-      whereConditions.push("(LOWER(u.username) LIKE ? OR LOWER(u.first_name) LIKE ? OR LOWER(u.last_name) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(ep.team_name) LIKE ?)");
-      params.push(term, term, term, term, term);
-    }
-
-    const whereClause = whereConditions.join(" AND ");
-    const row = await db.get(
-      `SELECT COUNT(*) as c 
-       FROM accounts_user u 
-       LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
-       WHERE ${whereClause}`,
-      params,
-      tx
-    );
+    const row = await db.get(sql, params, tx);
     return Number(row?.c || 0);
   },
 
-  async countTotalDocuments(tx = null) {
+  async getEmployeeMetrics({
+    tenantId = 1,
+    siteScope = { siteIds: null, unassigned: false },
+    managerId = null,
+    workDate = new Date().toISOString().slice(0, 10)
+  } = {}, tx = null) {
     await ensureAccountsSchema();
-    const row = await db.get("SELECT COUNT(*) as c FROM accounts_employeedocument", [], tx);
+    const { whereClause, params } = this._buildEmployeeWhere({
+      tenantId,
+      siteScope,
+      managerId,
+      workDate
+    });
+
+    const sql = `
+      SELECT 
+        COUNT(DISTINCT u.id) as total,
+        COUNT(DISTINCT CASE WHEN u.is_active = 1 AND (ep.is_active_employee IS NULL OR ep.is_active_employee = 1) AND wut.is_active = 1 THEN u.id END) as active,
+        COUNT(DISTINCT CASE WHEN u.is_active = 0 OR ep.is_active_employee = 0 OR wut.is_active = 0 THEN u.id END) as inactive,
+        COUNT(DISTINCT CASE WHEN u.role = 'manager' THEN u.id END) as managers,
+        COUNT(DISTINCT CASE WHEN u.role = 'employee' THEN u.id END) as employees,
+        COUNT(DISTINCT CASE WHEN u.role = 'hr' THEN u.id END) as hr,
+        COUNT(DISTINCT CASE WHEN u.role IN ('admin', 'superadmin') THEN u.id END) as admin
+      FROM accounts_user u
+      JOIN workforce_user_tenant wut ON wut.user_id = u.id
+      LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id
+      LEFT JOIN accounts_employeeprofile m_ep ON m_ep.user_id = ep.manager_id
+      LEFT JOIN accounts_user m ON m.id = ep.manager_id
+      WHERE ${whereClause}
+    `;
+
+    const row = await db.get(sql, params, tx);
+    return {
+      total: Number(row?.total || 0),
+      active: Number(row?.active || 0),
+      inactive: Number(row?.inactive || 0),
+      managers: Number(row?.managers || 0),
+      employees: Number(row?.employees || 0),
+      hr: Number(row?.hr || 0),
+      admin: Number(row?.admin || 0),
+    };
+  },
+
+  async findAvailableTeams({
+    tenantId = 1,
+    siteScope = { siteIds: null, unassigned: false },
+    managerId = null,
+    workDate = new Date().toISOString().slice(0, 10)
+  } = {}, tx = null) {
+    await ensureAccountsSchema();
+    const { whereClause, params } = this._buildEmployeeWhere({
+      tenantId,
+      siteScope,
+      managerId,
+      workDate
+    });
+
+    const sql = `
+      SELECT DISTINCT COALESCE(ep.team_name, m_ep.team_name) as team_name
+      FROM accounts_user u
+      JOIN workforce_user_tenant wut ON wut.user_id = u.id
+      LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id
+      LEFT JOIN accounts_employeeprofile m_ep ON m_ep.user_id = ep.manager_id
+      WHERE ${whereClause}
+        AND COALESCE(ep.team_name, m_ep.team_name) IS NOT NULL
+        AND COALESCE(ep.team_name, m_ep.team_name) != ''
+      ORDER BY team_name ASC
+    `;
+
+    return db.all(sql, params, tx);
+  },
+
+  async countTotalDocuments(optionsOrTx = null, maybeTx = null) {
+    await ensureAccountsSchema();
+    let tx = maybeTx;
+    let options = {};
+    if (optionsOrTx && typeof optionsOrTx === "object" && ("tenantId" in optionsOrTx || "siteScope" in optionsOrTx || "managerId" in optionsOrTx)) {
+      options = optionsOrTx;
+    } else if (optionsOrTx) {
+      tx = optionsOrTx;
+    }
+
+    const {
+      tenantId = 1,
+      siteScope = { siteIds: null, unassigned: false },
+      managerId = null,
+      workDate = new Date().toISOString().slice(0, 10),
+    } = options;
+
+    const { whereClause, params } = this._buildEmployeeWhere({
+      tenantId,
+      siteScope,
+      managerId,
+      workDate,
+    });
+
+    const sql = `
+      SELECT COUNT(d.id) as c
+      FROM accounts_employeedocument d
+      JOIN accounts_user u ON u.id = d.user_id
+      JOIN workforce_user_tenant wut ON wut.user_id = u.id
+      LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id
+      LEFT JOIN accounts_employeeprofile m_ep ON m_ep.user_id = ep.manager_id
+      LEFT JOIN accounts_user m ON m.id = ep.manager_id
+      WHERE ${whereClause}
+    `;
+
+    const row = await db.get(sql, params, tx);
     return Number(row?.c || 0);
   },
 
@@ -445,32 +671,80 @@ export const accountsRepository = {
   },
 
   async updateProfile(userId, data, tx = null) {
-    const { manager, team_name, joining_date, leave_allotted, latitude, longitude, allowed_radius, is_active_employee, designation } = data;
-    await db.run(
-      "UPDATE accounts_employeeprofile SET manager_id=COALESCE(?,manager_id), team_name=COALESCE(?,team_name), joining_date=COALESCE(?,joining_date), leave_allotted=COALESCE(?,leave_allotted), latitude=COALESCE(?,latitude), longitude=COALESCE(?,longitude), allowed_radius=COALESCE(?,allowed_radius), is_active_employee=COALESCE(?,is_active_employee), designation=COALESCE(?,designation) WHERE user_id=?",
-      [
-        manager !== undefined ? manager : null,
-        team_name !== undefined ? team_name : null,
-        joining_date !== undefined ? joining_date : null,
-        leave_allotted !== undefined ? leave_allotted : null,
-        latitude !== undefined ? latitude : null,
-        longitude !== undefined ? longitude : null,
-        allowed_radius !== undefined ? allowed_radius : null,
-        is_active_employee !== undefined ? is_active_employee : null,
-        designation !== undefined ? designation : null,
-        userId
-      ],
-      tx
-    );
-  },
+    const existing = await db.get("SELECT id FROM accounts_employeeprofile WHERE user_id = ? LIMIT 1", [userId], tx);
+    if (!existing) {
+      await db.run(
+        "INSERT INTO accounts_employeeprofile (user_id, manager_id, team_name, joining_date, leave_allotted, latitude, longitude, allowed_radius, is_active_employee, designation, profile_picture) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          userId,
+          data.manager ? Number(data.manager) : null,
+          data.team_name && String(data.team_name).trim() ? String(data.team_name).trim() : null,
+          data.joining_date && String(data.joining_date).trim() ? String(data.joining_date).trim() : null,
+          data.leave_allotted !== undefined && data.leave_allotted !== "" && data.leave_allotted !== null ? Number(data.leave_allotted) : 0,
+          data.latitude !== undefined && data.latitude !== "" && data.latitude !== null ? Number(data.latitude) : null,
+          data.longitude !== undefined && data.longitude !== "" && data.longitude !== null ? Number(data.longitude) : null,
+          data.allowed_radius !== undefined && data.allowed_radius !== "" && data.allowed_radius !== null ? Number(data.allowed_radius) : 100,
+          data.is_active_employee !== undefined && data.is_active_employee !== null ? (data.is_active_employee ? 1 : 0) : 1,
+          data.designation && String(data.designation).trim() ? String(data.designation).trim() : null,
+          data.profile_picture || null
+        ],
+        tx
+      );
+      return;
+    }
 
-  async softDeleteUser(userId, tx = null) {
-    await ensureAccountsSchema();
-    await db.run("UPDATE accounts_user SET is_active=0, deleted_at=NOW() WHERE id=?", [userId], tx);
-  },
+    const setClauses = [];
+    const params = [];
 
-  async softDeleteProfile(userId, tx = null) {
-    await db.run("UPDATE accounts_employeeprofile SET is_active_employee=0 WHERE user_id=?", [userId], tx);
+    if ("manager" in data) {
+      setClauses.push("manager_id = ?");
+      params.push(data.manager !== null && data.manager !== "" && data.manager !== undefined ? Number(data.manager) : null);
+    }
+    if ("team_name" in data) {
+      setClauses.push("team_name = ?");
+      params.push(data.team_name !== null && data.team_name !== undefined && String(data.team_name).trim() !== "" ? String(data.team_name).trim() : null);
+    }
+    if ("designation" in data) {
+      setClauses.push("designation = ?");
+      params.push(data.designation !== null && data.designation !== undefined && String(data.designation).trim() !== "" ? String(data.designation).trim() : null);
+    }
+    if ("joining_date" in data) {
+      setClauses.push("joining_date = ?");
+      params.push(data.joining_date !== null && data.joining_date !== undefined && String(data.joining_date).trim() !== "" ? String(data.joining_date).trim() : null);
+    }
+    if ("leave_allotted" in data) {
+      setClauses.push("leave_allotted = ?");
+      params.push(data.leave_allotted !== null && data.leave_allotted !== "" && data.leave_allotted !== undefined ? Number(data.leave_allotted) : 0);
+    }
+    if ("latitude" in data) {
+      setClauses.push("latitude = ?");
+      params.push(data.latitude !== null && data.latitude !== "" && data.latitude !== undefined ? Number(data.latitude) : null);
+    }
+    if ("longitude" in data) {
+      setClauses.push("longitude = ?");
+      params.push(data.longitude !== null && data.longitude !== "" && data.longitude !== undefined ? Number(data.longitude) : null);
+    }
+    if ("allowed_radius" in data) {
+      setClauses.push("allowed_radius = ?");
+      params.push(data.allowed_radius !== null && data.allowed_radius !== "" && data.allowed_radius !== undefined ? Number(data.allowed_radius) : 100);
+    }
+    if ("is_active_employee" in data) {
+      setClauses.push("is_active_employee = ?");
+      params.push(data.is_active_employee ? 1 : 0);
+    }
+    if ("profile_picture" in data) {
+      setClauses.push("profile_picture = ?");
+      params.push(data.profile_picture !== null && data.profile_picture !== undefined && String(data.profile_picture).trim() !== "" ? String(data.profile_picture).trim() : null);
+    }
+
+    if (setClauses.length > 0) {
+      params.push(userId);
+      await db.run(
+        `UPDATE accounts_employeeprofile SET ${setClauses.join(", ")} WHERE user_id = ?`,
+        params,
+        tx
+      );
+    }
   },
 
   async deleteOtpByEmail(email, tx = null) {

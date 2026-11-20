@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { config } from "../config/env.js";
 import { sanitizeRedisUrl } from "../config/queue.js";
+import { resolveTenantId } from "../utils/tenant.js";
 import logger from "../utils/logger.js";
 
 /**
@@ -102,7 +103,7 @@ export class RealtimeService {
     }
 
     // Authentication and Room Authorization Middleware
-    this.io.use((socket, next) => {
+    this.io.use(async (socket, next) => {
       const authHeader = socket.handshake.headers.authorization || "";
       const token = socket.handshake.auth?.token || (authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null);
 
@@ -112,7 +113,14 @@ export class RealtimeService {
 
       try {
         const decoded = jwt.verify(token, config.jwtSecret);
-        socket.user = decoded;
+        const user = { ...decoded, id: decoded.userId || decoded.id };
+        const requestedTenantId = socket.handshake.auth?.tenantId;
+        const tenant_id = await resolveTenantId({
+          user,
+          headers: requestedTenantId ? { "x-tenant-id": String(requestedTenantId) } : {},
+          query: {},
+        });
+        socket.user = { ...user, tenant_id };
         next();
       } catch (err) {
         logger.warn("[Realtime:Auth] Token validation rejected: %s", err.message);
@@ -133,6 +141,10 @@ export class RealtimeService {
       // Auto-join tenant-scoped user room
       if (user.id && user.organization_id) {
         socket.join(`org:${user.organization_id}:user:${user.id}`);
+      }
+
+      if (user.tenant_id) {
+        socket.join(`tenant:${user.tenant_id}`);
       }
 
       // Auto-join tenant-scoped role room (e.g. org:10:role:admin)
@@ -205,6 +217,11 @@ export class RealtimeService {
         return ["admin", "hr", "manager"].includes((user.role || "").toLowerCase());
       }
       return false;
+    }
+
+    if (roomName.startsWith("tenant:")) {
+      const targetTenantId = roomName.slice("tenant:".length);
+      return Boolean(targetTenantId) && String(user.tenant_id) === targetTenantId;
     }
 
     const [type, id] = roomName.split(":");
@@ -292,6 +309,19 @@ export class RealtimeService {
       payload: data
     });
     this.io.to(`org:${organizationId}`).emit(eventType, envelope);
+    return envelope;
+  }
+
+  /** Broadcast an event only to authenticated users in the resolved workforce tenant. */
+  emitToTenant(tenantId, eventType, data = {}, aggregateId = null) {
+    if (!this.io || !tenantId) return;
+    const envelope = createRealtimeEnvelope({
+      eventType,
+      aggregateType: "Tenant",
+      aggregateId: aggregateId || tenantId,
+      payload: data,
+    });
+    this.io.to(`tenant:${tenantId}`).emit(eventType, envelope);
     return envelope;
   }
 

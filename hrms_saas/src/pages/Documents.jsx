@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Download,
   Eye,
@@ -7,11 +7,13 @@ import {
   FileText,
   RefreshCw,
   Shield,
+  Loader2,
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
+import { useRealtime } from "../context/RealtimeContext";
 
 const formatDateTime = (value) => {
   if (!value) return "--";
@@ -48,8 +50,9 @@ export default function Documents() {
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [downloadingId, setDownloadingId] = useState(null);
 
-  const fetchDocuments = async (showLoader = true) => {
+  const fetchDocuments = useCallback(async (showLoader = true) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -66,11 +69,54 @@ export default function Documents() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [showPopup]);
 
   useEffect(() => {
     fetchDocuments();
-  }, []);
+  }, [fetchDocuments]);
+
+  // Real-time synchronization: refresh when documents are uploaded, replaced, or deleted
+  useRealtime("document_update", () => {
+    fetchDocuments(false);
+  });
+  useRealtime("employee_update", () => {
+    fetchDocuments(false);
+  });
+
+  const handleDownload = async (doc) => {
+    const targetUrl = doc.download_url || getFileUrl(doc.file);
+    setDownloadingId(doc.id);
+    try {
+      const res = await fetch(targetUrl);
+      if (!res.ok) throw new Error("Download request failed");
+      const blob = await res.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      const cleanTitle = (doc.title || "document").replace(/[^a-zA-Z0-9_-]/g, "_");
+      let ext = "";
+      if (blob.type === "application/pdf") ext = ".pdf";
+      else if (blob.type.includes("webp")) ext = ".webp";
+      else if (blob.type.includes("jpeg") || blob.type.includes("jpg")) ext = ".jpg";
+      else if (blob.type.includes("png")) ext = ".png";
+      else if (targetUrl.includes(".pdf")) ext = ".pdf";
+      else if (targetUrl.includes(".webp")) ext = ".webp";
+      else if (targetUrl.includes(".jpg") || targetUrl.includes(".jpeg")) ext = ".jpg";
+      else ext = ".png";
+
+      link.download = `${cleanTitle}${ext}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      console.warn("Direct blob download failed, falling back to secure attachment URL:", err);
+      // Fallback: trigger browser download directly via Cloudinary signed attachment URL
+      window.location.assign(targetUrl);
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   const summary = useMemo(() => {
     const latestUpload = documents.length
@@ -207,16 +253,19 @@ export default function Documents() {
                         View
                       </a>
 
-                      <a
-                        href={fileUrl}
-                        download
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                      <button
+                        type="button"
+                        onClick={() => handleDownload(doc)}
+                        disabled={downloadingId === doc.id}
+                        className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60 cursor-pointer"
                       >
-                        <Download size={16} />
+                        {downloadingId === doc.id ? (
+                          <Loader2 size={16} className="animate-spin text-slate-600" />
+                        ) : (
+                          <Download size={16} />
+                        )}
                         Download
-                      </a>
+                      </button>
                     </div>
                   </article>
                 );

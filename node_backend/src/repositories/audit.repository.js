@@ -41,6 +41,49 @@ async function ensureAuditTable() {
   auditTableReady = true;
 }
 
+/**
+ * Convert local calendar date YYYY-MM-DD to UTC boundary (YYYY-MM-DD HH:mm:ss) for a business timezone.
+ * Asia/Kolkata is UTC+05:30.
+ * isEndOfDay=false -> 00:00:00 IST -> previous day 18:30:00 UTC (inclusive start)
+ * isEndOfDay=true  -> 00:00:00 IST of next day -> current day 18:30:00 UTC (exclusive end)
+ */
+export function convertLocalDateToUtcBoundaries(dateStr, isEndOfDay = false, timeZone = "Asia/Kolkata") {
+  if (!dateStr || typeof dateStr !== "string") return null;
+  const parts = dateStr.trim().split(" ")[0].split("-");
+  if (parts.length !== 3) return null;
+  const y = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10) - 1;
+  const d = parseInt(parts[2], 10);
+  if (isNaN(y) || isNaN(m) || isNaN(d)) return null;
+
+  const targetDate = isEndOfDay
+    ? new Date(Date.UTC(y, m, d + 1, 0, 0, 0))
+    : new Date(Date.UTC(y, m, d, 0, 0, 0));
+
+  const utcDate = new Date(targetDate.toLocaleString("en-US", { timeZone: "UTC" }));
+  const tzDate = new Date(targetDate.toLocaleString("en-US", { timeZone }));
+  const offsetMs = tzDate - utcDate;
+
+  const utcMillis = targetDate.getTime() - offsetMs;
+  return new Date(utcMillis).toISOString().replace("T", " ").slice(0, 19);
+}
+
+const USER_JOIN_CONDITION = `(
+  (
+    LOWER(l.action) LIKE '%user%' 
+    OR LOWER(l.action) LIKE '%employee%' 
+    OR LOWER(l.action) LIKE '%role%' 
+    OR LOWER(l.action) LIKE '%staff%' 
+    OR LOWER(l.action) LIKE '%password%' 
+    OR LOWER(l.action) LIKE '%document%' 
+    OR LOWER(l.action) LIKE '%profile%' 
+    OR LOWER(l.action) LIKE '%account%'
+  )
+  AND l.target_id IS NOT NULL 
+  AND l.target_id != ''
+  AND CAST(u.id AS CHAR) = CAST(l.target_id AS CHAR)
+)`;
+
 export const auditRepository = {
   /**
    * Log an audit event.
@@ -59,7 +102,7 @@ export const auditRepository = {
       ? "INSERT INTO audit_logs (user_id, username, action, target_id, details, ip_address, severity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())"
       : "INSERT INTO audit_logs (user_id, username, action, target_id, details, ip_address, severity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))";
 
-    await db.run(
+    return await db.run(
       insertSql,
       [cleanUserId, cleanUsername, action, cleanTargetId, detailsStr, cleanIpAddress, cleanSeverity],
       tx
@@ -69,7 +112,7 @@ export const auditRepository = {
   /**
    * Find audit logs matching search criteria.
    */
-  async findAuditLogs({ limit = 50, offset = 0, search = "", sort = "desc", startDate = "", endDate = "", actionType = "" } = {}, tx = null) {
+  async findAuditLogs({ limit = 50, offset = 0, search = "", sort = "desc", startDate = "", endDate = "", actionType = "", severity = "" } = {}, tx = null) {
     await ensureAuditTable();
     
     let query = `
@@ -78,14 +121,14 @@ export const auditRepository = {
              u.first_name as target_first_name, 
              u.last_name as target_last_name 
       FROM audit_logs l 
-      LEFT JOIN accounts_user u ON u.id = l.target_id 
+      LEFT JOIN accounts_user u ON ${USER_JOIN_CONDITION} 
       WHERE 1=1
     `;
     const params = [];
 
     if (search.trim()) {
       const q = `%${search.trim()}%`;
-      query += " AND (l.username LIKE ? OR l.action LIKE ? OR l.target_id LIKE ? OR l.details LIKE ? OR u.username LIKE ? OR u.first_name LIKE ? OR u.last_name LIKE ?)";
+      query += " AND (l.username LIKE ? OR l.action LIKE ? OR l.target_id LIKE ? OR l.details LIKE ? OR (u.id IS NOT NULL AND (u.username LIKE ? OR u.first_name LIKE ? OR u.last_name LIKE ?)))";
       params.push(q, q, q, q, q, q, q);
     }
 
@@ -94,15 +137,32 @@ export const auditRepository = {
       params.push(actionType.trim());
     }
 
+    if (severity && severity.trim()) {
+      query += " AND l.severity = ?";
+      params.push(severity.trim().toUpperCase());
+    }
+
     if (startDate.trim()) {
-      query += " AND l.created_at >= ?";
-      params.push(startDate.trim());
+      const startUtc = convertLocalDateToUtcBoundaries(startDate.trim(), false);
+      if (startUtc) {
+        query += " AND l.created_at >= ?";
+        params.push(startUtc);
+      } else {
+        query += " AND l.created_at >= ?";
+        params.push(startDate.trim());
+      }
     }
 
     if (endDate.trim()) {
-      const ed = endDate.trim().includes(" ") ? endDate.trim() : `${endDate.trim()} 23:59:59`;
-      query += " AND l.created_at <= ?";
-      params.push(ed);
+      const endUtc = convertLocalDateToUtcBoundaries(endDate.trim(), true);
+      if (endUtc) {
+        query += " AND l.created_at < ?";
+        params.push(endUtc);
+      } else {
+        const ed = endDate.trim().includes(" ") ? endDate.trim() : `${endDate.trim()} 23:59:59`;
+        query += " AND l.created_at <= ?";
+        params.push(ed);
+      }
     }
 
     const order = sort.toLowerCase() === "asc" ? "ASC" : "DESC";
@@ -117,20 +177,20 @@ export const auditRepository = {
   /**
    * Get matching audit logs count.
    */
-  async getAuditLogsCount({ search = "", startDate = "", endDate = "", actionType = "" } = {}, tx = null) {
+  async getAuditLogsCount({ search = "", startDate = "", endDate = "", actionType = "", severity = "" } = {}, tx = null) {
     await ensureAuditTable();
     
     let query = `
       SELECT COUNT(*) as c 
       FROM audit_logs l 
-      LEFT JOIN accounts_user u ON u.id = l.target_id 
+      LEFT JOIN accounts_user u ON ${USER_JOIN_CONDITION} 
       WHERE 1=1
     `;
     const params = [];
 
     if (search.trim()) {
       const q = `%${search.trim()}%`;
-      query += " AND (l.username LIKE ? OR l.action LIKE ? OR l.target_id LIKE ? OR l.details LIKE ? OR u.username LIKE ? OR u.first_name LIKE ? OR u.last_name LIKE ?)";
+      query += " AND (l.username LIKE ? OR l.action LIKE ? OR l.target_id LIKE ? OR l.details LIKE ? OR (u.id IS NOT NULL AND (u.username LIKE ? OR u.first_name LIKE ? OR u.last_name LIKE ?)))";
       params.push(q, q, q, q, q, q, q);
     }
 
@@ -139,15 +199,32 @@ export const auditRepository = {
       params.push(actionType.trim());
     }
 
+    if (severity && severity.trim()) {
+      query += " AND l.severity = ?";
+      params.push(severity.trim().toUpperCase());
+    }
+
     if (startDate.trim()) {
-      query += " AND l.created_at >= ?";
-      params.push(startDate.trim());
+      const startUtc = convertLocalDateToUtcBoundaries(startDate.trim(), false);
+      if (startUtc) {
+        query += " AND l.created_at >= ?";
+        params.push(startUtc);
+      } else {
+        query += " AND l.created_at >= ?";
+        params.push(startDate.trim());
+      }
     }
 
     if (endDate.trim()) {
-      const ed = endDate.trim().includes(" ") ? endDate.trim() : `${endDate.trim()} 23:59:59`;
-      query += " AND l.created_at <= ?";
-      params.push(ed);
+      const endUtc = convertLocalDateToUtcBoundaries(endDate.trim(), true);
+      if (endUtc) {
+        query += " AND l.created_at < ?";
+        params.push(endUtc);
+      } else {
+        const ed = endDate.trim().includes(" ") ? endDate.trim() : `${endDate.trim()} 23:59:59`;
+        query += " AND l.created_at <= ?";
+        params.push(ed);
+      }
     }
 
     const row = await db.get(query, params, tx);

@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback } from "react";
+import { Link } from "expo-router";
 import {
   ActivityIndicator,
   Alert,
@@ -36,6 +37,7 @@ export default function DashboardScreen() {
 
   // State data for different views
   const [personalData, setPersonalData] = useState<any>(null);
+  const [myRosterData, setMyRosterData] = useState<any>(null);
   const [managerData, setManagerData] = useState<any>(null);
   const [hrData, setHrData] = useState<any>(null);
   const [adminSummary, setAdminSummary] = useState<any>(null);
@@ -52,6 +54,14 @@ export default function DashboardScreen() {
       // 1. Fetch Personal data for all roles (or fallback)
       const personalRes = await api.get("/attendance/dashboard/");
       setPersonalData(personalRes.data);
+
+      // 1b. Fetch Personal Roster & Assigned Shift (Stage 3)
+      try {
+        const rosterRes = await api.get("/v1/workforce/rosters/my-roster");
+        setMyRosterData(rosterRes.data);
+      } catch (rosterErr) {
+        // Non-blocking: continue if roster endpoint is temporarily offline
+      }
 
       // 2. Fetch specific role-based data
       if (role === "manager" || role === "superadmin") {
@@ -138,6 +148,12 @@ export default function DashboardScreen() {
         <Text style={styles.heroDesc}>
           Review logged shift metrics, leave balances, and pending supervisor reviews.
         </Text>
+        <Link href={"/(tabs)/holidays" as any} asChild>
+          <TouchableOpacity accessibilityRole="button" style={styles.holidayLink}>
+            <CalendarDays size={17} color="#a7f3d0" />
+            <Text style={styles.holidayLinkText}>View Company Holiday Calendar</Text>
+          </TouchableOpacity>
+        </Link>
 
         <View style={styles.heroGrid}>
           <View style={styles.heroTile}>
@@ -212,6 +228,70 @@ export default function DashboardScreen() {
               </View>
             </View>
           ))
+        )}
+      </View>
+    );
+  };
+
+  const renderPersonalRosterSchedule = () => {
+    const curShift = myRosterData?.current_shift;
+    const schedule = myRosterData?.schedule || [];
+
+    return (
+      <View style={styles.listContainer}>
+        <View style={styles.rosterHeaderRow}>
+          <View>
+            <Text style={styles.listTitle}>Assigned Shift & Schedule</Text>
+            <Text style={styles.listSubtitle}>Today's roster & upcoming shifts</Text>
+          </View>
+          {curShift && (
+            <View style={[styles.rosterBadge, curShift.is_overnight ? styles.rosterBadgeOvernight : styles.rosterBadgeDay]}>
+              <Text style={curShift.is_overnight ? styles.rosterBadgeTextOvernight : styles.rosterBadgeTextDay}>
+                {curShift.is_overnight ? "Overnight" : "Day Shift"}
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {curShift ? (
+          <View style={styles.activeShiftCard}>
+            <View style={styles.activeShiftInfo}>
+              <Text style={styles.activeShiftName}>{curShift.shift_name}</Text>
+              <Text style={styles.activeShiftTimes}>
+                {curShift.start_time?.slice(0, 5)} - {curShift.end_time?.slice(0, 5)}
+                {curShift.is_overnight && " (+1 day)"}
+              </Text>
+            </View>
+            <View style={styles.activeShiftHours}>
+              <Text style={styles.activeShiftHoursText}>{curShift.total_work_hours}h</Text>
+              <Text style={styles.activeShiftHoursLabel}>Scheduled</Text>
+            </View>
+          </View>
+        ) : (
+          <Text style={styles.emptyText}>No active shift scheduled for today.</Text>
+        )}
+
+        {schedule.length > 0 && (
+          <View style={styles.rosterList}>
+            <Text style={styles.rosterSubheading}>Upcoming Schedule</Text>
+            {schedule.slice(0, 7).map((item: any, idx: number) => (
+              <View key={`${item.work_date}-${idx}`} style={styles.timelineRow}>
+                <View style={styles.timelineMain}>
+                  <Text style={styles.timelineDate}>{item.work_date}</Text>
+                  <Text style={styles.timelinePunches}>
+                    {item.shift_name} ({item.start_time?.slice(0, 5)} - {item.end_time?.slice(0, 5)})
+                    {item.is_overnight && " (+1d)"}
+                  </Text>
+                </View>
+                <View style={styles.timelineBadgeContainer}>
+                  <Text style={styles.timelineHours}>{Number(item.total_work_hours || 0).toFixed(1)}h</Text>
+                  <View style={styles.badgeApproved}>
+                    <Text style={styles.badgeTextApproved}>Assigned</Text>
+                  </View>
+                </View>
+              </View>
+            ))}
+          </View>
         )}
       </View>
     );
@@ -353,6 +433,7 @@ export default function DashboardScreen() {
         {activeTab === "personal" ? (
           <>
             {renderPersonalHeader()}
+            {renderPersonalRosterSchedule()}
             {renderPersonalMetrics()}
             {renderPersonalTimeline()}
           </>
@@ -458,6 +539,8 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginBottom: 16,
   },
+  holidayLink: { flexDirection: "row", alignItems: "center", gap: 9, alignSelf: "flex-start", paddingHorizontal: 13, paddingVertical: 10, marginBottom: 16, borderRadius: 10, backgroundColor: "#064e3b" },
+  holidayLinkText: { color: "#a7f3d0", fontSize: 13, fontWeight: "700" },
   heroGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -576,5 +659,128 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: "700",
     textTransform: "uppercase",
+  },
+  // Stage 3 Roster schedule styles
+  rosterHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: 12,
+  },
+  rosterBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  rosterBadgeDay: {
+    backgroundColor: "#064e3b",
+    borderColor: "#065f46",
+  },
+  rosterBadgeOvernight: {
+    backgroundColor: "#312e81",
+    borderColor: "#4338ca",
+  },
+  rosterBadgeTextDay: {
+    color: "#34d399",
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+  },
+  rosterBadgeTextOvernight: {
+    color: "#a5b4fc",
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+  },
+  activeShiftCard: {
+    backgroundColor: "#0f172a",
+    borderRadius: 16,
+    padding: 16,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#334155",
+    marginBottom: 16,
+  },
+  activeShiftInfo: {
+    flex: 1,
+  },
+  activeShiftName: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  activeShiftTimes: {
+    color: "#34d399",
+    fontSize: 13,
+    fontWeight: "600",
+    marginTop: 2,
+  },
+  activeShiftHours: {
+    alignItems: "flex-end",
+    backgroundColor: "#1e293b",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  activeShiftHoursText: {
+    color: "#ffffff",
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  activeShiftHoursLabel: {
+    color: "#94a3b8",
+    fontSize: 9,
+    textTransform: "uppercase",
+  },
+  rosterList: {
+    marginTop: 8,
+  },
+  rosterSubheading: {
+    color: "#94a3b8",
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    marginBottom: 8,
+  },
+  rosterRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderTopWidth: 1,
+    borderTopColor: "#334155",
+    paddingVertical: 10,
+  },
+  rosterRowDate: {
+    width: 90,
+  },
+  rosterDateText: {
+    color: "#cbd5e1",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  rosterRowShift: {
+    flex: 1,
+    paddingHorizontal: 8,
+  },
+  rosterShiftName: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  rosterShiftTimes: {
+    color: "#94a3b8",
+    fontSize: 11,
+  },
+  rosterRowHours: {
+    alignItems: "flex-end",
+  },
+  rosterHoursText: {
+    color: "#10b981",
+    fontSize: 12,
+    fontWeight: "700",
   },
 });

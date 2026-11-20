@@ -12,6 +12,7 @@ import { workerHealthService } from "../../src/services/worker-health.service.js
 import outboxDispatcherService from "../../src/services/outbox-dispatcher.service.js";
 import queueWorkerManager from "../../src/jobs/index.js";
 import { healthCheck, closePool } from "../../src/db/index.js";
+import redisService from "../../src/services/redis.service.js";
 
 function makeHttpRequest(port, pathname) {
   return new Promise((resolve, reject) => {
@@ -39,7 +40,11 @@ describe("P3.5 — Dedicated Worker Isolation & Lifecycle Test Suite", () => {
   });
 
   after(async () => {
+    await queueWorkerManager.close();
     await workerHealthService.stop();
+    if (redisService.client) {
+      try { redisService.client.disconnect(); } catch {}
+    }
     await closePool();
   });
 

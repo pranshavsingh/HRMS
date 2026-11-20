@@ -173,6 +173,14 @@ export function initCron() {
     });
   });
 
+  // Annual leave entitlement initialization follows each tenant's configured FY timezone.
+  cron.schedule("*/15 * * * *", async () => {
+    await runWithLock("financial_year_leave_reset", 1800, async () => {
+      const { default: financialLeaveService } = await import("../services/financial-leave.service.js");
+      await financialLeaveService.processDueResets();
+    });
+  });
+
   logger.info("Background cron jobs scheduled successfully.");
 }
 

@@ -1,64 +1,67 @@
 import { db } from "../db/index.js";
 
 export const leaveRepository = {
-  async insertLeave(userId, leaveType, fromDate, toDate, reason, tx = null) {
+  async insertLeave(userId, tenantId, leaveType, fromDate, toDate, reason, tx = null, siteId = null) {
     await db.run(
-      "INSERT INTO leave_leave (leave_type, from_date, to_date, reason, status, created_at, user_id) VALUES (?, ?, ?, ?, 'pending', NOW(), ?)",
-      [leaveType, fromDate, toDate, reason, userId],
+      "INSERT INTO leave_leave (leave_type, from_date, to_date, reason, status, created_at, user_id, tenant_id, site_id) VALUES (?, ?, ?, ?, 'pending', NOW(), ?, ?, ?)",
+      [leaveType, fromDate, toDate, reason, userId, tenantId, siteId],
       tx
     );
   },
 
-  async findLeavesByUserId(userId, tx = null) {
+  async findLeavesByUserId(userId, tenantId = 1, tx = null) {
     return db.all(
       `SELECT l.*, 
               ab.username as action_by_username, ab.first_name as action_by_first_name, ab.last_name as action_by_last_name, ab.role as action_by_role
        FROM leave_leave l
        LEFT JOIN accounts_user ab ON ab.id=l.action_by_id
-       WHERE l.user_id=? 
+       WHERE l.user_id=? AND l.tenant_id=?
        ORDER BY l.created_at DESC`,
-      [userId],
+      [userId, tenantId],
       tx
     );
   },
 
-  async findLeavesPagedByUserId(userId, { limit = 50, offset = 0 } = {}, tx = null) {
+  async findLeavesPagedByUserId(userId, tenantId = 1, { limit = 50, offset = 0 } = {}, tx = null) {
     return db.all(
       `SELECT l.*, 
               ab.username as action_by_username, ab.first_name as action_by_first_name, ab.last_name as action_by_last_name, ab.role as action_by_role
        FROM leave_leave l
        LEFT JOIN accounts_user ab ON ab.id=l.action_by_id
-       WHERE l.user_id=? 
+       WHERE l.user_id=? AND l.tenant_id=?
        ORDER BY l.created_at DESC
        LIMIT ? OFFSET ?`,
-      [userId, limit, offset],
+      [userId, tenantId, limit, offset],
       tx
     );
   },
 
-  async countLeavesByUserId(userId, tx = null) {
-    const row = await db.get("SELECT COUNT(*) as c FROM leave_leave WHERE user_id=?", [userId], tx);
+  async countLeavesByUserId(userId, tenantId = 1, tx = null) {
+    const row = await db.get("SELECT COUNT(*) as c FROM leave_leave WHERE user_id=? AND tenant_id=?", [userId, tenantId], tx);
     return Number(row?.c || 0);
   },
 
-  async findLeavesForApprovals(role, viewerUserId, tx = null) {
+  async findLeavesForApprovals(role, viewerUserId, tenantId = 1, tx = null) {
     let where = "";
     const params = [];
     
     if (role === "superadmin") {
-      where = "";
+      where = "WHERE l.tenant_id=?";
+      params.push(tenantId);
     } else if (role === "admin") {
-      where = "WHERE u.role IN ('employee', 'manager', 'hr')";
+      where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager', 'hr')";
+      params.push(tenantId);
     } else if (role === "hr") {
-      where = "WHERE u.role IN ('employee', 'manager')";
+      where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager')";
+      params.push(tenantId);
     } else {
-      where = "WHERE u.role='employee' AND ep.manager_id=?";
-      params.push(viewerUserId);
+      where = "WHERE l.tenant_id=? AND u.role='employee' AND ep.manager_id=?";
+      params.push(tenantId, viewerUserId);
     }
 
     return db.all(
       `SELECT l.*, u.id as user_id_ref, u.username, u.first_name, u.last_name, u.email, u.role,
-              ep.team_name, ep.manager_id,
+              ep.team_name, ep.manager_id, ep.designation,
               m.username as manager_username, m.first_name as manager_first_name, m.last_name as manager_last_name,
               ab.username as action_by_username, ab.first_name as action_by_first_name, ab.last_name as action_by_last_name, ab.role as action_by_role
        FROM leave_leave l
@@ -73,26 +76,29 @@ export const leaveRepository = {
     );
   },
 
-  async findLeavesForApprovalsPaged(role, viewerUserId, { limit = 50, offset = 0 } = {}, tx = null) {
+  async findLeavesForApprovalsPaged(role, viewerUserId, tenantId = 1, { limit = 50, offset = 0 } = {}, tx = null) {
     let where = "";
     const params = [];
     
     if (role === "superadmin") {
-      where = "";
+      where = "WHERE l.tenant_id=?";
+      params.push(tenantId);
     } else if (role === "admin") {
-      where = "WHERE u.role IN ('employee', 'manager', 'hr')";
+      where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager', 'hr')";
+      params.push(tenantId);
     } else if (role === "hr") {
-      where = "WHERE u.role IN ('employee', 'manager')";
+      where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager')";
+      params.push(tenantId);
     } else {
-      where = "WHERE u.role='employee' AND ep.manager_id=?";
-      params.push(viewerUserId);
+      where = "WHERE l.tenant_id=? AND u.role='employee' AND ep.manager_id=?";
+      params.push(tenantId, viewerUserId);
     }
 
     params.push(limit, offset);
 
     return db.all(
       `SELECT l.*, u.id as user_id_ref, u.username, u.first_name, u.last_name, u.email, u.role,
-              ep.team_name, ep.manager_id,
+              ep.team_name, ep.manager_id, ep.designation,
               m.username as manager_username, m.first_name as manager_first_name, m.last_name as manager_last_name,
               ab.username as action_by_username, ab.first_name as action_by_first_name, ab.last_name as action_by_last_name, ab.role as action_by_role
        FROM leave_leave l
@@ -108,19 +114,22 @@ export const leaveRepository = {
     );
   },
 
-  async countLeavesForApprovals(role, viewerUserId, tx = null) {
+  async countLeavesForApprovals(role, viewerUserId, tenantId = 1, tx = null) {
     let where = "";
     const params = [];
     
     if (role === "superadmin") {
-      where = "";
+      where = "WHERE l.tenant_id=?";
+      params.push(tenantId);
     } else if (role === "admin") {
-      where = "WHERE u.role IN ('employee', 'manager', 'hr')";
+      where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager', 'hr')";
+      params.push(tenantId);
     } else if (role === "hr") {
-      where = "WHERE u.role IN ('employee', 'manager')";
+      where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager')";
+      params.push(tenantId);
     } else {
-      where = "WHERE u.role='employee' AND ep.manager_id=?";
-      params.push(viewerUserId);
+      where = "WHERE l.tenant_id=? AND u.role='employee' AND ep.manager_id=?";
+      params.push(tenantId, viewerUserId);
     }
 
     const row = await db.get(
@@ -135,7 +144,7 @@ export const leaveRepository = {
     return Number(row?.c || 0);
   },
 
-  async findLeaveById(leaveId, tx = null, forUpdate = false) {
+  async findLeaveById(leaveId, tenantId = 1, tx = null, forUpdate = false) {
     const lock = forUpdate ? " FOR UPDATE" : "";
     return db.get(
       `SELECT l.*, u.id as requestor_id, u.role as requestor_role, ep.manager_id,
@@ -144,8 +153,8 @@ export const leaveRepository = {
        JOIN accounts_user u ON u.id=l.user_id
        LEFT JOIN accounts_employeeprofile ep ON ep.user_id=u.id
        LEFT JOIN accounts_user ab ON ab.id=l.action_by_id
-       WHERE l.id=?${lock}`,
-      [leaveId],
+       WHERE l.id=? AND l.tenant_id=?${lock}`,
+      [leaveId, tenantId],
       tx
     );
   },
@@ -168,10 +177,10 @@ export const leaveRepository = {
     );
   },
 
-  async findOverlappingApprovedLeaves(userId, fromDate, toDate, tx = null) {
+  async findOverlappingApprovedLeaves(userId, tenantId, fromDate, toDate, tx = null) {
     return db.all(
-      "SELECT * FROM leave_leave WHERE user_id=? AND status='approved' AND from_date <= ? AND to_date >= ?",
-      [userId, toDate, fromDate],
+      "SELECT * FROM leave_leave WHERE user_id=? AND tenant_id=? AND status='approved' AND from_date <= ? AND to_date >= ?",
+      [userId, tenantId, toDate, fromDate],
       tx
     );
   }

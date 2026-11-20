@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -16,6 +16,7 @@ import {
   FolderOpen,
   LayoutGrid,
   List,
+  Loader2,
   MoreVertical,
   RefreshCw,
   Search,
@@ -28,6 +29,8 @@ import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
+import { useSite } from "../context/SiteContext";
+import { useRealtime } from "../context/RealtimeContext";
 
 const getFileUrl = (path) => {
   if (!path) return "#";
@@ -73,6 +76,7 @@ function getRoleBadgeStyle(role) {
 
 export default function EmployeeDocuments() {
   const userRole = localStorage.getItem("role") || "employee";
+  const { querySiteId } = useSite();
   const { showPopup } = usePopup();
 
   // Core Data States
@@ -80,9 +84,13 @@ export default function EmployeeDocuments() {
   const [refreshing, setRefreshing] = useState(false);
   const [docsLoading, setDocsLoading] = useState(false);
   const [employees, setEmployees] = useState([]);
+  const [totalEmployees, setTotalEmployees] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   const [totalDocsCount, setTotalDocsCount] = useState(null);
   const [selectedUser, setSelectedUser] = useState("");
+  const [selectedEmployeeObj, setSelectedEmployeeObj] = useState(null);
   const [documents, setDocuments] = useState([]);
+  const [downloadingId, setDownloadingId] = useState(null);
 
   // Toolbar & Filter States
   const [filterRole, setFilterRole] = useState("all");
@@ -97,6 +105,7 @@ export default function EmployeeDocuments() {
   // Active Context Menu for Card (holds employee id)
   const [activeMenuId, setActiveMenuId] = useState(null);
   const menuRef = useRef(null);
+  const detailSectionRef = useRef(null);
 
   // Debounce search term by 250ms
   useEffect(() => {
@@ -118,34 +127,44 @@ export default function EmployeeDocuments() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const loadEmployees = async (isManualRefresh = false) => {
+  const loadEmployees = useCallback(async (isManualRefresh = false) => {
     if (isManualRefresh) setRefreshing(true);
     try {
-      const res = await API.get("/auth/employees/?limit=100");
+      const params = {
+        page: currentPage,
+        limit: rowsPerPage,
+        site_id: querySiteId || undefined,
+        search: debouncedSearch.trim() || undefined,
+        role: filterRole !== "all" ? filterRole : undefined,
+      };
+
+      const res = await API.get("/auth/employees/", { params });
       const list = Array.isArray(res.data) ? res.data : (res.data?.data || []);
       setEmployees(list);
 
-      if (res.data?.total_documents !== undefined) {
-        setTotalDocsCount(res.data.total_documents);
-      } else {
-        // Fallback: sum document_count across employees
-        const sum = list.reduce((acc, curr) => acc + (Number(curr.document_count) || 0), 0);
-        setTotalDocsCount(sum);
+      const totalCount = res.data?.pagination?.total ?? res.data?.total_count ?? list.length;
+      const pagesCount = res.data?.pagination?.totalPages ?? Math.max(1, Math.ceil(totalCount / rowsPerPage));
+      setTotalEmployees(totalCount);
+      setTotalPages(pagesCount);
+
+      // Total documents count: authoritative metric from backend database query
+      if (res.data?.total_documents !== undefined && res.data?.total_documents !== null) {
+        setTotalDocsCount(Number(res.data.total_documents));
       }
 
       if (isManualRefresh) {
         showPopup("Data refreshed successfully", "success");
       }
     } catch (err) {
-      console.error(err);
+      console.error("Failed to load employees:", err);
       showPopup("Unable to load employees", "error");
     } finally {
       setLoading(false);
       if (isManualRefresh) setRefreshing(false);
     }
-  };
+  }, [currentPage, rowsPerPage, querySiteId, debouncedSearch, filterRole, showPopup]);
 
-  const loadDocuments = async (userId) => {
+  const loadDocuments = useCallback(async (userId) => {
     if (!userId) {
       setDocuments([]);
       return;
@@ -160,7 +179,7 @@ export default function EmployeeDocuments() {
     } finally {
       setDocsLoading(false);
     }
-  };
+  }, [showPopup]);
 
   const handleDelete = async (docId, title) => {
     if (!window.confirm(`Are you sure you want to delete the document "${title}"?`)) {
@@ -179,56 +198,51 @@ export default function EmployeeDocuments() {
 
   useEffect(() => {
     loadEmployees();
-  }, []);
+  }, [loadEmployees]);
 
   useEffect(() => {
+    if (!selectedUser) {
+      setSelectedEmployeeObj(null);
+      setDocuments([]);
+      return;
+    }
+    const found = employees.find((emp) => String(emp.id) === String(selectedUser));
+    if (found) {
+      setSelectedEmployeeObj(found);
+    } else {
+      API.get(`/auth/employees/${selectedUser}/`)
+        .then((res) => {
+          setSelectedEmployeeObj(res.data?.data || res.data || null);
+        })
+        .catch(() => {});
+    }
     loadDocuments(selectedUser);
-  }, [selectedUser]);
+  }, [selectedUser, loadDocuments, employees]);
 
-  // Filtering
-  const filteredEmployees = useMemo(() => {
-    const term = debouncedSearch.trim().toLowerCase();
+  // Real-time synchronization
+  useRealtime("employee_update", () => {
+    loadEmployees();
+  });
+  useRealtime("document_update", (data) => {
+    loadEmployees();
+    if (selectedUser && (!data?.userId || String(data.userId) === String(selectedUser))) {
+      loadDocuments(selectedUser);
+    }
+  });
 
-    return employees.filter((employee) => {
-      // Role filter
-      if (filterRole === "employee" && employee.role !== "employee") return false;
-      if (filterRole === "manager" && employee.role !== "manager") return false;
-      if (filterRole === "hr" && employee.role !== "hr") return false;
-
-      // Search term filter
-      if (term) {
-        const matches = [
-          employee.name,
-          employee.username,
-          employee.email,
-          employee.role,
-          employee.team_name,
-          employee.designation,
-          String(employee.id),
-        ]
-          .filter(Boolean)
-          .some((val) => val.toLowerCase().includes(term));
-        if (!matches) return false;
-      }
-
-      return true;
-    });
-  }, [employees, filterRole, debouncedSearch]);
-
-  // Pagination Calculations
-  const totalEmployees = filteredEmployees.length;
-  const totalPages = Math.max(1, Math.ceil(totalEmployees / rowsPerPage));
+  // Server-side paginated items
   const safeCurrentPage = Math.min(currentPage, totalPages);
-  const startIndex = (safeCurrentPage - 1) * rowsPerPage;
+  const startIndex = totalEmployees === 0 ? 0 : (safeCurrentPage - 1) * rowsPerPage;
   const endIndex = Math.min(startIndex + rowsPerPage, totalEmployees);
-  const paginatedEmployees = useMemo(() => {
-    return filteredEmployees.slice(startIndex, endIndex);
-  }, [filteredEmployees, startIndex, endIndex]);
+  const paginatedEmployees = employees;
 
   const handleSelectEmployee = (emp) => {
     setSelectedUser(String(emp.id));
+    setSelectedEmployeeObj(emp);
     setActiveMenuId(null);
-    window.scrollTo({ top: 300, behavior: "smooth" });
+    setTimeout(() => {
+      detailSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
   };
 
   const handleClearFilters = () => {
@@ -247,12 +261,43 @@ export default function EmployeeDocuments() {
     setActiveMenuId(null);
   };
 
-  const selectedEmployeeObj = useMemo(
-    () => employees.find((emp) => String(emp.id) === String(selectedUser)),
-    [employees, selectedUser]
-  );
+  const handleDownload = async (doc) => {
+    const targetUrl = doc.download_url || getFileUrl(doc.file);
+    const empName = selectedEmployeeObj?.name || selectedEmployeeObj?.username || "employee";
+    setDownloadingId(doc.id);
+    try {
+      const res = await fetch(targetUrl);
+      if (!res.ok) throw new Error("Download request failed");
+      const blob = await res.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      const cleanTitle = (doc.title || "document").replace(/[^a-zA-Z0-9_-]/g, "_");
+      const cleanEmp = empName.replace(/[^a-zA-Z0-9_-]/g, "_");
+      let ext = "";
+      if (blob.type === "application/pdf") ext = ".pdf";
+      else if (blob.type.includes("webp")) ext = ".webp";
+      else if (blob.type.includes("jpeg") || blob.type.includes("jpg")) ext = ".jpg";
+      else if (blob.type.includes("png")) ext = ".png";
+      else if (targetUrl.includes(".pdf")) ext = ".pdf";
+      else if (targetUrl.includes(".webp")) ext = ".webp";
+      else if (targetUrl.includes(".jpg") || targetUrl.includes(".jpeg")) ext = ".jpg";
+      else ext = ".png";
 
-  const displayTotalDocs = totalDocsCount !== null ? totalDocsCount : employees.reduce((sum, e) => sum + (e.document_count || 0), 0);
+      link.download = `${cleanEmp}_${cleanTitle}${ext || ".pdf"}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      console.warn("Direct blob download failed, falling back to secure attachment URL:", err);
+      window.location.assign(targetUrl);
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  const displayTotalDocs = totalDocsCount !== null ? totalDocsCount : 0;
 
   if (loading) {
     return (
@@ -286,7 +331,7 @@ export default function EmployeeDocuments() {
               <HeroTile
                 icon={<Users size={18} />}
                 label="TOTAL STAFF"
-                value={employees.length}
+                value={totalEmployees}
               />
               <HeroTile
                 icon={<FileBadge2 size={18} />}
@@ -313,8 +358,11 @@ export default function EmployeeDocuments() {
                     if (val.startsWith("user-")) {
                       const uid = val.replace("user-", "");
                       setSelectedUser(uid);
+                      const found = employees.find((emp) => String(emp.id) === String(uid));
+                      if (found) setSelectedEmployeeObj(found);
                     } else {
                       setSelectedUser("");
+                      setSelectedEmployeeObj(null);
                       setFilterRole(val);
                       setCurrentPage(1);
                     }
@@ -395,7 +443,7 @@ export default function EmployeeDocuments() {
         {/* C & D. Main Content Area */}
         {selectedUser ? (
           /* D. Selected Employee Document Detail View */
-          <section className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden transition-all duration-300">
+          <section ref={detailSectionRef} className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden transition-all duration-300">
             {/* Detail View Header */}
             <div className="border-b border-slate-100 px-6 py-5">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -513,16 +561,19 @@ export default function EmployeeDocuments() {
                                 <ExternalLink size={13} />
                                 View File
                               </a>
-                              <a
-                                href={getFileUrl(doc.file)}
-                                download={`${selectedEmployeeObj?.name || "employee"}_${doc.title}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                              <button
+                                type="button"
+                                onClick={() => handleDownload(doc)}
+                                disabled={downloadingId === doc.id}
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-60 cursor-pointer"
                               >
-                                <Download size={13} />
+                                {downloadingId === doc.id ? (
+                                  <Loader2 size={13} className="animate-spin text-emerald-700" />
+                                ) : (
+                                  <Download size={13} />
+                                )}
                                 Download
-                              </a>
+                              </button>
                               {userRole === "superadmin" && (
                                 <button
                                   type="button"

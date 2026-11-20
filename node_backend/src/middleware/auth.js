@@ -49,7 +49,7 @@ export async function authenticate(req, res, next) {
     if (!user) {
       // Slow-path: Query MySQL and populate cache
       user = await db.get(
-        "SELECT * FROM accounts_user WHERE id=? AND deleted_at IS NULL", 
+        "SELECT * FROM accounts_user WHERE id=?", 
         [payload.userId]
       );
 

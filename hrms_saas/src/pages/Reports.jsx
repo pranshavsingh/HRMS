@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   BarChart3,
   Calendar,
@@ -8,11 +8,15 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import Pagination, { usePagination } from "../components/common/Pagination";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
+import { useRealtime } from "../context/RealtimeContext";
+import { useSite } from "../context/SiteContext";
 
 export default function Reports() {
   const { showPopup } = usePopup();
+  const { querySiteId } = useSite();
   const today = new Date();
   const defaultMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
   const [month, setMonth] = useState(defaultMonth);
@@ -21,12 +25,18 @@ export default function Reports() {
   const [reportType, setReportType] = useState("basic"); // "basic" | "duration"
   const [previewLoading, setPreviewLoading] = useState(false);
   const [reportData, setReportData] = useState(null);
+  const previewRows = useMemo(
+    () => reportData?.register_rows || [],
+    [reportData?.register_rows]
+  );
+  const pagination = usePagination(previewRows);
 
   const loadPreviewData = async (targetMonth) => {
+    if (!targetMonth) return;
     setPreviewLoading(true);
     try {
       const res = await API.get("/attendance/team-attendance/", {
-        params: { month: targetMonth },
+        params: { month: targetMonth, site_id: querySiteId, page: "all" },
       });
       setReportData(res.data);
     } catch (err) {
@@ -40,29 +50,37 @@ export default function Reports() {
 
   useEffect(() => {
     loadPreviewData(month);
-  }, [month]);
+  }, [month, querySiteId]);
+
+  useRealtime("attendance_update", () => loadPreviewData(month));
+  useRealtime("leave_update", () => loadPreviewData(month));
 
   const formatCell = (cell, type) => {
     if (!cell) return "--";
     if (type === "duration") {
-      if (cell.punch_in !== "--") {
-        return `${cell.punch_in} - ${cell.punch_out}`;
+      if (cell.punch_in && cell.punch_in !== "--") {
+        const inTime = cell.punch_in;
+        const outTime = cell.punch_out && cell.punch_out !== "--" ? cell.punch_out : "In Progress";
+        return `${inTime} - ${outTime}`;
       }
     }
     return cell.code;
   };
 
   const cellCodeStyle = (val) => {
-    if (val === "P") return "bg-emerald-50 text-emerald-700 border border-emerald-250 font-bold";
-    if (val === "A") return "bg-rose-50 text-rose-700 border border-rose-250 font-bold";
+    if (val === "P") return "bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold";
+    if (val === "A") return "bg-rose-50 text-rose-700 border border-rose-200 font-bold";
     if (val === "WO") return "bg-slate-100 text-slate-500 border border-slate-200 font-medium";
-    if (val === "IP" || val === "PR") return "bg-amber-50 text-amber-700 border border-amber-250 font-bold";
+    if (val === "H") return "bg-teal-50 text-teal-700 border border-teal-200 font-bold";
+    if (val === "L") return "bg-violet-50 text-violet-700 border border-violet-200 font-bold";
+    if (val === "IP" || val === "PR") return "bg-amber-50 text-amber-700 border border-amber-200 font-bold";
     if (val === "RJ") return "bg-slate-200 text-slate-700 border border-slate-300 font-medium";
-    // Check if it's duration (contains a hyphen)
-    if (val.includes("-")) {
+    if (val === "--") return "bg-slate-50 text-slate-400 border border-slate-200";
+    // Check if it's duration (contains a hyphen and is not "--")
+    if (val.includes("-") && val !== "--") {
       return "bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold px-2 text-[9px]";
     }
-    return "bg-slate-50 text-slate-600";
+    return "bg-slate-50 text-slate-600 border border-slate-200";
   };
 
   const downloadCsv = (filename, rows) => {
@@ -89,7 +107,7 @@ export default function Reports() {
     setExporting(true);
     try {
       const res = await API.get("/attendance/team-attendance/", {
-        params: { month },
+        params: { month, site_id: querySiteId, page: "all" },
       });
 
       const registerDates = Array.isArray(res.data?.register_dates) ? res.data.register_dates : [];
@@ -109,6 +127,7 @@ export default function Reports() {
         "Leave Days",
         "Pending Approvals",
         "Absent Days",
+        "Holidays",
         "Shortfall Days",
         "Total Work Hours",
       ];
@@ -121,6 +140,7 @@ export default function Reports() {
         row.leave_marks,
         row.pending_marks,
         row.absent_marks,
+        row.holiday_marks || 0,
         row.shortfall_days,
         Number(row.total_work_hours || 0).toFixed(2),
       ]);
@@ -206,7 +226,7 @@ export default function Reports() {
             <button
               onClick={handleExportMonthlyAttendance}
               disabled={exporting || previewLoading}
-              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 px-6 py-3.5 text-sm font-semibold text-white transition hover:bg-indigo-750 bg-slate-900 hover:bg-slate-800 disabled:opacity-75 h-fit"
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-900 px-6 py-3.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:opacity-75 h-fit cursor-pointer"
             >
               <Download size={16} />
               {exporting ? "Exporting..." : "Export CSV Report"}
@@ -219,7 +239,7 @@ export default function Reports() {
           <div className="flex flex-col gap-2 border-b border-slate-100 pb-4 mb-4">
             <h2 className="text-xl font-semibold text-slate-900">Live Export Preview</h2>
             <p className="text-sm text-slate-500">
-              A real-time snapshot of the first 5 records demonstrating the column layouts for the selected month and format type.
+              A real-time snapshot of the workforce attendance register demonstrating the column layouts for the selected month and format type.
             </p>
           </div>
 
@@ -236,7 +256,7 @@ export default function Reports() {
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3.5 py-1.5 text-xs font-semibold text-indigo-700">
-                  Previewing 5 of {reportData.register_rows.length} total staff profiles
+                  Showing {pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.pageSize + 1}–{Math.min(pagination.page * pagination.pageSize, pagination.total)} of {pagination.total} total staff profiles
                 </span>
                 <span className="text-xs text-slate-400">
                   Scroll horizontally to review all dates and metrics columns
@@ -259,12 +279,13 @@ export default function Reports() {
                       <th className="px-3 py-3 border-r border-slate-200 text-center min-w-[60px]">Leave</th>
                       <th className="px-3 py-3 border-r border-slate-200 text-center min-w-[60px]">Pending</th>
                       <th className="px-3 py-3 border-r border-slate-200 text-center min-w-[60px]">Absent</th>
+                      <th className="px-3 py-3 border-r border-slate-200 text-center min-w-[60px]">Holidays</th>
                       <th className="px-3 py-3 border-r border-slate-200 text-center min-w-[70px]">Shortfall</th>
                       <th className="px-3 py-3 text-center min-w-[80px]">Work Hours</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700 bg-white">
-                    {reportData.register_rows.slice(0, 5).map((row) => (
+                    {pagination.pageItems.map((row) => (
                       <tr key={row.user_id} className="hover:bg-slate-50/50 transition">
                         <td className="px-4 py-3 font-medium text-slate-900 border-r border-slate-200 sticky left-0 bg-white">{row.employee_code}</td>
                         <td className="px-4 py-3 font-medium text-slate-900 border-r border-slate-200 sticky left-[100px] bg-white shadow-[2px_0_5px_rgba(0,0,0,0.05)]">{row.employee_name || row.username}</td>
@@ -282,6 +303,7 @@ export default function Reports() {
                         <td className="px-3 py-3 text-center text-slate-600 border-r border-slate-200">{row.leave_marks}</td>
                         <td className="px-3 py-3 text-center text-amber-700 border-r border-slate-200">{row.pending_marks}</td>
                         <td className="px-3 py-3 text-center text-rose-700 border-r border-slate-200">{row.absent_marks}</td>
+                        <td className="px-3 py-3 text-center font-bold text-teal-700 border-r border-slate-200">{row.holiday_marks || 0}</td>
                         <td className="px-3 py-3 text-center text-red-600 border-r border-slate-200">{row.shortfall_days}</td>
                         <td className="px-3 py-3 text-center font-bold text-slate-800">{Number(row.total_work_hours || 0).toFixed(1)}h</td>
                       </tr>
@@ -289,6 +311,7 @@ export default function Reports() {
                   </tbody>
                 </table>
               </div>
+              <Pagination {...pagination} itemLabel="employees" />
             </div>
           )}
         </section>

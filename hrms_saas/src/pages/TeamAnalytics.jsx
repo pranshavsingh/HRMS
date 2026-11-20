@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   BarChart3,
   Briefcase,
   CalendarClock,
   Clock3,
+  Download,
+  FileSpreadsheet,
   RefreshCw,
   Search,
   ShieldAlert,
@@ -15,6 +17,8 @@ import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
+import { useRealtime } from "../context/RealtimeContext";
+import { useSite } from "../context/SiteContext";
 
 const emptyAnalytics = {
   summary: {
@@ -42,14 +46,63 @@ const emptyAnalytics = {
   members: [],
 };
 
+// TA-AN02: Canonical status class mappings with robust fallbacks
 const statusClasses = {
+  PRESENT: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  IN_PROGRESS: "bg-cyan-50 text-cyan-700 ring-cyan-200",
+  PENDING_REVIEW: "bg-amber-50 text-amber-700 ring-amber-200",
+  ON_LEAVE: "bg-violet-50 text-violet-700 ring-violet-200",
+  ABSENT: "bg-slate-100 text-slate-700 ring-slate-200",
+  REJECTED: "bg-rose-50 text-rose-700 ring-rose-200",
+  // Legacy / fallback strings
   Present: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   "In Progress": "bg-cyan-50 text-cyan-700 ring-cyan-200",
   "Pending Review": "bg-amber-50 text-amber-700 ring-amber-200",
   "On Leave": "bg-violet-50 text-violet-700 ring-violet-200",
   Absent: "bg-slate-100 text-slate-700 ring-slate-200",
   Rejected: "bg-rose-50 text-rose-700 ring-rose-200",
+  P: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  IP: "bg-cyan-50 text-cyan-700 ring-cyan-200",
+  PR: "bg-amber-50 text-amber-700 ring-amber-200",
+  L: "bg-violet-50 text-violet-700 ring-violet-200",
+  A: "bg-slate-100 text-slate-700 ring-slate-200",
+  RJ: "bg-rose-50 text-rose-700 ring-rose-200",
 };
+
+const STATUS_LABELS = {
+  PRESENT: "Present",
+  IN_PROGRESS: "In Progress",
+  PENDING_REVIEW: "Pending Review",
+  ON_LEAVE: "On Leave",
+  ABSENT: "Absent",
+  REJECTED: "Rejected",
+  Present: "Present",
+  "In Progress": "In Progress",
+  "Pending Review": "Pending Review",
+  "On Leave": "On Leave",
+  Absent: "Absent",
+  Rejected: "Rejected",
+  P: "Present",
+  IP: "In Progress",
+  PR: "Pending Review",
+  L: "On Leave",
+  A: "Absent",
+  RJ: "Rejected",
+  "--": "Absent",
+};
+
+// TA-AN02: Canonical status normalizer
+function normalizeStatus(status) {
+  if (!status) return "ABSENT";
+  const s = String(status).toUpperCase().trim();
+  if (s === "PRESENT" || s === "P") return "PRESENT";
+  if (s === "IN_PROGRESS" || s === "IN PROGRESS" || s === "IP") return "IN_PROGRESS";
+  if (s === "PENDING_REVIEW" || s === "PENDING REVIEW" || s === "PR") return "PENDING_REVIEW";
+  if (s === "ON_LEAVE" || s === "ON LEAVE" || s === "L") return "ON_LEAVE";
+  if (s === "REJECTED" || s === "RJ") return "REJECTED";
+  if (s === "ABSENT" || s === "A" || s === "--") return "ABSENT";
+  return s;
+}
 
 const focusOptions = {
   all: () => true,
@@ -69,6 +122,7 @@ function formatValue(value, suffix = "") {
 
 export default function TeamAnalytics() {
   const { showPopup } = usePopup();
+  const { querySiteId } = useSite();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [analytics, setAnalytics] = useState(emptyAnalytics);
@@ -77,6 +131,12 @@ export default function TeamAnalytics() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [focusFilter, setFocusFilter] = useState("all");
 
+  const daysRef = useRef(days);
+  daysRef.current = days;
+  const querySiteIdRef = useRef(querySiteId);
+  querySiteIdRef.current = querySiteId;
+
+  // TA-AN09: Include site_id in query parameters
   const fetchAnalytics = async (selectedDays, showLoader = true) => {
     if (showLoader) {
       setLoading(true);
@@ -85,8 +145,10 @@ export default function TeamAnalytics() {
     }
 
     try {
+      const params = { days: selectedDays };
+      if (querySiteIdRef.current) params.site_id = querySiteIdRef.current;
       const res = await API.get("/attendance/team-analytics/", {
-        params: { days: selectedDays },
+        params,
       });
       setAnalytics({
         ...emptyAnalytics,
@@ -113,8 +175,19 @@ export default function TeamAnalytics() {
 
   useEffect(() => {
     fetchAnalytics(days);
-  }, [days]);
+  }, [days, querySiteId]);
 
+  // TA-AN08: Stable real-time SSE listener avoiding subscription churn
+  const handleRealtimeUpdate = useCallback(() => {
+    fetchAnalytics(daysRef.current, false);
+  }, []);
+
+  useRealtime("attendance_update", handleRealtimeUpdate);
+  useRealtime("leave_update", handleRealtimeUpdate);
+  useRealtime("punch_in", handleRealtimeUpdate);
+  useRealtime("punch_out", handleRealtimeUpdate);
+
+  // TA-AN02: Filter members using canonical status normalization
   const filteredMembers = useMemo(() => {
     const query = search.trim().toLowerCase();
     return analytics.members.filter((item) => {
@@ -125,13 +198,13 @@ export default function TeamAnalytics() {
           item.username,
           item.email,
           item.team_name,
-          item.today_status,
+          STATUS_LABELS[normalizeStatus(item.today_status)] || item.today_status,
         ]
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(query));
 
       const matchesStatus =
-        statusFilter === "all" ? true : item.today_status === statusFilter;
+        statusFilter === "all" ? true : normalizeStatus(item.today_status) === statusFilter;
       const matchesFocus = (focusOptions[focusFilter] || focusOptions.all)(item);
 
       return matchesSearch && matchesStatus && matchesFocus;
@@ -151,6 +224,78 @@ export default function TeamAnalytics() {
         .slice(0, 5),
     [analytics.members]
   );
+
+  // Safe CSV export with formula injection protection and UTF-8 BOM
+  const sanitizeCsvValue = (value) => {
+    if (value === null || value === undefined) return "";
+    let str = String(value);
+    if (/^[=+\-@\t\r]/.test(str)) {
+      str = "'" + str;
+    }
+    return `"${str.replace(/"/g, '""')}"`;
+  };
+
+  const handleExportCsv = () => {
+    if (!filteredMembers.length) {
+      showPopup("No team members to export", "error");
+      return;
+    }
+    const headers = [
+      "Employee Name",
+      "Username",
+      "Email",
+      "Team",
+      "Joining Date",
+      "Today Status",
+      "Present Days",
+      "Approved Days",
+      "Pending Days",
+      "Rejected Days",
+      "Leave Days",
+      "Total Hours",
+      "Avg Hours/Day",
+      "Completion Rate",
+      "Fulfilled Days",
+      "Under Target Days",
+      "Shortfall Hours",
+      "Pending Approval Items",
+      "Last Attendance Date",
+    ];
+    const rows = filteredMembers.map((m) => [
+      sanitizeCsvValue(m.employee_name || m.username),
+      sanitizeCsvValue(m.username),
+      sanitizeCsvValue(m.email || ""),
+      sanitizeCsvValue(m.team_name || ""),
+      sanitizeCsvValue(m.joining_date || ""),
+      sanitizeCsvValue(STATUS_LABELS[normalizeStatus(m.today_status)] || m.today_status),
+      sanitizeCsvValue(m.present_days),
+      sanitizeCsvValue(m.approved_days),
+      sanitizeCsvValue(m.pending_days),
+      sanitizeCsvValue(m.rejected_days),
+      sanitizeCsvValue(m.leave_days),
+      sanitizeCsvValue(m.total_work_hours),
+      sanitizeCsvValue(m.average_hours),
+      sanitizeCsvValue(`${Number(m.completion_rate || 0).toFixed(1)}%`),
+      sanitizeCsvValue(m.fulfilled_days),
+      sanitizeCsvValue(m.under_target_days),
+      sanitizeCsvValue(m.shortfall_hours),
+      sanitizeCsvValue(m.pending_approval_items),
+      sanitizeCsvValue(m.last_attendance_date || ""),
+    ]);
+    const csvContent =
+      "\uFEFF" +
+      [headers.map(sanitizeCsvValue).join(","), ...rows.map((r) => r.join(","))].join("\r\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", `team_analytics_${days}d_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    showPopup("Team analytics exported successfully", "success");
+  };
 
   if (loading) {
     return (
@@ -200,13 +345,25 @@ export default function TeamAnalytics() {
               </p>
             </div>
 
-            <button
-              onClick={() => fetchAnalytics(days, false)}
-              className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
-            >
-              <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
-              Refresh
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleExportCsv}
+                disabled={!filteredMembers.length}
+                className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Export filtered records to CSV"
+              >
+                <FileSpreadsheet size={16} className="text-emerald-600" />
+                Export CSV
+              </button>
+
+              <button
+                onClick={() => fetchAnalytics(days, false)}
+                className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+              >
+                <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
+                Refresh
+              </button>
+            </div>
           </div>
 
           <div className="mt-5 grid gap-4 lg:grid-cols-[0.8fr_1.4fr_1fr_1fr]">
@@ -236,6 +393,7 @@ export default function TeamAnalytics() {
               />
             </label>
 
+            {/* TA-AN02: Canonical status filter dropdown */}
             <label className="block">
               <span className="mb-2 text-sm font-medium text-slate-700">Today Status</span>
               <select
@@ -244,12 +402,12 @@ export default function TeamAnalytics() {
                 className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white"
               >
                 <option value="all">All statuses</option>
-                <option value="Present">Present</option>
-                <option value="In Progress">In Progress</option>
-                <option value="Pending Review">Pending Review</option>
-                <option value="On Leave">On Leave</option>
-                <option value="Absent">Absent</option>
-                <option value="Rejected">Rejected</option>
+                <option value="PRESENT">Present</option>
+                <option value="IN_PROGRESS">In Progress</option>
+                <option value="PENDING_REVIEW">Pending Review</option>
+                <option value="ON_LEAVE">On Leave</option>
+                <option value="ABSENT">Absent</option>
+                <option value="REJECTED">Rejected</option>
               </select>
             </label>
 
@@ -320,8 +478,8 @@ export default function TeamAnalytics() {
                         <p className="font-semibold text-slate-900">{item.employee_name || item.username}</p>
                         <p className="mt-1 text-xs text-slate-500">{item.email || item.username}</p>
                       </div>
-                      <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ring-1 ${statusClasses[item.today_status] || statusClasses.Absent}`}>
-                        {item.today_status}
+                      <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ring-1 ${statusClasses[normalizeStatus(item.today_status)] || statusClasses.ABSENT}`}>
+                        {STATUS_LABELS[normalizeStatus(item.today_status)] || item.today_status}
                       </span>
                     </div>
                     <div className="mt-3 grid grid-cols-3 gap-3 text-xs text-slate-500">
@@ -389,8 +547,8 @@ export default function TeamAnalytics() {
                         <div className="mt-1 text-xs text-slate-500">Joined: {item.joining_date || "--"}</div>
                       </td>
                       <td className="px-6 py-4">
-                        <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ring-1 ${statusClasses[item.today_status] || statusClasses.Absent}`}>
-                          {item.today_status}
+                        <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ring-1 ${statusClasses[normalizeStatus(item.today_status)] || statusClasses.ABSENT}`}>
+                          {STATUS_LABELS[normalizeStatus(item.today_status)] || item.today_status}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-slate-700">

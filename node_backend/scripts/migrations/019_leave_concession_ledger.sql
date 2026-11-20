@@ -1,0 +1,26 @@
+-- Append-only management leave concessions and reversal entries.
+CREATE TABLE IF NOT EXISTS leave_concession_ledger (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  leave_type VARCHAR(20) NOT NULL,
+  adjustment_days DECIMAL(8,2) NOT NULL,
+  effective_date DATE NOT NULL,
+  expiry_date DATE NULL,
+  reason TEXT NOT NULL,
+  granted_by_id BIGINT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  balance_before DECIMAL(10,2) NOT NULL,
+  balance_after DECIMAL(10,2) NOT NULL,
+  idempotency_key VARCHAR(100) NOT NULL,
+  reverses_id BIGINT NULL,
+  INDEX idx_leave_concession_balance (tenant_id, user_id, leave_type, effective_date, expiry_date),
+  UNIQUE KEY uq_leave_concession_idempotency (tenant_id, user_id, idempotency_key),
+  UNIQUE KEY uq_leave_concession_reversal (reverses_id),
+  CONSTRAINT fk_leave_concession_tenant FOREIGN KEY (tenant_id) REFERENCES workforce_tenant(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_leave_concession_user FOREIGN KEY (tenant_id, user_id) REFERENCES workforce_user_tenant(tenant_id, user_id) ON DELETE RESTRICT,
+  CONSTRAINT fk_leave_concession_actor FOREIGN KEY (granted_by_id) REFERENCES accounts_user(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_leave_concession_reversal FOREIGN KEY (reverses_id) REFERENCES leave_concession_ledger(id) ON DELETE RESTRICT,
+  CONSTRAINT chk_leave_concession_nonzero CHECK (adjustment_days <> 0),
+  CONSTRAINT chk_leave_concession_expiry CHECK (expiry_date IS NULL OR expiry_date >= effective_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

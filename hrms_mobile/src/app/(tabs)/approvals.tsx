@@ -41,13 +41,26 @@ interface PunchException {
 
 interface LeaveApproval {
   id: number;
+  employee_id?: number;
   employee_name: string;
+  employee_role?: string;
+  team_name?: string;
+  designation?: string;
   leave_type: string;
   from: string;
   to: string;
   reason: string;
   status: string;
   applied_at: string;
+  balance?: {
+    base_entitlement: number;
+    management_concession: number;
+    leaves_used: number;
+    pending_days: number;
+    pending_requests: number;
+    available_balance: number;
+    projected_balance: number;
+  };
 }
 
 export default function ApprovalsScreen() {
@@ -112,12 +125,17 @@ export default function ApprovalsScreen() {
         return {
           id: l.id,
           employee_name: l.employee_name || l.employee,
+          employee_id: l.employee_id,
+          employee_role: l.employee_role,
+          team_name: l.team_name,
+          designation: l.designation,
           leave_type: l.type,
           from: l.from,
           to: l.to,
           reason: l.reason,
           status: l.status,
           applied_at: l.created_at,
+          balance: l.balance,
         };
       });
       setLeaveQueue(mappedLeaves.filter((l) => l.status === "pending"));
@@ -235,12 +253,19 @@ export default function ApprovalsScreen() {
         </View>
 
         <View style={styles.cardContent}>
+          <Text style={styles.cardMeta}>Employee ID: {item.employee_id ?? "--"} · {item.team_name || "Team not assigned"} · {item.designation || "Designation not set"}</Text>
           <View style={styles.dateDurationRow}>
             <Calendar size={14} color="#94a3b8" style={{ marginRight: 6 }} />
             <Text style={styles.cardMeta}>
               {item.from} to {item.to}
             </Text>
           </View>
+          <View style={styles.reasonCard}>
+            <Text style={styles.reasonText}>
+              Balance: entitlement {item.balance?.base_entitlement ?? "--"}d · concession {item.balance?.management_concession ?? "--"}d · used {item.balance?.leaves_used ?? "--"}d · pending {item.balance?.pending_days ?? "--"}d ({item.balance?.pending_requests ?? 0} requests) · available {item.balance?.available_balance ?? "--"}d · projected {item.balance?.projected_balance ?? "--"}d
+            </Text>
+          </View>
+          {Number(item.balance?.projected_balance) < 0 && <Text style={{ color: "#be123c", fontWeight: "700", marginTop: 6 }}>Negative balance warning</Text>}
           <View style={styles.reasonCard}>
             <FileText size={12} color="#64748b" style={{ marginRight: 6, marginTop: 2 }} />
             <Text style={styles.reasonText}>{item.reason}</Text>

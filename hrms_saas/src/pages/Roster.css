@@ -1,0 +1,198 @@
+.roster-page {
+  --roster-ink: #172033;
+  --roster-muted: #64748b;
+  --roster-border: #e2e8f0;
+  --roster-blue: #155eef;
+  width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 4px 2px 28px;
+  color: var(--roster-ink);
+}
+
+/* Keep this legacy Tailwind-built screen on the same light surfaces as Shift Management. */
+.roster-page [class~="bg-gray-900"] {
+  background-color: #fff;
+  border-color: #e0e6ef;
+  box-shadow: 0 6px 20px rgb(15 23 42 / 5%);
+}
+
+.roster-page [class~="bg-gray-950"],
+.roster-page [class~="bg-gray-950/60"] {
+  background-color: #f7f9fc;
+}
+
+.roster-page [class~="bg-gray-800"] {
+  background-color: #eef2f7;
+}
+
+.roster-page [class~="bg-gray-700"] {
+  background-color: #e3e9f1;
+}
+
+.roster-page [class~="bg-gray-900/40"] {
+  background-color: #f8fafc;
+}
+
+.roster-page [class~="bg-emerald-950/40"] {
+  background-color: #ecfdf3;
+}
+
+.roster-page [class~="bg-indigo-950/40"],
+.roster-page [class~="bg-indigo-950"] {
+  background-color: #eef2ff;
+}
+
+.roster-page [class~="bg-emerald-900/60"] {
+  background-color: #dcfce7;
+}
+
+.roster-page [class~="bg-yellow-900/60"],
+.roster-page [class~="bg-yellow-950"] {
+  background-color: #fef3c7;
+}
+
+.roster-page [class~="bg-red-950"] { background-color: #fee2e2; }
+
+.roster-page [class~="bg-emerald-950"],
+.roster-page [class~="bg-emerald-900/40"] {
+  background-color: #eaf8ef;
+}
+
+.roster-page [class~="bg-gradient-to-r"] {
+  background-color: #effaf3;
+  background-image: none;
+  border-color: #cdebd5;
+}
+
+.roster-page [class~="text-white"] { color: var(--roster-ink); }
+.roster-page [class~="text-gray-200"] { color: #344256; }
+.roster-page [class~="text-gray-300"] { color: #475569; }
+.roster-page [class~="text-gray-400"],
+.roster-page [class~="text-gray-500"] { color: var(--roster-muted); }
+
+.roster-page [class~="text-emerald-300"],
+.roster-page [class~="text-emerald-400"] { color: #15803d; }
+
+.roster-page [class~="text-indigo-300"],
+.roster-page [class~="text-indigo-400"] { color: #4f46e5; }
+
+.roster-page [class~="text-yellow-300"],
+.roster-page [class~="text-yellow-400"] { color: #a16207; }
+
+.roster-page [class~="text-red-400"] { color: #b91c1c; }
+
+.roster-page [class~="border-gray-800"],
+.roster-page [class~="border-gray-700"] { border-color: var(--roster-border); }
+
+.roster-page [class~="border-emerald-700/60"],
+.roster-page [class~="border-emerald-800"],
+.roster-page [class~="border-emerald-800/60"] { border-color: #bbdfc5; }
+
+.roster-page [class~="border-indigo-700/60"],
+.roster-page [class~="border-indigo-800"] { border-color: #c7d2fe; }
+
+.roster-page [class~="border-yellow-800"] { border-color: #f1d58b; }
+.roster-page [class~="border-red-800"] { border-color: #fecaca; }
+
+.roster-page button[class~="bg-gray-800"] {
+  color: #344256;
+  border-color: #d6deea;
+}
+
+.roster-page button[class~="hover:bg-gray-700"]:hover,
+.roster-page button[class~="bg-gray-800"]:hover { background-color: #e3e9f1; }
+
+.roster-page button[class~="bg-emerald-600"],
+.roster-page button[class~="bg-red-600"] {
+  color: #fff;
+  border-color: transparent;
+}
+
+.roster-page button[class~="bg-emerald-600"] { background-color: var(--roster-blue); }
+.roster-page button[class~="hover:bg-emerald-500"]:hover { background-color: #0f4fd6; }
+
+.roster-page button[class~="border-emerald-500"] {
+  border-color: var(--roster-blue);
+  color: var(--roster-blue);
+}
+
+.roster-page input[class~="bg-gray-800"],
+.roster-page select[class~="bg-gray-800"],
+.roster-page textarea[class~="bg-gray-800"] {
+  color: #172033;
+  border-color: #d4dce8;
+}
+
+.roster-page input::placeholder,
+.roster-page textarea::placeholder { color: #8290a4; }
+
+.roster-page .fixed.inset-0 { background-color: rgb(15 23 42 / 46%); }
+
+.roster-page table { color: #344256; }
+.roster-page tbody tr[class~="hover:bg-gray-800/40"]:hover { background-color: #f8faff; }
+.roster-page [class~="divide-gray-800"] > :not([hidden]) ~ :not([hidden]) { border-color: #e8edf3; }
+
+.roster-guide {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  border: 1px solid #dbe6f7;
+  border-radius: 12px;
+  background: #f8faff;
+  padding: 13px 16px;
+  color: #52627b;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.roster-guide > svg { flex: none; margin-top: 1px; color: #245dd4; }
+.roster-guide p { margin: 0; }
+.roster-guide strong { color: #20324a; }
+
+.roster-empty-state {
+  display: flex;
+  min-height: 250px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px solid #e0e6ef;
+  border-radius: 16px;
+  background: #fff;
+  padding: 32px 20px;
+  text-align: center;
+  box-shadow: 0 6px 20px rgb(15 23 42 / 5%);
+}
+
+.roster-empty-state__icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 14px;
+  background: #eef4ff;
+  color: #2864df;
+}
+
+.roster-empty-state h2 { margin: 0; color: #172033; font-size: 16px; font-weight: 700; }
+.roster-empty-state p { max-width: 610px; margin: 0; color: #64748b; font-size: 13px; line-height: 1.55; }
+.roster-empty-state p strong { color: #344256; }
+
+.roster-my-empty {
+  grid-column: 1 / -1;
+  border: 1px dashed #d7e0ec;
+  border-radius: 12px;
+  background: #fafcff;
+  padding: 28px 18px;
+  color: #64748b;
+  font-size: 13px;
+  text-align: center;
+}
+
+@media (max-width: 700px) {
+  .roster-page { padding: 0 0 22px; }
+  .roster-page > .flex:first-child { align-items: flex-start; }
+  .roster-guide { font-size: 12px; }
+  .roster-empty-state { min-height: 220px; }
+}

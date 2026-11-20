@@ -16,6 +16,35 @@ import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
 import * as faceapi from "@vladmandic/face-api";
 
+let faceModelsPromise;
+
+const loadFaceModels = () => {
+  if (!faceModelsPromise) {
+    const modelUrl = "/models/face-api/";
+    faceModelsPromise = (async () => {
+      const tf = faceapi.tf;
+      let backendReady = await tf.setBackend("webgl");
+      if (!backendReady) backendReady = await tf.setBackend("cpu");
+      if (!backendReady) throw new Error("No supported TensorFlow browser backend is available.");
+      await tf.ready();
+
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.isLoaded
+          ? Promise.resolve()
+          : faceapi.nets.tinyFaceDetector.loadFromUri(modelUrl),
+        faceapi.nets.faceLandmark68Net.isLoaded
+          ? Promise.resolve()
+          : faceapi.nets.faceLandmark68Net.loadFromUri(modelUrl),
+      ]);
+    })().catch((error) => {
+      faceModelsPromise = null;
+      throw error;
+    });
+  }
+
+  return faceModelsPromise;
+};
+
 const formatCoordinate = (value) =>
   value === null || value === undefined ? "--" : Number(value).toFixed(6);
 
@@ -94,6 +123,7 @@ export default function Attendance() {
 
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelError, setModelError] = useState(false);
+  const [modelErrorMessage, setModelErrorMessage] = useState("");
   const [validation, setValidation] = useState({
     isValid: false,
     message: "Initializing face detector...",
@@ -130,19 +160,29 @@ export default function Attendance() {
   useEffect(() => {
     const loadModels = async () => {
       try {
-        const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
-        await Promise.all([
-          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        ]);
+        await loadFaceModels();
         setModelsLoaded(true);
       } catch (err) {
         console.error("Error loading face-api models:", err);
+        setModelErrorMessage(err?.message || "The local verification models could not be loaded.");
         setModelError(true);
       }
     };
     loadModels();
   }, []);
+
+  const retryFaceModels = async () => {
+    setModelError(false);
+    setModelErrorMessage("");
+    try {
+      await loadFaceModels();
+      setModelsLoaded(true);
+    } catch (err) {
+      console.error("Error retrying face-api models:", err);
+      setModelErrorMessage(err?.message || "The local verification models could not be loaded.");
+      setModelError(true);
+    }
+  };
 
   const startDetectionLoop = () => {
     if (loopRef.current) clearInterval(loopRef.current);
@@ -428,27 +468,25 @@ export default function Attendance() {
           uploadFormData.append("signature", signData.signature);
           uploadFormData.append("folder", signData.folder);
           uploadFormData.append("public_id", signData.public_id);
-          if (signData.upload_preset) {
-            uploadFormData.append("upload_preset", signData.upload_preset);
-          }
 
           const cloudRes = await axios.post(signData.upload_url, uploadFormData);
           if (cloudRes.data?.public_id) {
-            const res = await API.post(url, {
+            directSuccess = {
               latitude: coords.latitude,
               longitude: coords.longitude,
               photo_public_id: cloudRes.data.public_id,
               photo_url: cloudRes.data.secure_url,
-            });
-            showPopup(res.data.message || "Success", "success");
-            directSuccess = true;
+            };
           }
         }
       } catch (directErr) {
         console.warn("Direct upload fallback to VPS relay:", directErr);
       }
 
-      if (!directSuccess) {
+      if (directSuccess) {
+        const res = await API.post(url, directSuccess);
+        showPopup(res.data.message || "Success", "success");
+      } else {
         // Fallback: Relay multipart through backend
         const formData = new FormData();
         formData.append("photo", image, `attendance_${Date.now()}.jpg`);
@@ -607,17 +645,19 @@ export default function Attendance() {
                 <div className="py-8 text-center text-slate-500 text-sm">
                   Loading attendance status...
                 </div>
-              ) : !modelsLoaded ? (
-                <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-6 text-center text-slate-500">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-slate-600"></div>
-                  <span className="text-sm font-medium mt-2">Loading face verification models...</span>
-                  <p className="text-xs text-slate-400">This takes a moment on first load.</p>
-                </div>
               ) : modelError ? (
                 <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-6 text-center text-rose-700">
                   <XCircle size={32} />
                   <span className="text-sm font-semibold">Face detector model failed to load</span>
-                  <p className="text-xs">Please verify your internet connection and refresh.</p>
+                  <p className="text-xs">{modelErrorMessage || "The local verification models could not be loaded."}</p>
+                  <p className="text-xs">Punch submission stays unavailable until verification is ready.</p>
+                  <button
+                    type="button"
+                    onClick={retryFaceModels}
+                    className="rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-800"
+                  >
+                    Retry verification setup
+                  </button>
                 </div>
               ) : !cameraOn ? (
                 <div className="mt-6 space-y-4">
@@ -722,6 +762,12 @@ export default function Attendance() {
                 </div>
               ) : (
                 <div className="mt-6 space-y-4">
+                  {!modelsLoaded && (
+                    <div className="flex items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="status">
+                      <div className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-amber-600 border-t-transparent" />
+                      Face verification is starting. Keep your face in view; submission will be ready as soon as checks pass.
+                    </div>
+                  )}
                   <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
                     Camera and location are ready. Review the details below and submit the current {type === "in" ? "punch in" : "punch out"}.
                   </div>

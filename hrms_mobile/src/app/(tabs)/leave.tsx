@@ -53,6 +53,8 @@ export default function LeaveScreen() {
     leaves_taken: 0,
     leave_balance: 0,
     pending: 0,
+    management_concession: 0,
+    pending_leave_days: 0,
   });
 
   const [form, setForm] = useState({
@@ -89,6 +91,8 @@ export default function LeaveScreen() {
         pending: Number(
           apiSummary?.pending_requests || records.filter((item: any) => item.status === "pending").length
         ),
+        management_concession: Number(apiSummary?.management_concession || 0),
+        pending_leave_days: Number(apiSummary?.pending_leave_days || 0),
       });
     } catch (err: any) {
       console.error("Leave fetch error:", err);
@@ -100,6 +104,16 @@ export default function LeaveScreen() {
   }, [user, isAuthenticated]);
 
   useRealtime("leave_update", () => fetchLeaveData(false));
+  useRealtime("leave_notice", (notice: any) => {
+    fetchLeaveData(false);
+    if (notice?.status === "concession_granted") {
+      Alert.alert("Leave Concession Granted", `${notice.additional_days} ${notice.leave_type} leave days granted. Updated balance: ${notice.updated_balance} days.`);
+    } else if (notice?.status === "concession_reversed") {
+      Alert.alert("Leave Concession Reversed", `Updated balance: ${notice.updated_balance} days.`);
+    } else if (notice?.status === "approved" || notice?.status === "rejected") {
+      Alert.alert("Leave Request Updated", `Your ${notice.leave_type} request was ${notice.status}. Updated balance: ${notice.updated_balance} days.`);
+    }
+  });
 
   useEffect(() => {
     fetchLeaveData(true);
@@ -131,7 +145,7 @@ export default function LeaveScreen() {
     });
   }, [form.from_date, form.to_date, leaves]);
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (confirmedBalance?: { available: number; projected: number; snapshot: string }) => {
     if (hasOverlap) {
       Alert.alert("Date Overlap", "Selected dates overlap with an already approved leave request.");
       return;
@@ -155,6 +169,12 @@ export default function LeaveScreen() {
         from_date: form.from_date,
         to_date: form.to_date,
         reason: form.reason.trim(),
+        confirm_insufficient_balance: Boolean(confirmedBalance),
+        ...(confirmedBalance ? {
+          confirmed_available_balance: confirmedBalance.available,
+          confirmed_projected_balance: confirmedBalance.projected,
+          confirmed_balance_snapshot: confirmedBalance.snapshot,
+        } : {}),
       };
 
       const res = await api.post("/leave/apply/", payload);
@@ -168,6 +188,21 @@ export default function LeaveScreen() {
       fetchLeaveData(false);
     } catch (err: any) {
       console.error("Apply leave error", err);
+      const detail = err.response?.data;
+      if (err.response?.status === 409 && detail?.code === "INSUFFICIENT_LEAVE_BALANCE") {
+        const available = Number(detail.current_available_balance);
+        const requested = Number(detail.requested_days);
+        const projected = Number(detail.projected_balance);
+        Alert.alert(
+          "Insufficient Leave Balance",
+          `Your available leave balance is ${available} days, but you are requesting ${requested} days of leave. Submitting this application will result in a projected negative leave balance of ${projected} days.`,
+          [
+            { text: "Cancel Application", style: "cancel" },
+            { text: "Continue & Submit", onPress: () => handleSubmit({ available, projected, snapshot: detail.confirmation_snapshot }) },
+          ]
+        );
+        return;
+      }
       const errMsg = err.response?.data?.error || "Failed to submit leave request.";
       Alert.alert("Submission Failure", errMsg);
     } finally {
@@ -280,9 +315,14 @@ export default function LeaveScreen() {
               <Text style={styles.statValue}>{summary.leave_balance}</Text>
             </View>
             <View style={styles.statTile}>
+              <ShieldCheck size={18} color="#10b981" />
+              <Text style={styles.statLabel}>Concession</Text>
+              <Text style={styles.statValue}>{summary.management_concession}</Text>
+            </View>
+            <View style={styles.statTile}>
               <Calendar size={18} color="#f59e0b" />
-              <Text style={styles.statLabel}>Pending</Text>
-              <Text style={styles.statValue}>{summary.pending}</Text>
+              <Text style={styles.statLabel}>Pending days</Text>
+              <Text style={styles.statValue}>{summary.pending_leave_days}</Text>
             </View>
           </View>
         </View>
@@ -370,7 +410,7 @@ export default function LeaveScreen() {
           <TouchableOpacity
             style={[styles.submitBtn, (submitting || hasOverlap) && styles.submitBtnDisabled]}
             disabled={submitting || hasOverlap}
-            onPress={handleSubmit}
+            onPress={() => handleSubmit()}
           >
             {submitting ? (
               <ActivityIndicator size="small" color="#ffffff" />

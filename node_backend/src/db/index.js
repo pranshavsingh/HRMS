@@ -83,6 +83,9 @@ export const db = {
     while (attempts < maxRetries) {
       attempts++;
       const connection = await pool.getConnection();
+      connection.get = (sql, params = []) => db.get(sql, params, connection);
+      connection.all = (sql, params = []) => db.all(sql, params, connection);
+      connection.run = (sql, params = []) => db.run(sql, params, connection);
       try {
         await connection.beginTransaction();
         const result = await fn(connection);

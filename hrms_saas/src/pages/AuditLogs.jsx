@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   Activity,
   ArrowUpDown,
@@ -25,9 +25,10 @@ const severityClasses = {
 
 const formatDateTime = (value) => {
   if (!value) return "--";
-  const date = new Date(value);
+  const dateStr = String(value).replace(" ", "T");
+  const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) {
-    return value;
+    return String(value);
   }
   return new Intl.DateTimeFormat("en-IN", {
     day: "2-digit",
@@ -40,49 +41,98 @@ const formatDateTime = (value) => {
 };
 
 const formatDetailKey = (key) => {
-  return key
-    .split("_")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
+  if (key === null || key === undefined) return "";
+  return String(key)
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
-const formatDetailValue = (val) => {
-  if (val === null || val === undefined) return "N/A";
-  if (typeof val === "object" && val !== null && !Array.isArray(val)) {
+export const renderFormattedValue = (val, depth = 0) => {
+  if (val === null || val === undefined) {
+    return <span className="text-slate-400 italic">N/A</span>;
+  }
+  if (typeof val === "boolean") {
+    return (
+      <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-semibold ${val ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+        {val ? "Yes" : "No"}
+      </span>
+    );
+  }
+  if (typeof val === "number") {
+    return <span className="font-mono text-slate-800">{val}</span>;
+  }
+  if (typeof val === "string") {
+    const trimmed = val.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        const parsed = JSON.parse(val);
+        return renderFormattedValue(parsed, depth + 1);
+      } catch {
+        // Raw string
+      }
+    }
+    return <span className="text-slate-800 break-words">{val}</span>;
+  }
+  if (Array.isArray(val)) {
+    if (val.length === 0) return <span className="text-slate-400 italic">Empty list</span>;
+    const allPrimitives = val.every(v => v === null || typeof v !== "object");
+    if (allPrimitives) {
+      return <span className="text-slate-800 font-mono text-xs">{val.map(v => String(v ?? "null")).join(", ")}</span>;
+    }
+    return (
+      <div className="space-y-1.5 pl-2 border-l-2 border-slate-200 mt-1">
+        {val.map((item, idx) => (
+          <div key={idx} className="text-xs">
+            <span className="text-slate-400 font-mono mr-1">#{idx + 1}</span>
+            {renderFormattedValue(item, depth + 1)}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (typeof val === "object") {
+    if (depth > 5) return <span className="text-slate-500 font-mono text-xs">{JSON.stringify(val)}</span>;
     if ("old" in val && "new" in val) {
-      const oldStr = formatDetailValue(val.old);
-      const newStr = formatDetailValue(val.new);
       return (
-        <span className="inline-flex items-center gap-1.5 flex-wrap justify-end text-sm">
-          <span className="line-through text-slate-400">{oldStr}</span>
+        <span className="inline-flex items-center gap-1.5 flex-wrap justify-end text-xs">
+          <span className="line-through text-slate-400">{renderFormattedValue(val.old, depth + 1)}</span>
           <span className="text-slate-400">➔</span>
-          <span className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded font-semibold text-xs">{newStr}</span>
+          <span className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded font-semibold">{renderFormattedValue(val.new, depth + 1)}</span>
         </span>
       );
     }
+    return (
+      <div className="space-y-1 pl-2 border-l-2 border-slate-200 text-xs mt-1 w-full">
+        {Object.entries(val).map(([subKey, subVal]) => (
+          <div key={subKey} className="flex justify-between gap-2 border-b border-slate-100 py-0.5 last:border-0">
+            <span className="font-semibold text-slate-500">{formatDetailKey(subKey)}:</span>
+            <span className="text-slate-800 text-right">{renderFormattedValue(subVal, depth + 1)}</span>
+          </div>
+        ))}
+      </div>
+    );
   }
-  if (typeof val === "boolean") return val ? "Yes" : "No";
-  if (Array.isArray(val)) {
-    return val.map(v => {
-      if (typeof v === "object" && v !== null) {
-        if ("latitude" in v && "longitude" in v) {
-          const pri = v.is_primary ? " (Primary)" : "";
-          return `Lat: ${v.latitude}, Lng: ${v.longitude}, Rad: ${v.allowed_radius}m${pri}`;
-        }
-        return JSON.stringify(v);
-      }
-      return String(v);
-    }).join("; ");
+  return <span className="text-slate-800">{String(val)}</span>;
+};
+
+// Safe CSV sanitizer protecting against formula injection (=, +, -, @, \t, \r)
+export const sanitizeCsvValue = (val) => {
+  if (val === null || val === undefined) return '""';
+  let str = typeof val === "object" ? JSON.stringify(val) : String(val);
+  const trimmed = str.trimStart();
+  if (trimmed.length > 0 && ["=", "+", "-", "@", "\t", "\r"].includes(trimmed[0])) {
+    str = "'" + str;
   }
-  if (typeof val === "object") return JSON.stringify(val);
-  return String(val);
+  return `"${str.replace(/"/g, '""')}"`;
 };
 
 export default function AuditLogs() {
   const { showPopup } = usePopup();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  
+  const [exporting, setExporting] = useState(false);
+
   // Data States
   const [logs, setLogs] = useState([]);
   const [availableActions, setAvailableActions] = useState([]);
@@ -96,6 +146,7 @@ export default function AuditLogs() {
   // Filter States
   const [search, setSearch] = useState("");
   const [actionType, setActionType] = useState("");
+  const [severity, setSeverity] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [sort, setSort] = useState("desc");
@@ -104,7 +155,8 @@ export default function AuditLogs() {
   // Selected Log detail popup state
   const [selectedLog, setSelectedLog] = useState(null);
 
-  const fetchLogs = async (showLoader = true) => {
+  // BUG-AL03 & BUG-AL08: Explicit parameter-driven fetch
+  const fetchLogs = async (targetPage = page, showLoader = true, overrides = {}) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -112,15 +164,24 @@ export default function AuditLogs() {
     }
 
     try {
+      const activeSearch = overrides.search !== undefined ? overrides.search : search;
+      const activeAction = overrides.actionType !== undefined ? overrides.actionType : actionType;
+      const activeSeverity = overrides.severity !== undefined ? overrides.severity : severity;
+      const activeStartDate = overrides.startDate !== undefined ? overrides.startDate : startDate;
+      const activeEndDate = overrides.endDate !== undefined ? overrides.endDate : endDate;
+      const activeSort = overrides.sort !== undefined ? overrides.sort : sort;
+
       const params = {
         limit: 50,
-        page,
-        search,
-        sort,
-        action: actionType,
-        start_date: startDate,
-        end_date: endDate
+        page: targetPage,
+        sort: activeSort,
       };
+
+      if (activeSearch && activeSearch.trim()) params.search = activeSearch.trim();
+      if (activeAction && activeAction.trim()) params.action = activeAction.trim();
+      if (activeSeverity && activeSeverity.trim()) params.severity = activeSeverity.trim();
+      if (activeStartDate && activeStartDate.trim()) params.start_date = activeStartDate.trim();
+      if (activeEndDate && activeEndDate.trim()) params.end_date = activeEndDate.trim();
 
       const res = await API.get("/auth/audit-logs/", { params });
       setLogs(Array.isArray(res.data.logs) ? res.data.logs : []);
@@ -138,67 +199,123 @@ export default function AuditLogs() {
   };
 
   useEffect(() => {
-    fetchLogs(true);
-  }, [page, sort]);
+    fetchLogs(1, true);
+  }, []);
 
+  // BUG-AL07: Bounded realtime updates (capped to limit of 50, pagination recalculated)
   useRealtime("new_audit_log", (newLog) => {
-    if (page > 1 || search.trim() || actionType || startDate || endDate || sort === "asc") {
-      fetchLogs(false);
+    if (!newLog || !newLog.id) return;
+    const hasActiveFilters = Boolean(
+      search.trim() || actionType.trim() || severity.trim() || startDate.trim() || endDate.trim()
+    );
+    if (page > 1 || hasActiveFilters || sort === "asc") {
+      fetchLogs(page, false);
     } else {
       setLogs((prev) => {
-        if (prev.some(l => l.id === newLog.id)) return prev;
-        return [newLog, ...prev];
+        if (prev.some((l) => l.id === newLog.id)) return prev;
+        return [newLog, ...prev].slice(0, 50);
       });
-      setPagination(prev => ({ ...prev, total: prev.total + 1 }));
+      setPagination((prev) => {
+        const newTotal = prev.total + 1;
+        const limit = prev.limit || 50;
+        return {
+          ...prev,
+          total: newTotal,
+          pages: Math.ceil(newTotal / limit) || 1,
+        };
+      });
     }
   });
 
+  // BUG-AL03: Explicit page 1 on search submit
   const handleSearchSubmit = (e) => {
     e.preventDefault();
     setPage(1);
-    fetchLogs(true);
+    fetchLogs(1, true);
   };
 
+  // BUG-AL04: Clean atomic filter reset without timing delay
   const handleResetFilters = () => {
     setSearch("");
     setActionType("");
+    setSeverity("");
     setStartDate("");
     setEndDate("");
     setSort("desc");
     setPage(1);
-    // Directly fetch state with default params
-    setTimeout(() => {
-      fetchLogs(true);
-    }, 50);
+    fetchLogs(1, true, {
+      search: "",
+      actionType: "",
+      severity: "",
+      startDate: "",
+      endDate: "",
+      sort: "desc",
+    });
   };
 
-  const handleExportCSV = () => {
-    if (logs.length === 0) {
-      showPopup("No audit logs to export", "warning");
-      return;
+  // BUG-AL06: Complete and Safe CSV Export
+  const handleExportCSV = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const exportLimit = Math.min(Math.max(pagination.total || 50, 50), 5000);
+      const params = {
+        limit: exportLimit,
+        page: 1,
+        sort,
+      };
+      if (search.trim()) params.search = search.trim();
+      if (actionType.trim()) params.action = actionType.trim();
+      if (severity.trim()) params.severity = severity.trim();
+      if (startDate.trim()) params.start_date = startDate.trim();
+      if (endDate.trim()) params.end_date = endDate.trim();
+
+      const res = await API.get("/auth/audit-logs/", { params });
+      const records = Array.isArray(res.data.logs) ? res.data.logs : logs;
+
+      if (records.length === 0) {
+        showPopup("No audit logs to export", "warning");
+        return;
+      }
+
+      if (pagination.total > 5000) {
+        showPopup("Export contains the maximum allowed limit of 5,000 records.", "warning");
+      }
+
+      const headers = ["Timestamp", "Severity", "Username", "Action", "Target", "IP Address", "Details"];
+      const csvRows = [
+        headers.map((h) => `"${h}"`).join(","),
+        ...records.map((log) =>
+          [
+            log.created_at,
+            log.severity,
+            log.username,
+            log.action,
+            log.target_display ? log.target_display : log.target_id || "",
+            log.ip_address || "",
+            log.details,
+          ]
+            .map(sanitizeCsvValue)
+            .join(",")
+        ),
+      ];
+
+      const blob = new Blob(["\uFEFF" + csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `hrms_audit_logs_${new Date().toISOString().split("T")[0]}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      showPopup(`Exported ${records.length} audit logs successfully`, "success");
+    } catch (err) {
+      console.error("CSV Export failed", err);
+      showPopup("Failed to export audit logs", "error");
+    } finally {
+      setExporting(false);
     }
-    const headers = ["Timestamp", "Severity", "Username", "Action", "Target", "IP Address", "Details"];
-    const csvRows = [
-      headers.join(","),
-      ...logs.map(log => [
-        log.created_at,
-        log.severity,
-        log.username,
-        log.action,
-        log.target_display ? log.target_display : (log.target_id || ""),
-        log.ip_address || "",
-        JSON.stringify(log.details || "")
-      ].map(val => `"${String(val).replace(/"/g, '""')}"`).join(","))
-    ];
-    
-    const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.setAttribute("download", `hrms_audit_logs_${new Date().toISOString().split('T')[0]}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   if (loading) {
@@ -233,10 +350,11 @@ export default function AuditLogs() {
               <HeroTile icon={<Activity size={18} />} label="Total Records" value={pagination.total} />
               <button
                 onClick={handleExportCSV}
-                className="flex items-center justify-center gap-2 rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-sm font-semibold text-white backdrop-blur-sm transition hover:bg-white/20"
+                disabled={exporting}
+                className="flex items-center justify-center gap-2 rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-sm font-semibold text-white backdrop-blur-sm transition hover:bg-white/20 disabled:opacity-50"
               >
-                <Download size={18} />
-                Export CSV
+                <Download size={18} className={exporting ? "animate-bounce" : ""} />
+                {exporting ? "Exporting..." : "Export CSV"}
               </button>
             </div>
           </div>
@@ -245,8 +363,8 @@ export default function AuditLogs() {
         {/* Filters Card */}
         <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
           <form onSubmit={handleSearchSubmit} className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-              
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
+
               {/* Search Field */}
               <label className="block lg:col-span-2">
                 <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Search Log</span>
@@ -267,7 +385,12 @@ export default function AuditLogs() {
                 <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Action Type</span>
                 <select
                   value={actionType}
-                  onChange={(e) => setActionType(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setActionType(val);
+                    setPage(1);
+                    fetchLogs(1, true, { actionType: val });
+                  }}
                   className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-purple-400 focus:bg-white"
                 >
                   <option value="">All Actions</option>
@@ -279,12 +402,37 @@ export default function AuditLogs() {
                 </select>
               </label>
 
+              {/* BUG-AL08: Severity Filter */}
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Severity</span>
+                <select
+                  value={severity}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSeverity(val);
+                    setPage(1);
+                    fetchLogs(1, true, { severity: val });
+                  }}
+                  className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-purple-400 focus:bg-white"
+                >
+                  <option value="">All Severities</option>
+                  <option value="INFO">INFO</option>
+                  <option value="WARNING">WARNING</option>
+                  <option value="CRITICAL">CRITICAL</option>
+                </select>
+              </label>
+
               {/* Sort Order */}
               <label className="block">
                 <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Sort Timestamp</span>
                 <select
                   value={sort}
-                  onChange={(e) => setSort(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSort(val);
+                    setPage(1);
+                    fetchLogs(1, true, { sort: val });
+                  }}
                   className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-purple-400 focus:bg-white"
                 >
                   <option value="desc">Newest First</option>
@@ -429,7 +577,11 @@ export default function AuditLogs() {
                 <button
                   type="button"
                   disabled={page <= 1}
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  onClick={() => {
+                    const prevP = Math.max(1, page - 1);
+                    setPage(prevP);
+                    fetchLogs(prevP, true);
+                  }}
                   className="rounded-xl border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
                 >
                   Previous
@@ -437,7 +589,11 @@ export default function AuditLogs() {
                 <button
                   type="button"
                   disabled={page >= pagination.pages}
-                  onClick={() => setPage(p => Math.min(pagination.pages, p + 1))}
+                  onClick={() => {
+                    const nextP = Math.min(pagination.pages, page + 1);
+                    setPage(nextP);
+                    fetchLogs(nextP, true);
+                  }}
                   className="rounded-xl border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
                 >
                   Next
@@ -488,18 +644,20 @@ export default function AuditLogs() {
 
               <div>
                 <span className="text-xs font-bold uppercase tracking-wide text-slate-400">Action Metadata (Details)</span>
-                <div className="mt-2 rounded-2xl border border-slate-100 bg-slate-50 p-4 text-sm max-h-56 overflow-auto">
-                  {selectedLog.details && typeof selectedLog.details === "object" ? (
-                    <div className="space-y-3">
-                      {Object.entries(selectedLog.details).map(([key, val]) => (
-                        <div key={key} className="flex flex-col sm:flex-row sm:justify-between border-b border-slate-100 pb-2 last:border-0 last:pb-0">
-                          <span className="font-semibold text-slate-600 text-xs uppercase tracking-wider">{formatDetailKey(key)}</span>
-                          <span className="text-slate-800 font-medium text-right sm:max-w-xs break-all mt-1 sm:mt-0">{formatDetailValue(val)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : selectedLog.details ? (
-                    <p className="text-slate-800 font-medium">{String(selectedLog.details)}</p>
+                <div className="mt-2 rounded-2xl border border-slate-100 bg-slate-50 p-4 text-sm max-h-72 overflow-auto">
+                  {selectedLog.details !== null && selectedLog.details !== undefined ? (
+                    typeof selectedLog.details === "object" && !Array.isArray(selectedLog.details) ? (
+                      <div className="space-y-3">
+                        {Object.entries(selectedLog.details).map(([key, val]) => (
+                          <div key={key} className="flex flex-col sm:flex-row sm:justify-between border-b border-slate-100 pb-2 last:border-0 last:pb-0">
+                            <span className="font-semibold text-slate-600 text-xs uppercase tracking-wider">{formatDetailKey(key)}</span>
+                            <div className="text-slate-800 font-medium text-right sm:max-w-xs break-all mt-1 sm:mt-0">{renderFormattedValue(val)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      renderFormattedValue(selectedLog.details)
+                    )
                   ) : (
                     <span className="text-slate-400 italic">No additional details recorded.</span>
                   )}

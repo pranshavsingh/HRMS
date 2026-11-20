@@ -16,151 +16,181 @@ import TeamAnalytics from "./pages/TeamAnalytics";
 import HRDashboard from "./pages/dashboard/HRDashboard";
 import Reports from "./pages/Reports";
 import AuditLogs from "./pages/AuditLogs";
+import Shifts from "./pages/Shifts";
+import Roster from "./pages/Roster";
+import CompanyHolidayCalendar from "./pages/CompanyHolidayCalendar";
 import { AuthProvider } from "./context/AuthContext";
+import { SiteProvider } from "./context/SiteContext";
 
 export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <Routes>
-        <Route path="/" element={<Login />} />
-        <Route
-          path="/dashboard"
-          element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/attendance"
-          element={
-            <ProtectedRoute>
-              <Attendance />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/history"
-          element={
-            <ProtectedRoute>
-              <AttendanceHistory />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/leave"
-          element={
-            <ProtectedRoute>
-              <Leave />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/documents"
-          element={
-            <ProtectedRoute>
-              <Documents />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/employees"
-          element={
-            <ProtectedRoute>
-              <Employees />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/employee-documents"
-          element={
-            <ProtectedRoute>
-              <EmployeeDocuments />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/attendance-approvals"
-          element={
-            <ProtectedRoute>
-              <AttendanceApprovals />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/team-attendance-approvals"
-          element={
-            <ProtectedRoute>
-              <AttendanceApprovals />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/leave-approvals"
-          element={
-            <ProtectedRoute>
-              <LeaveApprovals />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/team-leave-approvals"
-          element={
-            <ProtectedRoute>
-              <LeaveApprovals />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/team-dashboard"
-          element={
-            <ProtectedRoute>
-              <TeamDashboard />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/team-attendance"
-          element={
-            <ProtectedRoute>
-              <TeamAttendance />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/team-analytics"
-          element={
-            <ProtectedRoute>
-              <TeamAnalytics />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/hr-dashboard"
-          element={
-            <ProtectedRoute>
-              <HRDashboard />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/reports"
-          element={
-            <ProtectedRoute>
-              <Reports />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/audit-logs"
-          element={
-            <ProtectedRoute>
-              <AuditLogs />
-            </ProtectedRoute>
-          }
-        />
-      </Routes>
+        <SiteProvider>
+          <Routes>
+            <Route path="/" element={<Login />} />
+            <Route
+              path="/dashboard"
+              element={
+                <ProtectedRoute>
+                  <Dashboard />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/attendance"
+              element={
+                <ProtectedRoute>
+                  <Attendance />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/history"
+              element={
+                <ProtectedRoute>
+                  <AttendanceHistory />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/leave"
+              element={
+                <ProtectedRoute>
+                  <Leave />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/documents"
+              element={
+                <ProtectedRoute>
+                  <Documents />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/employees"
+              element={
+                <ProtectedRoute>
+                  <Employees />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/employee-documents"
+              element={
+                <ProtectedRoute allowedRoles={["admin", "hr", "superadmin"]}>
+                  <EmployeeDocuments />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/attendance-approvals"
+              element={
+                <ProtectedRoute allowedRoles={["manager", "hr", "admin", "superadmin"]}>
+                  <AttendanceApprovals />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/team-attendance-approvals"
+              element={
+                <ProtectedRoute allowedRoles={["manager", "hr", "admin", "superadmin"]}>
+                  <AttendanceApprovals />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/leave-approvals"
+              element={
+                <ProtectedRoute allowedRoles={["manager", "hr", "admin", "superadmin"]}>
+                  <LeaveApprovals />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/team-leave-approvals"
+              element={
+                <ProtectedRoute allowedRoles={["manager", "hr", "admin", "superadmin"]}>
+                  <LeaveApprovals />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/team-dashboard"
+              element={
+                <ProtectedRoute>
+                  <TeamDashboard />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/team-attendance"
+              element={
+                <ProtectedRoute allowedRoles={["manager", "hr", "admin", "superadmin"]}>
+                  <TeamAttendance />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/team-analytics"
+              element={
+                <ProtectedRoute allowedRoles={["manager", "hr", "admin", "superadmin"]}>
+                  <TeamAnalytics />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/hr-dashboard"
+              element={
+                <ProtectedRoute>
+                  <HRDashboard />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/reports"
+              element={
+                <ProtectedRoute allowedRoles={["manager", "hr", "admin", "superadmin"]}>
+                  <Reports />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/audit-logs"
+              element={
+                <ProtectedRoute allowedRoles={["superadmin"]}>
+                  <AuditLogs />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/shifts"
+              element={
+                <ProtectedRoute allowedRoles={["admin", "hr", "superadmin"]}>
+                  <Shifts />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/roster"
+              element={
+                <ProtectedRoute>
+                  <Roster />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/holidays"
+              element={
+                <ProtectedRoute>
+                  <CompanyHolidayCalendar />
+                </ProtectedRoute>
+              }
+            />
+          </Routes>
+        </SiteProvider>
       </AuthProvider>
     </BrowserRouter>
   );

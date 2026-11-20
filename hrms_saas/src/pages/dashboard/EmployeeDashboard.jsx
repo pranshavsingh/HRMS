@@ -9,8 +9,21 @@ import {
 } from "lucide-react";
 import Layout from "../../components/layout/Layout";
 import Loader from "../../components/common/Loader";
+import Pagination, { usePagination } from "../../components/common/Pagination";
 import API from "../../api/axios";
 import { useRealtime } from "../../context/RealtimeContext";
+
+const formatTimelineDate = (value) => {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+};
 
 export default function EmployeeDashboard() {
   const [data, setData] = useState(null);
@@ -38,6 +51,7 @@ export default function EmployeeDashboard() {
 
     return (total / data.daily_work.length).toFixed(2);
   }, [data]);
+  const timelinePagination = usePagination(data?.daily_work || []);
 
   if (!data) return <Loader />;
 
@@ -141,12 +155,12 @@ export default function EmployeeDashboard() {
               </thead>
 
               <tbody>
-                {data.daily_work.map((item, index) => (
+                {timelinePagination.pageItems.map((item, index) => (
                   <tr
                     key={`${item.date}-${index}`}
                     className="border-t border-slate-100 transition hover:bg-slate-50/80"
                   >
-                    <td className="px-6 py-4 font-medium text-slate-900">{item.date}</td>
+                    <td className="px-6 py-4 font-medium text-slate-900">{formatTimelineDate(item.date)}</td>
                     <td className="px-6 py-4 text-slate-700">{item.punch_in || "--"}</td>
                     <td className="px-6 py-4 text-slate-700">
                       {item.punch_out === "Pending" ? (
@@ -165,9 +179,13 @@ export default function EmployeeDashboard() {
                     </td>
                   </tr>
                 ))}
+                {(data.daily_work || []).length === 0 && (
+                  <tr><td colSpan="5" className="px-6 py-8 text-center text-slate-500">No recent work timeline records.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
+          {(data.daily_work || []).length > 0 && <Pagination {...timelinePagination} itemLabel="days" />}
         </section>
       </div>
     </Layout>

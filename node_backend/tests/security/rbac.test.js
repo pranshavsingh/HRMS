@@ -2,11 +2,22 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { accountsService } from "../../src/services/accounts.service.js";
 import { attendanceService } from "../../src/services/attendance.service.js";
+import { siteService } from "../../src/services/site.service.js";
 import accountsRepository from "../../src/repositories/accounts.repository.js";
 import redisService from "../../src/services/redis.service.js";
 
 describe("P1.3 — RBAC & Object-Level Authorization (IDOR) Security Suite", () => {
+  let originalEnsureVisible;
+
+  before(() => {
+    originalEnsureVisible = siteService.ensureEmployeeVisible;
+    siteService.ensureEmployeeVisible = async () => true;
+  });
+
   after(async () => {
+    if (originalEnsureVisible) {
+      siteService.ensureEmployeeVisible = originalEnsureVisible;
+    }
     if (redisService.client) {
       redisService.client.disconnect();
     }
@@ -90,15 +101,74 @@ describe("P1.3 — RBAC & Object-Level Authorization (IDOR) Security Suite", () 
 
     it("should ALLOW admin, hr, and superadmin to view employee documents", async () => {
       const adminActor = { id: 1, role: "admin", username: "admin_user" };
+      const hrActor = { id: 2, role: "hr", username: "hr_user" };
       const originalFindDocs = accountsRepository.findDocumentsByUserId;
       accountsRepository.findDocumentsByUserId = async () => [];
 
       try {
-        const docs = await accountsService.getEmployeeDocuments(202, adminActor);
-        assert.ok(Array.isArray(docs));
+        const docsAdmin = await accountsService.getEmployeeDocuments(202, adminActor);
+        assert.ok(Array.isArray(docsAdmin));
+        const docsHr = await accountsService.getEmployeeDocuments(202, hrActor);
+        assert.ok(Array.isArray(docsHr));
       } finally {
         accountsRepository.findDocumentsByUserId = originalFindDocs;
       }
+    });
+
+    it("should BLOCK HR from modifying an employee password on update", async () => {
+      const hrActor = { id: 12, role: "hr", username: "hr_user" };
+      let error = null;
+      try {
+        await accountsService.updateEmployee(486, { password: "AttemptedPassword123!" }, hrActor, 1);
+      } catch (err) {
+        error = err;
+      }
+      assert.ok(error, "HR must be blocked from modifying employee password");
+      assert.equal(error.statusCode, 403);
+      assert.match(error.message, /authorized to modify employee passwords/i);
+    });
+
+    it("should validate password length when Admin updates employee password", async () => {
+      const adminActor = { id: 1, role: "admin", username: "admin_user" };
+      let error = null;
+      try {
+        await accountsService.updateEmployee(486, { password: "short" }, adminActor, 1);
+      } catch (err) {
+        error = err;
+      }
+      assert.ok(error, "Short passwords must be rejected with 400");
+      assert.equal(error.statusCode, 400);
+      assert.match(error.message, /between 12 and 128 characters/i);
+    });
+
+    it("should REJECT employee creation when Photo Copy is missing", async () => {
+      const adminActor = { id: 1, role: "admin", username: "admin_user" };
+      let error = null;
+      try {
+        await accountsService.createEmployee(
+          { username: "new_emp_no_photo", first_name: "Test", role: "employee", site_id: 2, password: "ValidPassword123!" },
+          { aadhar_file: [{ buffer: Buffer.from("dummy") }] },
+          adminActor,
+          1
+        );
+      } catch (err) {
+        error = err;
+      }
+      assert.ok(error, "Employee creation must be rejected when Photo Copy is missing");
+      assert.equal(error.statusCode, 400);
+      assert.match(error.message, /Photo Copy document is required/i);
+    });
+
+    it("should associate uploaded Photo Copy with profile_picture", async () => {
+      const adminActor = { id: 1, role: "admin", username: "admin_user" };
+      const originalFindProfile = accountsRepository.findProfileByUserId;
+      const originalDbGet = accountsRepository.findDocumentByTitleAndUserId;
+      
+      const empUser = { id: 486, username: "employee1", first_name: "Test", last_name: "User", email: "test@example.com", role: "employee", is_active: 1 };
+      
+      const serialized = await accountsService.serializeStaffMember(empUser, null, 1);
+      assert.ok(serialized, "Serialized employee returned");
+      assert.ok("profile_picture" in serialized, "profile_picture property must be present in serialized employee");
     });
   });
 

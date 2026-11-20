@@ -7,6 +7,7 @@ import redisService from "../services/redis.service.js";
 import cloudinaryService from "../services/cloudinary.service.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { resolveTenantId } from "../utils/tenant.js";
 
 function isWebClient(req) {
   const platformHeader = (req.headers["x-platform"] || "").toLowerCase();
@@ -209,7 +210,8 @@ export const changePassword = asyncHandler(async (req, res) => {
  * Create a new employee (admin/hr only).
  */
 export const createEmployee = asyncHandler(async (req, res) => {
-  const result = await accountsService.createEmployee(req.body, req.files, req.user);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.createEmployee(req.body, req.files, req.user, tenantId);
   const employeeId = result.employee?.id || result.id;
   res.status(201).json({
     ...result,
@@ -225,7 +227,8 @@ export const createEmployee = asyncHandler(async (req, res) => {
  * List active managers.
  */
 export const managers = asyncHandler(async (req, res) => {
-  const result = await accountsService.getManagers(req.query);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.getManagers(req.query, tenantId, req.user);
   res.json(result);
 });
 
@@ -233,7 +236,8 @@ export const managers = asyncHandler(async (req, res) => {
  * List all active employees.
  */
 export const employees = asyncHandler(async (req, res) => {
-  const result = await accountsService.getEmployees(req.query);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.getEmployees(req.query, tenantId, req.user);
   res.json(result);
 });
 
@@ -249,15 +253,8 @@ export const adminSummary = asyncHandler(async (req, res) => {
  * Update employee record.
  */
 export const updateEmployee = asyncHandler(async (req, res) => {
-  const result = await accountsService.updateEmployee(req.params.user_id, req.body, req.user);
-  res.json(result);
-});
-
-/**
- * Delete employee (soft-delete).
- */
-export const deleteEmployee = asyncHandler(async (req, res) => {
-  const result = await accountsService.deleteEmployee(req.params.user_id, req.user);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.updateEmployee(req.params.user_id, req.body, req.user, tenantId);
   res.json(result);
 });
 
@@ -265,7 +262,8 @@ export const deleteEmployee = asyncHandler(async (req, res) => {
  * Upload general employee documents.
  */
 export const uploadDocument = asyncHandler(async (req, res) => {
-  const result = await accountsService.uploadDocument(req.body, req.file, req.user);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.uploadDocument(req.body, req.file, req.user, tenantId);
   res.json(result);
 });
 
@@ -281,7 +279,8 @@ export const myDocuments = asyncHandler(async (req, res) => {
  * Get targeted employee's documents (admin/hr/manager only).
  */
 export const employeeDocuments = asyncHandler(async (req, res) => {
-  const result = await accountsService.getEmployeeDocuments(req.params.user_id, req.user, req.query);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.getEmployeeDocuments(req.params.user_id, req.user, req.query, tenantId);
   res.json(result);
 });
 
@@ -302,7 +301,8 @@ export const getCloudinarySignature = asyncHandler(async (req, res) => {
  * Register a document uploaded directly to Cloudinary.
  */
 export const registerDirectDocument = asyncHandler(async (req, res) => {
-  const result = await accountsService.registerDirectDocument(req.body, req.user);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.registerDirectDocument(req.body, req.user, tenantId);
   res.status(201).json(result);
 });
 
@@ -311,7 +311,25 @@ export const registerDirectDocument = asyncHandler(async (req, res) => {
  */
 export const getDocumentDetailRedirect = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const fileUrl = await accountsService.getDocumentDetail(id, req.user, req.ip);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const isDownload = req.query.download === "true" || req.query.download === "1";
+  const fileUrl = await accountsService.getDocumentDetail(id, req.user, req.ip, tenantId, {
+    attachment: isDownload,
+    download: isDownload,
+  });
+  res.redirect(302, fileUrl);
+});
+
+/**
+ * Access a secure document and redirect to its signed attachment download URL.
+ */
+export const downloadDocument = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const fileUrl = await accountsService.getDocumentDetail(id, req.user, req.ip, tenantId, {
+    attachment: true,
+    download: true,
+  });
   res.redirect(302, fileUrl);
 });
 
@@ -319,7 +337,8 @@ export const getDocumentDetailRedirect = asyncHandler(async (req, res) => {
  * Delete employee document (superadmin only).
  */
 export const deleteDocument = asyncHandler(async (req, res) => {
-  const result = await accountsService.deleteDocument(req.params.id, req.user);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.deleteDocument(req.params.id, req.user, tenantId);
   res.json(result);
 });
 
@@ -344,7 +363,10 @@ export const createRealtimeTicket = asyncHandler(async (req, res) => {
     role: req.user.role,
     organization_id: req.user.organization_id || null,
   };
-  await redisService.set(ticketKey, userPayload, 30);
+  const stored = await redisService.set(ticketKey, userPayload, 30);
+  if (!stored) {
+    throw new AppError("Realtime ticket service is unavailable. Please try again.", 503);
+  }
   res.json({
     status: "success",
     ticket: ticketId,
@@ -420,6 +442,9 @@ export const realtimeUpdatesStream = asyncHandler(async (req, res) => {
       res.flush();
     }
   }, 30000);
+  if (heartbeat.unref) {
+    heartbeat.unref();
+  }
 
   res.on("close", () => {
     clearInterval(heartbeat);

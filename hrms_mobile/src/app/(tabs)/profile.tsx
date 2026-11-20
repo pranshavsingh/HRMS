@@ -6,6 +6,7 @@ import {
   View,
   ScrollView,
   Alert,
+  Image,
 } from "react-native";
 import { useAuth } from "../../context/AuthContext";
 import { User, LogOut, Mail, Award, Calendar, Bookmark } from "lucide-react-native";
@@ -54,9 +55,16 @@ export default function ProfileScreen() {
       <ScrollView contentContainerStyle={styles.container}>
         {/* Header Avatar Card */}
         <View style={styles.profileHeaderCard}>
-          <View style={[styles.avatarCircle, { borderColor: themeColor }]}>
-            <User size={40} color={themeColor} />
-          </View>
+          {user?.profile_picture ? (
+            <Image
+              source={{ uri: user.profile_picture }}
+              style={[styles.avatarCircle, { borderColor: themeColor }]}
+            />
+          ) : (
+            <View style={[styles.avatarCircle, { borderColor: themeColor }]}>
+              <User size={40} color={themeColor} />
+            </View>
+          )}
           <Text style={styles.profileName}>
             {user?.first_name ? `${user.first_name} ${user.last_name || ""}` : user?.username}
           </Text>

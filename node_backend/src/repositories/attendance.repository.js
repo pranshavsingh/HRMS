@@ -15,35 +15,18 @@ export const attendanceRepository = {
   },
 
   async insertAttendance(data, tx = null) {
-    const {
-      date,
-      punch_in_time,
-      punch_in_photo,
-      punch_in_lat,
-      punch_in_lng,
-      punch_in_outside,
-      punch_in_status,
-      punch_out_status,
-      status,
-      user_id
-    } = data;
-    
-    const result = await db.run(
-      "INSERT INTO attendance_attendance (date, punch_in_time, punch_in_photo, punch_in_lat, punch_in_lng, punch_in_outside, punch_out_outside, punch_in_status, punch_out_status, status, is_outside_location, user_id) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0, ?)",
-      [
-        date,
-        punch_in_time,
-        punch_in_photo,
-        punch_in_lat,
-        punch_in_lng,
-        punch_in_outside,
-        punch_in_status,
-        punch_out_status,
-        status,
-        user_id
-      ],
-      tx
-    );
+    const fields = [];
+    const placeholders = [];
+    const params = [];
+
+    for (const [key, val] of Object.entries(data)) {
+      fields.push(key);
+      placeholders.push("?");
+      params.push(val);
+    }
+
+    const sql = `INSERT INTO attendance_attendance (${fields.join(", ")}) VALUES (${placeholders.join(", ")})`;
+    const result = await db.run(sql, params, tx);
     return result.lastID;
   },
 
@@ -107,7 +90,7 @@ export const attendanceRepository = {
 
     return db.all(
       `SELECT aa.id, aa.role, aa.status, aa.comment, aa.created_at, aa.approved_by_id, aa.attendance_id, aa.type, aa.action_at,
-              a.user_id as employee_id, a.date as attendance_date, a.status as attendance_status,
+              a.tenant_id, a.user_id as employee_id, a.date as attendance_date, a.status as attendance_status, a.site_id,
               a.punch_in_time, a.punch_out_time, a.punch_in_status, a.punch_out_status, a.punch_in_outside, a.punch_out_outside,
               a.punch_in_photo, a.punch_out_photo, a.punch_in_lat, a.punch_in_lng, a.punch_out_lat, a.punch_out_lng,
               u.username as employee_username, u.first_name as employee_first_name, u.last_name as employee_last_name, u.email as employee_email, u.role as employee_role,
@@ -116,8 +99,17 @@ export const attendanceRepository = {
               CASE 
                 WHEN aa.status IN ('approved', 'rejected') THEN aa.status
                 WHEN aa.status = 'closed' THEN (
-                  SELECT status FROM attendance_attendanceapproval 
-                  WHERE attendance_id = aa.attendance_id AND type = aa.type AND created_at = aa.created_at AND status IN ('approved', 'rejected') LIMIT 1
+                  SELECT daa.status FROM attendance_attendanceapproval daa
+                  WHERE daa.attendance_id = aa.attendance_id 
+                    AND daa.type = aa.type 
+                    AND (
+                      (aa.comment LIKE '%early departure%' AND daa.comment LIKE '%early departure%')
+                      OR (aa.comment LIKE '%overtime%' AND daa.comment LIKE '%overtime%')
+                      OR ((aa.comment IS NULL OR (aa.comment NOT LIKE '%early departure%' AND aa.comment NOT LIKE '%overtime%')) 
+                          AND (daa.comment IS NULL OR (daa.comment NOT LIKE '%early departure%' AND daa.comment NOT LIKE '%overtime%')))
+                    )
+                    AND daa.status IN ('approved', 'rejected')
+                  ORDER BY daa.action_at DESC LIMIT 1
                 )
                 ELSE NULL
               END as resolved_status,
@@ -130,15 +122,33 @@ export const attendanceRepository = {
                   SELECT COALESCE(NULLIF(TRIM(CONCAT(COALESCE(du.first_name, ''), ' ', COALESCE(du.last_name, ''))), ''), du.username)
                   FROM attendance_attendanceapproval daa
                   JOIN accounts_user du ON du.id = daa.approved_by_id
-                  WHERE daa.attendance_id = aa.attendance_id AND daa.type = aa.type AND daa.created_at = aa.created_at AND daa.status IN ('approved', 'rejected') LIMIT 1
+                  WHERE daa.attendance_id = aa.attendance_id 
+                    AND daa.type = aa.type 
+                    AND (
+                      (aa.comment LIKE '%early departure%' AND daa.comment LIKE '%early departure%')
+                      OR (aa.comment LIKE '%overtime%' AND daa.comment LIKE '%overtime%')
+                      OR ((aa.comment IS NULL OR (aa.comment NOT LIKE '%early departure%' AND aa.comment NOT LIKE '%overtime%')) 
+                          AND (daa.comment IS NULL OR (daa.comment NOT LIKE '%early departure%' AND daa.comment NOT LIKE '%overtime%')))
+                    )
+                    AND daa.status IN ('approved', 'rejected')
+                  ORDER BY daa.action_at DESC LIMIT 1
                 )
                 ELSE NULL
               END as decider_name,
               CASE 
                 WHEN aa.status IN ('approved', 'rejected') THEN aa.action_at
                 WHEN aa.status = 'closed' THEN (
-                  SELECT action_at FROM attendance_attendanceapproval 
-                  WHERE attendance_id = aa.attendance_id AND type = aa.type AND created_at = aa.created_at AND status IN ('approved', 'rejected') LIMIT 1
+                  SELECT daa.action_at FROM attendance_attendanceapproval daa
+                  WHERE daa.attendance_id = aa.attendance_id 
+                    AND daa.type = aa.type 
+                    AND (
+                      (aa.comment LIKE '%early departure%' AND daa.comment LIKE '%early departure%')
+                      OR (aa.comment LIKE '%overtime%' AND daa.comment LIKE '%overtime%')
+                      OR ((aa.comment IS NULL OR (aa.comment NOT LIKE '%early departure%' AND aa.comment NOT LIKE '%overtime%')) 
+                          AND (daa.comment IS NULL OR (daa.comment NOT LIKE '%early departure%' AND daa.comment NOT LIKE '%overtime%')))
+                    )
+                    AND daa.status IN ('approved', 'rejected')
+                  ORDER BY daa.action_at DESC LIMIT 1
                 )
                 ELSE NULL
               END as resolved_action_at
@@ -154,15 +164,15 @@ export const attendanceRepository = {
     );
   },
 
-  async findApprovalById(approvalId, tx = null, forUpdate = false) {
+  async findApprovalById(approvalId, tx = null, forUpdate = false, tenantId = 1) {
     const lockClause = forUpdate ? " FOR UPDATE" : "";
     return db.get(
       `SELECT aa.id, aa.role, aa.status, aa.comment, aa.created_at, aa.approved_by_id, aa.attendance_id, aa.type, aa.action_at,
-              a.punch_in_status, a.punch_out_status, a.status as attendance_status, a.punch_out_time, a.user_id as employee_id
+              a.punch_in_status, a.punch_out_status, a.status as attendance_status, a.punch_out_time, a.user_id as employee_id, a.date as attendance_date, a.site_id
        FROM attendance_attendanceapproval aa
        JOIN attendance_attendance a ON a.id=aa.attendance_id
-       WHERE aa.id=?${lockClause}`,
-      [approvalId],
+       WHERE aa.id=? AND a.tenant_id=?${lockClause}`,
+      [approvalId, tenantId],
       tx
     );
   },
@@ -182,11 +192,20 @@ export const attendanceRepository = {
     return db.run(sql, params, tx);
   },
 
-  async updatePendingApprovalsForAttendanceExcept(attendanceId, type, status, comment, actionByUserId, approvedByIdToExclude, tx = null) {
+  async updatePendingApprovalsForAttendanceExcept(attendanceId, type, status, comment, actionByUserId, approvedByIdToExclude, tx = null, exceptionCategory = null) {
+    let categorySql = "";
+    if (exceptionCategory === "early_departure") {
+      categorySql = " AND (comment LIKE '%early departure%' OR comment LIKE '%Early departure%')";
+    } else if (exceptionCategory === "overtime") {
+      categorySql = " AND (comment LIKE '%overtime%' OR comment LIKE '%Overtime%')";
+    } else if (exceptionCategory === "location_in" || exceptionCategory === "location_out" || exceptionCategory === "location") {
+      categorySql = " AND (comment IS NULL OR (comment NOT LIKE '%early departure%' AND comment NOT LIKE '%Early departure%' AND comment NOT LIKE '%overtime%' AND comment NOT LIKE '%Overtime%'))";
+    }
+
     await db.run(
       `UPDATE attendance_attendanceapproval 
        SET status=?, comment=?, action_at=NOW() 
-       WHERE attendance_id=? AND type=? AND status='pending' AND id<>?`,
+       WHERE attendance_id=? AND type=? AND status='pending' AND id<>?${categorySql}`,
       [status, comment, attendanceId, type, approvedByIdToExclude],
       tx
     );
@@ -270,7 +289,7 @@ export const attendanceRepository = {
   async getLeavesInRange(memberIds, days, tx = null) {
     if (!memberIds.length) return [];
     return db.all(
-      `SELECT * FROM leave_leave WHERE user_id IN (${memberIds.map(() => "?").join(",")}) AND status='approved' AND to_date>=DATE_SUB(CURDATE(), INTERVAL ${days - 1} DAY)`,
+      `SELECT * FROM leave_leave WHERE user_id IN (${memberIds.map(() => "?").join(",")}) AND status='approved' AND from_date<=CURDATE() AND to_date>=DATE_SUB(CURDATE(), INTERVAL ${days - 1} DAY)`,
       memberIds,
       tx
     );
@@ -301,24 +320,24 @@ export const attendanceRepository = {
     );
   },
 
-  async insertOrUpdateLeaveAttendance(userId, date, tx = null) {
-    const existing = await db.get("SELECT id FROM attendance_attendance WHERE user_id=? AND date=?", [userId, date], tx);
+  async insertOrUpdateLeaveAttendance(userId, date, tx = null, siteId = null, tenantId = 1) {
+    const existing = await db.get("SELECT id FROM attendance_attendance WHERE tenant_id=? AND user_id=? AND date=?", [tenantId, userId, date], tx);
     if (existing) {
       await db.run(
         `UPDATE attendance_attendance 
-         SET status='leave', punch_in_status='leave', punch_out_status='leave', 
+         SET status='leave', punch_in_status='leave', punch_out_status='leave', site_id=?,
              punch_in_time=NULL, punch_out_time=NULL, punch_in_photo=NULL, punch_out_photo=NULL, 
              punch_in_lat=NULL, punch_in_lng=NULL, punch_in_outside=0, punch_out_outside=0, is_outside_location=0 
          WHERE id=?`,
-        [existing.id],
+        [siteId, existing.id],
         tx
       );
     } else {
       await db.run(
         `INSERT INTO attendance_attendance 
-         (date, punch_in_time, punch_in_photo, punch_in_lat, punch_in_lng, punch_in_outside, punch_out_outside, punch_in_status, punch_out_status, status, is_outside_location, user_id) 
-         VALUES (?, NULL, NULL, NULL, NULL, 0, 0, 'leave', 'leave', 'leave', 0, ?)`,
-        [date, userId],
+         (date, work_date, tenant_id, site_id, punch_in_time, punch_in_photo, punch_in_lat, punch_in_lng, punch_in_outside, punch_out_outside, punch_in_status, punch_out_status, status, is_outside_location, user_id) 
+         VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, 0, 'leave', 'leave', 'leave', 0, ?)`,
+        [date, date, tenantId, siteId, userId],
         tx
       );
     }

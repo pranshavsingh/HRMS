@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import Pagination, { usePagination } from "../components/common/Pagination";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
@@ -24,6 +25,20 @@ const statusClasses = {
 const formatDate = (value) => {
   if (!value) return "--";
 
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      const [, y, m, d] = match;
+      const date = new Date(Number(y), Number(m) - 1, Number(d), 12, 0, 0);
+      return new Intl.DateTimeFormat("en-IN", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        timeZone: "Asia/Kolkata",
+      }).format(date);
+    }
+  }
+
   const date = new Date(value);
 
   if (Number.isNaN(date.getTime())) {
@@ -34,11 +49,19 @@ const formatDate = (value) => {
     day: "2-digit",
     month: "short",
     year: "numeric",
+    timeZone: "Asia/Kolkata",
   }).format(date);
 };
 
 const formatTime = (value) => {
-  if (!value) return "--";
+  if (!value || value === "--" || value === "Pending") return value || "--";
+
+  if (typeof value === "string" && /^\d{1,2}:\d{2}(:\d{2})?$/.test(value.trim())) {
+    const [h, m] = value.trim().split(":").map(Number);
+    const period = h >= 12 ? "PM" : "AM";
+    const h12 = h % 12 || 12;
+    return `${String(h12).padStart(2, "0")}:${String(m).padStart(2, "0")} ${period}`;
+  }
 
   const date = new Date(value);
 
@@ -50,6 +73,7 @@ const formatTime = (value) => {
     hour: "2-digit",
     minute: "2-digit",
     hour12: true,
+    timeZone: "Asia/Kolkata",
   }).format(date);
 };
 
@@ -104,6 +128,7 @@ export default function AttendanceHistory() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filters, setFilters] = useState(initialFilters);
+  const pagination = usePagination(records);
 
   const fetchHistory = async (activeFilters, showLoader = true) => {
     if (showLoader) {
@@ -113,7 +138,9 @@ export default function AttendanceHistory() {
     }
 
     try {
-      const params = {};
+      const params = {
+        limit: 500,
+      };
 
       if (activeFilters.startDate && activeFilters.endDate) {
         params.start_date = activeFilters.startDate;
@@ -348,7 +375,7 @@ export default function AttendanceHistory() {
                   </tr>
                 </thead>
                 <tbody>
-                  {records.map((item, index) => (
+                  {pagination.pageItems.map((item, index) => (
                     <tr
                       key={`${item.date}-${index}`}
                       className="border-t border-slate-100 transition hover:bg-slate-50/80"
@@ -392,6 +419,7 @@ export default function AttendanceHistory() {
               </table>
             </div>
           )}
+          <Pagination {...pagination} itemLabel="records" />
         </section>
       </div>
     </Layout>

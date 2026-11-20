@@ -1,19 +1,26 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
+  Camera,
   CheckCircle2,
   Clock3,
+  ExternalLink,
+  Eye,
   MapPinned,
   RefreshCw,
   Search,
   ShieldCheck,
+  X,
   XCircle,
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import Pagination from "../components/common/Pagination";
 import API from "../api/axios";
+import { useAuth } from "../context/AuthContext";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
+import { useSite } from "../context/SiteContext";
 
 const badgeStyles = {
   approved: "bg-emerald-50 text-emerald-700 ring-emerald-200",
@@ -73,6 +80,18 @@ const emptySummary = {
 
 const formatDate = (value) => {
   if (!value) return "--";
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      const [, y, m, d] = match;
+      const date = new Date(Number(y), Number(m) - 1, Number(d));
+      return new Intl.DateTimeFormat("en-IN", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      }).format(date);
+    }
+  }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
 
@@ -80,6 +99,7 @@ const formatDate = (value) => {
     day: "2-digit",
     month: "short",
     year: "numeric",
+    timeZone: "Asia/Kolkata",
   }).format(date);
 };
 
@@ -94,6 +114,7 @@ const formatDateTime = (value) => {
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "Asia/Kolkata",
   }).format(date);
 };
 
@@ -102,7 +123,9 @@ const capitalize = (value) =>
 
 export default function AttendanceApprovals() {
   const { showPopup } = usePopup();
-  const role = localStorage.getItem("role") || "hr";
+  const { role: authRole } = useAuth();
+  const role = authRole || localStorage.getItem("role") || "hr";
+  const { querySiteId } = useSite();
   const hero = heroByRole[role] || heroByRole.hr;
 
   const [loading, setLoading] = useState(true);
@@ -110,10 +133,31 @@ export default function AttendanceApprovals() {
   const [submittingKey, setSubmittingKey] = useState("");
   const [summary, setSummary] = useState(emptySummary);
   const [records, setRecords] = useState([]);
+
+  // Server-side Pagination & Filtering States
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(15);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
 
+  // Modals
+  const [previewPhoto, setPreviewPhoto] = useState(null);
+  const [rejectModal, setRejectModal] = useState({ open: false, item: null, reason: "" });
+
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+      setCurrentPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // Fetch approvals from server
   const fetchApprovals = async (showLoader = true) => {
     if (showLoader) {
       setLoading(true);
@@ -122,16 +166,43 @@ export default function AttendanceApprovals() {
     }
 
     try {
-      const res = await API.get("/attendance/approvals/");
-      const payload = Array.isArray(res.data)
-        ? { summary: emptySummary, records: res.data }
-        : res.data || {};
-
-      setSummary({
-        ...emptySummary,
-        ...(payload.summary || {}),
+      const res = await API.get("/attendance/approvals/", {
+        params: {
+          site_id: querySiteId,
+          page: currentPage,
+          limit: pageSize,
+          search: debouncedSearch || undefined,
+          status: statusFilter !== "all" ? statusFilter : undefined,
+          type: typeFilter !== "all" ? typeFilter : undefined,
+        },
       });
-      setRecords(Array.isArray(payload.records) ? payload.records : []);
+
+      const payload = res.data || {};
+      const items = Array.isArray(payload.data)
+        ? payload.data
+        : Array.isArray(payload.records)
+          ? payload.records
+          : Array.isArray(payload)
+            ? payload
+            : [];
+
+      const totalCount = payload.pagination?.total ?? payload.total ?? items.length;
+      const pagesCount = payload.pagination?.totalPages ?? payload.totalPages ?? Math.max(1, Math.ceil(totalCount / pageSize));
+
+      setRecords(items);
+      setTotalRecords(totalCount);
+      setTotalPages(pagesCount);
+
+      if (currentPage > pagesCount && pagesCount >= 1) {
+        setCurrentPage(pagesCount);
+      }
+
+      if (payload.summary) {
+        setSummary({
+          ...emptySummary,
+          ...payload.summary,
+        });
+      }
     } catch (err) {
       console.error("Attendance approvals fetch error:", err.response?.data || err.message);
       showPopup(err.response?.data?.error || "Unable to load attendance approvals", "error");
@@ -143,60 +214,21 @@ export default function AttendanceApprovals() {
 
   useEffect(() => {
     fetchApprovals();
-  }, []);
+  }, [querySiteId, currentPage, pageSize, debouncedSearch, statusFilter, typeFilter]);
 
   useRealtime("attendance_update", () => fetchApprovals(false));
 
-  const filteredRecords = useMemo(() => {
-    const query = search.trim().toLowerCase();
-
-    return records.filter((item) => {
-      const matchesSearch =
-        !query ||
-        [
-          item.employee,
-          item.employee_name,
-          item.employee_email,
-          item.employee_role,
-          item.team_name,
-          item.reporting_manager,
-          item.review_label,
-          item.location_label,
-          item.action_by_name,
-          item.approval_route,
-        ]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(query));
-
-      const matchesStatus =
-        statusFilter === "all" ? true : item.approval_status === statusFilter;
-      const matchesType =
-        typeFilter === "all" ? true : item.review_type === typeFilter;
-
-      return matchesSearch && matchesStatus && matchesType;
-    });
-  }, [records, search, statusFilter, typeFilter]);
-
-  const visibleSummary = useMemo(
-    () => ({
-      total: filteredRecords.length,
-      pending: filteredRecords.filter((item) => item.approval_status === "pending").length,
-      approved: filteredRecords.filter((item) => item.approval_status === "approved").length,
-      rejected: filteredRecords.filter((item) => item.approval_status === "rejected").length,
-      closed: filteredRecords.filter((item) => item.approval_status === "closed").length,
-      actionable: filteredRecords.filter((item) => item.can_approve).length,
-    }),
-    [filteredRecords]
-  );
-
-  const handleAction = async (approvalId, nextStatus) => {
+  const handleAction = async (approvalId, nextStatus, comment = "") => {
     setSubmittingKey(`${approvalId}-${nextStatus}`);
 
     try {
-      const res = await API.post(`/attendance/approvals/${approvalId}/`, {
-        status: nextStatus,
-      });
+      const payload = { status: nextStatus };
+      if (comment && comment.trim()) {
+        payload.comment = comment.trim();
+      }
+      const res = await API.post(`/attendance/approvals/${approvalId}/`, payload);
       showPopup(res.data?.message || `Attendance ${nextStatus} successfully`, "success");
+      setRejectModal({ open: false, item: null, reason: "" });
       await fetchApprovals(false);
     } catch (err) {
       console.error("Attendance approval action error:", err.response?.data || err.message);
@@ -204,6 +236,14 @@ export default function AttendanceApprovals() {
     } finally {
       setSubmittingKey("");
     }
+  };
+
+  const openRejectModal = (item) => {
+    setRejectModal({
+      open: true,
+      item,
+      reason: "",
+    });
   };
 
   if (loading) {
@@ -278,7 +318,10 @@ export default function AttendanceApprovals() {
               <span className="mb-2 text-sm font-medium text-slate-700">Status Filter</span>
               <select
                 value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
+                onChange={(e) => {
+                  setStatusFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
                 className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white"
               >
                 <option value="all">All Statuses</option>
@@ -290,26 +333,31 @@ export default function AttendanceApprovals() {
             </label>
 
             <label className="block">
-              <span className="mb-2 text-sm font-medium text-slate-700">Punch Type</span>
+              <span className="mb-2 text-sm font-medium text-slate-700">Punch / Exception Type</span>
               <select
                 value={typeFilter}
-                onChange={(e) => setTypeFilter(e.target.value)}
+                onChange={(e) => {
+                  setTypeFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
                 className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white"
               >
-                <option value="all">All Punch Types</option>
-                <option value="in">Punch In</option>
-                <option value="out">Punch Out</option>
+                <option value="all">All Types</option>
+                <option value="in">Punch In (Location)</option>
+                <option value="out">Punch Out (Location)</option>
+                <option value="early_departure">Early Departure</option>
+                <option value="overtime">Overtime</option>
               </select>
             </label>
           </div>
         </section>
 
         <section className="grid gap-5 md:grid-cols-2 xl:grid-cols-5">
-          <StatCard title="Visible Items" value={visibleSummary.total} subtitle="Current filtered queue" icon={<ShieldCheck size={20} />} tone="slate" />
-          <StatCard title="Pending" value={visibleSummary.pending} subtitle="Waiting for your review" icon={<Clock3 size={20} />} tone="amber" />
-          <StatCard title="Approved" value={visibleSummary.approved} subtitle="Approved by you" icon={<CheckCircle2 size={20} />} tone="emerald" />
-          <StatCard title="Rejected" value={visibleSummary.rejected} subtitle="Rejected by you" icon={<XCircle size={20} />} tone="rose" />
-          <StatCard title="Closed" value={visibleSummary.closed} subtitle="Finished by another approver" icon={<AlertCircle size={20} />} tone="cyan" />
+          <StatCard title="Total In Queue" value={summary.total_items} subtitle="Total exception queue" icon={<ShieldCheck size={20} />} tone="slate" />
+          <StatCard title="Pending" value={summary.pending_items} subtitle="Waiting for review" icon={<Clock3 size={20} />} tone="amber" />
+          <StatCard title="Actionable" value={summary.actionable_items} subtitle="Awaiting your action" icon={<AlertCircle size={20} />} tone="cyan" />
+          <StatCard title="Approved" value={summary.approved_items} subtitle="Approved items" icon={<CheckCircle2 size={20} />} tone="emerald" />
+          <StatCard title="Rejected" value={summary.rejected_items} subtitle="Rejected items" icon={<XCircle size={20} />} tone="rose" />
         </section>
 
         <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
@@ -320,7 +368,7 @@ export default function AttendanceApprovals() {
             </p>
           </div>
 
-          {filteredRecords.length === 0 ? (
+          {records.length === 0 ? (
             <div className="px-6 py-14 text-center">
               <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-slate-100 text-slate-500">
                 <MapPinned size={28} />
@@ -336,16 +384,20 @@ export default function AttendanceApprovals() {
                     <th className="px-6 py-4 font-semibold">Employee</th>
                     <th className="px-6 py-4 font-semibold">Review Item</th>
                     <th className="px-6 py-4 font-semibold">Attendance Window</th>
-                    <th className="px-6 py-4 font-semibold">Location</th>
+                    <th className="px-6 py-4 font-semibold">Location & Proof</th>
                     <th className="px-6 py-4 font-semibold">Queue Status</th>
                     <th className="px-6 py-4 font-semibold">Decision</th>
                     <th className="px-6 py-4 font-semibold">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredRecords.map((item) => {
+                  {records.map((item) => {
                     const approveBusy = submittingKey === `${item.approval_id}-approved`;
                     const rejectBusy = submittingKey === `${item.approval_id}-rejected`;
+
+                    // Photo corresponding to this review item
+                    const currentPhoto = item.review_type === "in" ? item.punch_in_photo : item.punch_out_photo;
+                    const altPhoto = item.review_type === "in" ? item.punch_out_photo : item.punch_in_photo;
 
                     return (
                       <tr key={item.approval_id} className="border-t border-slate-100 align-top transition hover:bg-slate-50/80">
@@ -357,6 +409,11 @@ export default function AttendanceApprovals() {
                         </td>
                         <td className="px-6 py-4 text-slate-700">
                           <div className="font-semibold text-slate-900">{item.review_label}</div>
+                          {item.comment && (
+                            <div className="mt-1 text-xs font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 inline-block">
+                              {item.comment}
+                            </div>
+                          )}
                           <div className="mt-2 text-xs text-slate-500">Route: {item.approval_route}</div>
                           <div className="mt-1 text-xs text-slate-500">Overall attendance: {capitalize(item.attendance_status)}</div>
                         </td>
@@ -370,11 +427,85 @@ export default function AttendanceApprovals() {
                           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
                             {item.location_label}
                           </div>
-                          <div className="mt-2 text-xs text-slate-500">
-                            In review: {capitalize(item.punch_in_status)}
-                          </div>
-                          <div className="mt-1 text-xs text-slate-500">
-                            Out review: {capitalize(item.punch_out_status)}
+
+                          {/* GPS Coordinates and Google Maps Link */}
+                          {item.latitude != null && item.longitude != null ? (
+                            <div className="mt-2 flex items-center gap-1.5 text-xs">
+                              <MapPinned size={14} className="text-slate-400 shrink-0" />
+                              <a
+                                href={`https://www.google.com/maps?q=${item.latitude},${item.longitude}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 hover:underline font-mono"
+                                title="View location on Google Maps"
+                              >
+                                {Number(item.latitude).toFixed(4)}, {Number(item.longitude).toFixed(4)}
+                                <ExternalLink size={11} />
+                              </a>
+                            </div>
+                          ) : (
+                            <div className="mt-1 text-xs text-slate-400">No GPS data</div>
+                          )}
+
+                          {/* Punch Selfie Proof */}
+                          <div className="mt-2 flex items-center gap-2">
+                            {currentPhoto ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPreviewPhoto({
+                                    url: currentPhoto,
+                                    employeeName: item.employee_name || item.employee,
+                                    time: item.review_type === "in" ? item.punch_in_time : item.punch_out_time,
+                                    label: `${item.review_label} Selfie`,
+                                  })
+                                }
+                                className="group relative flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white p-1 hover:border-blue-400 transition"
+                                title="Click to enlarge punch photo"
+                              >
+                                <img
+                                  src={currentPhoto}
+                                  alt="Punch selfie"
+                                  className="h-8 w-8 rounded object-cover"
+                                  onError={(e) => {
+                                    e.target.style.display = "none";
+                                  }}
+                                />
+                                <span className="text-[11px] font-medium text-slate-600 group-hover:text-blue-600 flex items-center gap-0.5 pr-1">
+                                  <Eye size={12} />
+                                  Selfie
+                                </span>
+                              </button>
+                            ) : altPhoto ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPreviewPhoto({
+                                    url: altPhoto,
+                                    employeeName: item.employee_name || item.employee,
+                                    time: item.review_type === "in" ? item.punch_out_time : item.punch_in_time,
+                                    label: "Alternate Punch Selfie",
+                                  })
+                                }
+                                className="group relative flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white p-1 hover:border-blue-400 transition"
+                                title="Click to view alternate punch photo"
+                              >
+                                <img
+                                  src={altPhoto}
+                                  alt="Punch selfie"
+                                  className="h-8 w-8 rounded object-cover"
+                                  onError={(e) => {
+                                    e.target.style.display = "none";
+                                  }}
+                                />
+                                <span className="text-[11px] font-medium text-slate-600 group-hover:text-blue-600 flex items-center gap-0.5 pr-1">
+                                  <Camera size={12} />
+                                  Photo
+                                </span>
+                              </button>
+                            ) : (
+                              <span className="text-xs text-slate-400">No selfie attached</span>
+                            )}
                           </div>
                         </td>
                         <td className="px-6 py-4">
@@ -413,7 +544,7 @@ export default function AttendanceApprovals() {
                                 {approveBusy ? "Approving..." : "Approve"}
                               </button>
                               <button
-                                onClick={() => handleAction(item.approval_id, "rejected")}
+                                onClick={() => openRejectModal(item)}
                                 disabled={Boolean(submittingKey)}
                                 className="inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-70"
                               >
@@ -434,8 +565,143 @@ export default function AttendanceApprovals() {
               </table>
             </div>
           )}
+
+          {/* Server-side Pagination Controls */}
+          <Pagination
+            page={currentPage}
+            setPage={setCurrentPage}
+            pageSize={pageSize}
+            changePageSize={(size) => {
+              setPageSize(size);
+              setCurrentPage(1);
+            }}
+            total={totalRecords}
+            pageCount={totalPages}
+            itemLabel="approval items"
+          />
         </section>
       </div>
+
+      {/* Photo Preview Modal */}
+      {previewPhoto && (
+        <div
+          onClick={() => setPreviewPhoto(null)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative max-h-[90vh] max-w-lg w-full overflow-hidden rounded-2xl bg-white shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">{previewPhoto.label}</h3>
+                <p className="text-xs text-slate-500">
+                  {previewPhoto.employeeName} • {formatDateTime(previewPhoto.time)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewPhoto(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-4 bg-slate-900 flex items-center justify-center min-h-[250px]">
+              <img
+                src={previewPhoto.url}
+                alt="Enlarged selfie"
+                className="max-h-[60vh] max-w-full rounded-lg object-contain shadow-md"
+              />
+            </div>
+            <div className="border-t border-slate-100 px-6 py-3 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setPreviewPhoto(null)}
+                className="rounded-xl bg-slate-100 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-200 transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rejection Confirmation Modal */}
+      {rejectModal.open && rejectModal.item && (
+        <div
+          onClick={() => {
+            if (!submittingKey) setRejectModal({ open: false, item: null, reason: "" });
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative max-w-md w-full rounded-2xl bg-white p-6 shadow-2xl border border-slate-200"
+          >
+            <div className="flex items-start gap-4">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-600">
+                <AlertCircle size={24} />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-semibold text-slate-900">
+                  Reject {rejectModal.item.review_label}
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  Are you sure you want to reject this exception for{" "}
+                  <span className="font-semibold text-slate-800">
+                    {rejectModal.item.employee_name || rejectModal.item.employee}
+                  </span>
+                  ?
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <label className="block text-xs font-medium text-slate-700">
+                Reason / Comment (Optional)
+              </label>
+              <textarea
+                value={rejectModal.reason}
+                onChange={(e) =>
+                  setRejectModal((prev) => ({ ...prev, reason: e.target.value }))
+                }
+                rows={3}
+                placeholder="Specify reason for rejecting this exception..."
+                className="mt-1.5 w-full rounded-xl border border-slate-200 p-3 text-sm text-slate-900 placeholder-slate-400 focus:border-rose-400 focus:outline-none focus:ring-1 focus:ring-rose-400"
+                maxLength={500}
+                disabled={Boolean(submittingKey)}
+              />
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                disabled={Boolean(submittingKey)}
+                onClick={() => setRejectModal({ open: false, item: null, reason: "" })}
+                className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleAction(
+                    rejectModal.item.approval_id,
+                    "rejected",
+                    rejectModal.reason
+                  )
+                }
+                disabled={Boolean(submittingKey)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-70 transition"
+              >
+                <XCircle size={15} />
+                {submittingKey ? "Rejecting..." : "Confirm Rejection"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Layout>
   );
 }

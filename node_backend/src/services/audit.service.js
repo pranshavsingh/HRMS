@@ -47,16 +47,31 @@ export const auditService = {
       const result = await auditRepository.log(userId, username, action, targetId, details, ipAddress, severity, finalTx);
       logger.info(`Audit Log: User [${username}] performed action [${action}] on target [${targetId}] (${severity})`);
 
-      if (result && result.lastID) {
+      const insertedId = result?.lastID || result?.insertId;
+      if (insertedId) {
         const fullLog = await db.get(`
           SELECT l.*, 
                  u.username as target_username, 
                  u.first_name as target_first_name, 
                  u.last_name as target_last_name 
           FROM audit_logs l 
-          LEFT JOIN accounts_user u ON u.id = l.target_id 
+          LEFT JOIN accounts_user u ON (
+            (
+              LOWER(l.action) LIKE '%user%' 
+              OR LOWER(l.action) LIKE '%employee%' 
+              OR LOWER(l.action) LIKE '%role%' 
+              OR LOWER(l.action) LIKE '%staff%' 
+              OR LOWER(l.action) LIKE '%password%' 
+              OR LOWER(l.action) LIKE '%document%' 
+              OR LOWER(l.action) LIKE '%profile%' 
+              OR LOWER(l.action) LIKE '%account%'
+            )
+            AND l.target_id IS NOT NULL 
+            AND l.target_id != ''
+            AND CAST(u.id AS CHAR) = CAST(l.target_id AS CHAR)
+          )
           WHERE l.id = ?
-        `, [result.lastID], finalTx);
+        `, [insertedId], finalTx);
 
         if (fullLog) {
           let parsedDetails = null;
@@ -86,7 +101,7 @@ export const auditService = {
             created_at: fullLog.created_at
           };
 
-          realtimeManager.broadcast("new_audit_log", serializedLog, (client) => client.role === "superadmin");
+          realtimeManager.broadcast("new_audit_log", serializedLog, { targetRoles: ["superadmin"] });
         }
       }
     } catch (err) {

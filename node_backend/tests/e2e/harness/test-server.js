@@ -5,6 +5,7 @@
 import { createApp } from "../../../src/app.js";
 import { closePool } from "../../../src/db/index.js";
 import redisService from "../../../src/services/redis.service.js";
+import { closeRealtime } from "../../../src/utils/realtime.js";
 
 /**
  * Boots an ephemeral test server on port 0 (OS allocated).
@@ -21,6 +22,9 @@ export async function startTestServer(options = {}) {
       
       const close = async () => {
         return new Promise((res) => {
+          if (typeof server.closeAllConnections === "function") {
+            server.closeAllConnections();
+          }
           server.close(() => res());
         });
       };
@@ -38,6 +42,12 @@ export async function startTestServer(options = {}) {
  * Global teardown helper for cleaning database and redis socket handles.
  */
 export async function teardownAll() {
+  try {
+    closeRealtime();
+  } catch (err) {
+    // Ignore realtime close errors on teardown
+  }
+
   try {
     if (redisService?.client) {
       redisService.client.disconnect();

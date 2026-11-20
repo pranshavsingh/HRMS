@@ -1,5 +1,6 @@
 import attendanceService from "../services/attendance.service.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { resolveTenantId } from "../utils/tenant.js";
 
 /**
  * Log punch-in event.
@@ -41,7 +42,8 @@ export const status = asyncHandler(async (req, res) => {
  * Retrieve actionable/visible punch approvals list.
  */
 export const approvals = asyncHandler(async (req, res) => {
-  const result = await attendanceService.approvals(req.user.id, req.user.role, req.query);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await attendanceService.approvals(req.user.id, req.user.role, req.query, tenantId);
   res.json(result);
 });
 
@@ -50,7 +52,8 @@ export const approvals = asyncHandler(async (req, res) => {
  */
 export const approvalAction = asyncHandler(async (req, res) => {
   const { status: decision, comment } = req.body;
-  const result = await attendanceService.approvalAction(req.params.approval_id, decision, comment, req.user);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await attendanceService.approvalAction(req.params.approval_id, decision, comment, req.user, tenantId);
   res.json(result);
 });
 
@@ -58,7 +61,8 @@ export const approvalAction = asyncHandler(async (req, res) => {
  * Employee dashboard metrics.
  */
 export const dashboard = asyncHandler(async (req, res) => {
-  const result = await attendanceService.dashboard(req.user.id);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await attendanceService.dashboard(req.user.id, tenantId);
   res.json(result);
 });
 
@@ -66,7 +70,8 @@ export const dashboard = asyncHandler(async (req, res) => {
  * HR Operations Dashboard Overview.
  */
 export const hrDashboard = asyncHandler(async (req, res) => {
-  const result = await attendanceService.hrDashboard(req.user.id, req.user.role);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await attendanceService.hrDashboard(req.user.id, req.user.role, tenantId);
   res.json(result);
 });
 
@@ -74,7 +79,8 @@ export const hrDashboard = asyncHandler(async (req, res) => {
  * Manager dashboard metrics.
  */
 export const managerDashboard = asyncHandler(async (req, res) => {
-  const result = await attendanceService.managerDashboard(req.user.id, req.user.role);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await attendanceService.managerDashboard(req.user.id, req.user.role, tenantId);
   res.json(result);
 });
 
@@ -82,7 +88,14 @@ export const managerDashboard = asyncHandler(async (req, res) => {
  * Team analytics insights (under target hours, shortfall analysis).
  */
 export const teamAnalytics = asyncHandler(async (req, res) => {
-  const result = await attendanceService.teamAnalytics(req.user.id, req.query.days, req.user.role);
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await attendanceService.teamAnalytics(
+    req.user.id,
+    req.query.days,
+    req.user.role,
+    tenantId,
+    req.query.site_id || null
+  );
   res.json(result);
 });
 
@@ -91,6 +104,7 @@ export const teamAnalytics = asyncHandler(async (req, res) => {
  */
 export const teamAttendance = asyncHandler(async (req, res) => {
   const { month, employee_id, detail_start, detail_end, page, limit, team } = req.query;
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
   const result = await attendanceService.teamAttendance(
     req.user.id,
     month,
@@ -100,7 +114,9 @@ export const teamAttendance = asyncHandler(async (req, res) => {
     req.user.role,
     page,
     limit,
-    team
+    team,
+    tenantId,
+    req.query.site_id || null
   );
   res.json(result);
 });

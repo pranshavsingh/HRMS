@@ -113,6 +113,7 @@ export default function TabsLayout() {
           href: isPersonal ? "/(tabs)/profile" : null,
         }}
       />
+      <Tabs.Screen name="holidays" options={{ title: "Holiday Calendar", href: null }} />
 
       {/* 2. Workspace Tabs - Visible to Managers / HR / Admin */}
       <Tabs.Screen

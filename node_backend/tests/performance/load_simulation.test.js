@@ -15,6 +15,9 @@ import { db, closePool } from "../../src/db/index.js";
 import redisService from "../../src/services/redis.service.js";
 
 function calculatePercentiles(latencies) {
+  if (!latencies || latencies.length === 0) {
+    return { p50: 0, p95: 0, p99: 0, max: 0, avg: 0 };
+  }
   latencies.sort((a, b) => a - b);
   const p50 = latencies[Math.floor(latencies.length * 0.5)];
   const p95 = latencies[Math.floor(latencies.length * 0.95)];
@@ -43,15 +46,36 @@ describe("P2.3 — High-Concurrency & Load Simulation Test Suite", () => {
          VALUES (?, 500, 28.6139, 77.2090, 1)`,
         [result.lastID]
       );
+
+      await db.run(
+        `INSERT INTO workforce_user_tenant (tenant_id, user_id, role, is_active)
+         VALUES (1, ?, 'employee', 1)`,
+        [result.lastID]
+      );
+
+      await db.run(
+        `INSERT INTO workforce_employee_site_assignment (tenant_id, user_id, site_id, effective_from)
+         VALUES (1, ?, 2, '2020-01-01')`,
+        [result.lastID]
+      );
     }
+
+    // Prime leave entitlement for primary test user
+    await leaveService.myLeaves(testUserIds[0], { page: 1, limit: 10 });
   });
 
   after(async () => {
     // Cleanup test users and related records
     if (testUserIds.length > 0) {
       const placeholders = testUserIds.map(() => "?").join(",");
+      await db.run(`DELETE FROM attendance_attendanceapproval WHERE attendance_id IN (SELECT id FROM attendance_attendance WHERE user_id IN (${placeholders}))`, testUserIds);
       await db.run(`DELETE FROM attendance_attendance WHERE user_id IN (${placeholders})`, testUserIds);
+      await db.run(`DELETE FROM workforce_leave_ledger_transaction WHERE user_id IN (${placeholders})`, testUserIds);
+      await db.run(`DELETE FROM workforce_employee_leave_entitlement WHERE user_id IN (${placeholders})`, testUserIds);
+      await db.run(`DELETE FROM leave_leave WHERE user_id IN (${placeholders})`, testUserIds);
+      await db.run(`DELETE FROM workforce_employee_site_assignment WHERE user_id IN (${placeholders})`, testUserIds);
       await db.run(`DELETE FROM accounts_employeeprofile WHERE user_id IN (${placeholders})`, testUserIds);
+      await db.run(`DELETE FROM workforce_user_tenant WHERE user_id IN (${placeholders})`, testUserIds);
       await db.run(`DELETE FROM accounts_user WHERE id IN (${placeholders})`, testUserIds);
     }
 

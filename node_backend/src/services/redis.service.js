@@ -14,16 +14,14 @@ class RedisService {
       this.client = new Redis(config.redisUrl, {
         maxRetriesPerRequest: 2,
         enableOfflineQueue: false,
-        lazyConnect: true,
         retryStrategy(times) {
-          if (times > 2) {
-            return null; // Cease reconnect attempts when offline
-          }
-          return Math.min(times * 150, 600);
+          // Keep retrying with a capped delay so Redis can come back after
+          // the API starts without leaving cache and ticket services offline.
+          return Math.min(times * 250, 5000);
         },
       });
 
-      this.client.on("connect", () => {
+      this.client.on("ready", () => {
         this.isConnected = true;
         logger.info("[Redis] Connected to Redis server successfully");
       });

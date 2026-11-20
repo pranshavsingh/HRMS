@@ -45,6 +45,22 @@ describe("P2.1 — Attendance & Transactional Concurrency Test Suite", () => {
       "INSERT INTO accounts_employeeprofile (user_id, manager_id, is_active_employee, allowed_radius, latitude, longitude) VALUES (?, ?, 1, 500, 28.6139, 77.2090)",
       [testUserId, testManagerId]
     );
+
+    // Register test users in default tenant for workforce relational constraints
+    await db.run(
+      "INSERT INTO workforce_user_tenant (tenant_id, user_id, role, is_active) VALUES (1, ?, 'employee', 1), (1, ?, 'manager', 1)",
+      [testUserId, testManagerId]
+    );
+
+    // Assign site 2 to employee and site access to manager for site-scoped authorization
+    await db.run(
+      "INSERT INTO workforce_employee_site_assignment (tenant_id, user_id, site_id, effective_from) VALUES (1, ?, 2, '2020-01-01')",
+      [testUserId]
+    );
+    await db.run(
+      "INSERT INTO workforce_site_access (tenant_id, user_id, site_id) VALUES (1, ?, 2)",
+      [testManagerId]
+    );
   });
 
   after(async () => {
@@ -52,8 +68,13 @@ describe("P2.1 — Attendance & Transactional Concurrency Test Suite", () => {
     if (testUserId) {
       await db.run("DELETE FROM attendance_attendanceapproval WHERE attendance_id IN (SELECT id FROM attendance_attendance WHERE user_id = ?)", [testUserId]);
       await db.run("DELETE FROM attendance_attendance WHERE user_id = ?", [testUserId]);
+      await db.run("DELETE FROM workforce_leave_ledger_transaction WHERE user_id = ?", [testUserId]);
+      await db.run("DELETE FROM workforce_employee_leave_entitlement WHERE user_id = ?", [testUserId]);
       await db.run("DELETE FROM leave_leave WHERE user_id = ?", [testUserId]);
+      await db.run("DELETE FROM workforce_employee_site_assignment WHERE user_id = ?", [testUserId]);
+      await db.run("DELETE FROM workforce_site_access WHERE user_id = ?", [testManagerId]);
       await db.run("DELETE FROM accounts_employeeprofile WHERE user_id IN (?, ?)", [testUserId, testManagerId]);
+      await db.run("DELETE FROM workforce_user_tenant WHERE user_id IN (?, ?)", [testUserId, testManagerId]);
       await db.run("DELETE FROM accounts_user WHERE id IN (?, ?)", [testUserId, testManagerId]);
     }
     if (redisService.client) {
@@ -146,7 +167,7 @@ describe("P2.1 — Attendance & Transactional Concurrency Test Suite", () => {
   it("should safely handle concurrent leave approval actions, allowing exactly 1 reviewer decision to succeed", async () => {
     // Create a pending leave request
     const leaveRes = await db.run(
-      "INSERT INTO leave_leave (user_id, leave_type, from_date, to_date, reason, status, created_at) VALUES (?, 'casual', '2027-01-01', '2027-01-02', 'Vacation', 'pending', NOW())",
+      "INSERT INTO leave_leave (user_id, leave_type, from_date, to_date, reason, status, created_at, site_id) VALUES (?, 'casual', '2027-01-01', '2027-01-02', 'Vacation', 'pending', NOW(), 2)",
       [testUserId]
     );
     const leaveId = leaveRes.lastID;

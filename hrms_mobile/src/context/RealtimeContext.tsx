@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useRef, ReactNode } from "react";
 import { useAuth } from "./AuthContext";
 import api from "../services/api";
+import { io, Socket } from "socket.io-client";
 
 interface RealtimeContextType {
   connect: () => void;
@@ -13,15 +14,31 @@ const RealtimeContext = createContext<RealtimeContextType | null>(null);
 export const RealtimeProvider = ({ children }: { children: ReactNode }) => {
   const { token } = useAuth();
   const xhrRef = useRef<XMLHttpRequest | null>(null);
+  const socketRef = useRef<Socket | null>(null);
   const listenersRef = useRef<{ [event: string]: ((data: any) => void)[] }>({});
 
   const connect = () => {
     if (!token) return;
 
+    if (!socketRef.current) {
+      const apiBase = api.defaults.baseURL || "http://localhost:8000/api";
+      const socket = io(new URL(apiBase).origin, {
+        path: "/socket.io",
+        auth: { token },
+        transports: ["websocket", "polling"],
+        reconnection: true,
+      });
+      socket.on("connect", () => triggerEvent("realtime:connected", {}));
+      socket.onAny((event, data) => {
+        if (String(event).startsWith("holiday:")) triggerEvent(String(event), data);
+      });
+      socket.on("connect_error", (error) => console.warn("[Realtime] Socket connection failed:", error.message));
+      socketRef.current = socket;
+    }
+
     if (xhrRef.current) {
       xhrRef.current.abort();
     }
-
     const baseURL = api.defaults.baseURL;
     const url = `${baseURL}/auth/realtime`;
 
@@ -66,6 +83,8 @@ export const RealtimeProvider = ({ children }: { children: ReactNode }) => {
       xhrRef.current = null;
       console.log("[Realtime] Stream disconnected manually");
     }
+    socketRef.current?.disconnect();
+    socketRef.current = null;
   };
 
   const parseChunk = (chunk: string) => {
@@ -92,12 +111,12 @@ export const RealtimeProvider = ({ children }: { children: ReactNode }) => {
     });
   };
 
-  const triggerEvent = (event: string, dataStr: string) => {
+  const triggerEvent = (event: string, dataValue: any) => {
     let data: any = null;
     try {
-      data = dataStr ? JSON.parse(dataStr) : null;
+      data = typeof dataValue === "string" ? (dataValue ? JSON.parse(dataValue) : null) : dataValue;
     } catch (err) {
-      data = dataStr;
+      data = dataValue;
     }
 
     console.log(`[Realtime] Received event: ${event}`, data);

@@ -53,7 +53,6 @@ export const cloudinaryService = {
       width: 800,
       height: 800,
       crop: "limit",
-      upload_preset: config.cloudinaryAttendancePreset,
     };
 
     logger.info("Uploading attendance photo to Cloudinary: %s/%s", folder, uuid);
@@ -93,13 +92,14 @@ export const cloudinaryService = {
   /**
    * Generate temporary signed URLs for private documents
    */
-  generateSignedUrl(publicId) {
+  generateSignedUrl(publicId, options = {}) {
     if (!publicId) return null;
     logger.info("Generating signed URL for Cloudinary private asset: %s", publicId);
     // Use private_download_url to support private signed URLs correctly
     return cloudinary.utils.private_download_url(publicId, null, {
       resource_type: "image",
       expires_at: Math.floor(Date.now() / 1000) + 3600,
+      ...options,
     });
   },
 

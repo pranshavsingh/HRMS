@@ -6,8 +6,21 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
+  const configuredApiUrl = env.VITE_API_BASE_URL || '/api';
+  const socketTarget = /^https?:\/\//.test(configuredApiUrl)
+    ? new URL(configuredApiUrl).origin
+    : (env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000');
 
   return {
+    server: {
+      proxy: {
+        '/socket.io': {
+          target: socketTarget,
+          ws: true,
+          changeOrigin: true,
+        },
+      },
+    },
     plugins: [
       react(),
       tailwindcss(),

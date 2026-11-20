@@ -5,6 +5,7 @@ import { createApp } from "../../src/app.js";
 import { workerHealthService } from "../../src/services/worker-health.service.js";
 import metricsService from "../../src/services/metrics.service.js";
 import { db, closePool } from "../../src/db/index.js";
+import redisService from "../../src/services/redis.service.js";
 
 describe("M3.6: Production Observability & Prometheus Telemetry", () => {
   let apiServer;
@@ -30,6 +31,9 @@ describe("M3.6: Production Observability & Prometheus Telemetry", () => {
       await new Promise((resolve) => apiServer.close(resolve));
     }
     await workerHealthService.stop();
+    if (redisService.client) {
+      try { redisService.client.disconnect(); } catch {}
+    }
     await closePool();
   });
 

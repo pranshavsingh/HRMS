@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarCheck2,
   Clock3,
@@ -14,6 +14,7 @@ import Loader from "../components/common/Loader";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
+import CompanyLeavePolicy from "./leave/CompanyLeavePolicy";
 
 const leaveTypes = [
   { value: "casual", label: "Casual Leave" },
@@ -76,12 +77,18 @@ const dayDifference = (fromDate, toDate) => {
 
 export default function Leave() {
   const { showPopup } = usePopup();
+  const showPopupRef = useRef(showPopup);
+  showPopupRef.current = showPopup;
   const today = new Date().toISOString().split("T")[0];
+  const canManagePolicy = ["hr", "admin", "superadmin"].includes(localStorage.getItem("role"));
+  const [activeTab, setActiveTab] = useState("leave");
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [insufficientWarning, setInsufficientWarning] = useState(null);
   const [leaves, setLeaves] = useState([]);
+  const [availableLeaveTypes, setAvailableLeaveTypes] = useState(leaveTypes);
   const [leaveSummary, setLeaveSummary] = useState({
     leave_allotted: 0,
     leaves_taken: 0,
@@ -98,7 +105,7 @@ export default function Leave() {
     reason: "",
   });
 
-  const fetchLeaves = async (showLoader = true) => {
+  const fetchLeaves = useCallback(async (showLoader = true) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -132,18 +139,34 @@ export default function Leave() {
       });
     } catch (err) {
       console.error("Leave fetch error:", err.response?.data || err.message);
-      showPopup("Unable to load leave records", "error");
+      showPopupRef.current("Unable to load leave records", "error");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchLeaves();
-  }, []);
+    API.get("/leave/policy/available-types/")
+      .then((res) => {
+        const types = res.data?.leave_types || [];
+        if (types.length) setAvailableLeaveTypes(types.map((type) => ({ value: type.leave_code, label: type.leave_name, requires_document: type.requires_document })));
+      })
+      .catch(() => {});
+  }, [fetchLeaves]);
 
   useRealtime("leave_update", () => fetchLeaves(false));
+  useRealtime("leave_notice", (notice) => {
+    fetchLeaves(false);
+    if (notice?.status === "concession_granted") {
+      showPopup(`${notice.additional_days} ${notice.leave_type} leave days granted. Updated balance: ${notice.updated_balance} days.`, "success");
+    } else if (notice?.status === "concession_reversed") {
+      showPopup(`A leave concession was reversed. Updated balance: ${notice.updated_balance} days.`, "warning");
+    } else if (notice?.status) {
+      showPopup(`Your ${notice.leave_type || "leave"} request for ${notice.days ?? ""} days was ${notice.status}. Updated balance: ${notice.updated_balance ?? "--"} days.`, notice.status === "approved" ? "success" : "warning");
+    }
+  });
 
   const summary = useMemo(() => {
     const approved = leaves.filter((item) => item.status === "approved").length;
@@ -190,8 +213,8 @@ export default function Leave() {
     });
   }, [form.from_date, form.to_date, leaves]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleSubmit = async (e, confirmedInsufficient = false) => {
+    e?.preventDefault?.();
 
     if (hasOverlap) {
       showPopup("Selected dates overlap with an already approved leave request", "warning");
@@ -216,6 +239,12 @@ export default function Leave() {
         from_date: form.from_date,
         to_date: form.to_date,
         reason: form.reason.trim(),
+        confirm_insufficient_balance: confirmedInsufficient,
+        ...(confirmedInsufficient ? {
+          confirmed_available_balance: Number(insufficientWarning?.current_available_balance),
+          confirmed_projected_balance: Number(insufficientWarning?.projected_balance),
+          confirmed_balance_snapshot: insufficientWarning?.confirmation_snapshot,
+        } : {}),
       };
 
       const res = await API.post("/leave/apply/", payload);
@@ -224,6 +253,11 @@ export default function Leave() {
       fetchLeaves(false);
     } catch (err) {
       console.error("Leave apply error:", err.response?.data || err.message);
+
+      if (err.response?.status === 409 && err.response?.data?.code === "INSUFFICIENT_LEAVE_BALANCE") {
+        setInsufficientWarning(err.response.data);
+        return;
+      }
 
       const apiError =
         err.response?.data?.error ||
@@ -281,14 +315,24 @@ export default function Leave() {
               />
               <MetricCard
                 icon={<CalendarCheck2 size={18} />}
-                label="Pending"
-                value={summary.pending}
+                label="Concession"
+                value={leaveSummary.management_concession || 0}
+              />
+              <MetricCard
+                icon={<CalendarCheck2 size={18} />}
+                label="Pending days"
+                value={leaveSummary.pending_leave_days || 0}
               />
             </div>
           </div>
         </section>
 
-        <div className="grid gap-6 xl:grid-cols-[1.05fr_1.4fr]">
+        {canManagePolicy && <div className="flex gap-2 border-b border-slate-200">
+          <button type="button" onClick={() => setActiveTab("leave")} className={`border-b-2 px-4 py-3 text-sm font-semibold ${activeTab === "leave" ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-500"}`}>My Leave</button>
+          <button type="button" onClick={() => setActiveTab("policy")} className={`border-b-2 px-4 py-3 text-sm font-semibold ${activeTab === "policy" ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-500"}`}>Company Leave Policy</button>
+        </div>}
+
+        {activeTab === "policy" && canManagePolicy ? <CompanyLeavePolicy /> : <div className="grid gap-6 xl:grid-cols-[1.05fr_1.4fr]">
           <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -315,7 +359,7 @@ export default function Leave() {
                   onChange={(e) => handleChange("leave_type", e.target.value)}
                   className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-400 focus:bg-white"
                 >
-                  {leaveTypes.map((option) => (
+                  {availableLeaveTypes.map((option) => (
                     <option key={option.value} value={option.value}>
                       {option.label}
                     </option>
@@ -509,8 +553,28 @@ export default function Leave() {
               </div>
             )}
           </section>
-        </div>
+        </div>}
       </div>
+      {insufficientWarning && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/50 p-4" role="presentation">
+          <section role="alertdialog" aria-modal="true" aria-labelledby="leave-balance-warning-title" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl">
+            <h2 id="leave-balance-warning-title" className="text-xl font-bold text-rose-700">Insufficient Leave Balance</h2>
+            <p className="mt-3 text-sm leading-6 text-slate-700">
+              Your available leave balance is {insufficientWarning.current_available_balance} days, but you are requesting {insufficientWarning.requested_days} days of leave. Submitting this application will result in a projected negative leave balance of {insufficientWarning.projected_balance} days.
+            </p>
+            <div className="mt-4 grid grid-cols-3 gap-3 rounded-2xl bg-rose-50 p-4 text-center text-sm">
+              <div><div className="text-xs text-slate-500">Available</div><strong>{insufficientWarning.current_available_balance} days</strong></div>
+              <div><div className="text-xs text-slate-500">Requested</div><strong>{insufficientWarning.requested_days} days</strong></div>
+              <div><div className="text-xs text-slate-500">Projected</div><strong className="text-rose-700">{insufficientWarning.projected_balance} days</strong></div>
+            </div>
+            {insufficientWarning.year_balances?.length > 1 && <div className="mt-3 space-y-1 text-xs text-slate-600">{insufficientWarning.year_balances.map((year) => <p key={year.financial_year_start}>{year.financial_year_start}: {year.current_available_balance} available − {year.requested_days} requested = {year.projected_balance}</p>)}</div>}
+            <div className="mt-6 flex justify-end gap-3">
+              <button type="button" onClick={() => setInsufficientWarning(null)} className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Cancel Application</button>
+              <button type="button" disabled={submitting} onClick={() => { setInsufficientWarning(null); handleSubmit(null, true); }} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">Continue &amp; Submit</button>
+            </div>
+          </section>
+        </div>
+      )}
     </Layout>
   );
 }

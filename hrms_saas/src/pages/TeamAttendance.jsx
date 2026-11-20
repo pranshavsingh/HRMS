@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarDays,
   Download,
@@ -11,10 +11,12 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import Pagination, { usePagination } from "../components/common/Pagination";
 import API from "../api/axios";
+import { useAuth } from "../context/AuthContext";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
-
+import { useSite } from "../context/SiteContext";
 
 const emptyData = {
   summary: {
@@ -43,22 +45,80 @@ const codeStyles = {
   L: "bg-violet-50 text-violet-700",
   A: "bg-slate-100 text-slate-700",
   WO: "bg-slate-200 text-slate-700",
+  H: "bg-teal-50 text-teal-700 ring-1 ring-teal-200",
 };
+
+const contextByRole = {
+  manager: {
+    tag: "Team Attendance",
+    title: "Review your full team attendance register and drill into any employee",
+    description:
+      "See the full monthly attendance sheet, export it to Excel, and open any team member's last 6 months attendance with date-wise export.",
+    scopeLabel: "for all direct reports",
+    selectLabel: "All Team Members",
+  },
+  hr: {
+    tag: "HR Attendance Register",
+    title: "Review and export employee attendance across organization units",
+    description:
+      "Review monthly attendance records, export reports to Excel, and inspect employee history.",
+    scopeLabel: "for authorized employees",
+    selectLabel: "All Employees",
+  },
+  admin: {
+    tag: "Workforce Attendance",
+    title: "Company-wide employee attendance register and monthly audit",
+    description:
+      "Review the organization-wide attendance register, export to Excel, and drill into any employee's attendance record with date-wise export.",
+    scopeLabel: "for all workforce members",
+    selectLabel: "All Employees",
+  },
+  superadmin: {
+    tag: "Workforce Attendance",
+    title: "Company-wide employee attendance register and monthly audit",
+    description:
+      "Review the organization-wide attendance register, export to Excel, and drill into any employee's attendance record with date-wise export.",
+    scopeLabel: "for all workforce members",
+    selectLabel: "All Employees",
+  },
+};
+
+function resolvePhotoUrl(photoPath) {
+  if (!photoPath) return "";
+  if (photoPath.startsWith("http://") || photoPath.startsWith("https://")) {
+    return photoPath;
+  }
+  if (photoPath.startsWith("/media/")) {
+    return photoPath;
+  }
+  if (photoPath.startsWith("/")) {
+    return photoPath;
+  }
+  return `/media/${photoPath}`;
+}
 
 function formatHours(value) {
   return `${Number(value || 0).toFixed(2)}h`;
 }
 
+// BUG-TA03: Safe CSV value sanitizer protecting against spreadsheet formula injection (=, +, -, @, \t, \r)
+export const sanitizeCsvValue = (val) => {
+  if (val === null || val === undefined) return '""';
+  let str = typeof val === "object" ? JSON.stringify(val) : String(val);
+  const trimmed = str.trimStart();
+  if (trimmed.length > 0 && ["=", "+", "-", "@", "\t", "\r"].includes(trimmed[0])) {
+    str = "'" + str;
+  }
+  return `"${str.replace(/"/g, '""')}"`;
+};
+
+// BUG-TA03: Safe CSV download with formula sanitization and UTF-8 BOM
 function downloadCsv(filename, rows) {
   const csv = rows
-    .map((row) =>
-      row
-        .map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`)
-        .join(",")
-    )
+    .map((row) => row.map(sanitizeCsvValue).join(","))
     .join("\n");
 
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -71,6 +131,11 @@ function downloadCsv(filename, rows) {
 
 export default function TeamAttendance() {
   const { showPopup } = usePopup();
+  const { role: authRole } = useAuth();
+  const role = authRole || localStorage.getItem("role") || "manager";
+  const roleContext = contextByRole[role] || contextByRole.manager;
+
+  const { querySiteId } = useSite();
   const today = new Date();
   const defaultMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
   const sixMonthsAgo = new Date(today.getFullYear(), today.getMonth() - 5, 1);
@@ -89,26 +154,62 @@ export default function TeamAttendance() {
   const [employeeId, setEmployeeId] = useState("");
   const [detailStart, setDetailStart] = useState(defaultDetailStart);
   const [detailEnd, setDetailEnd] = useState(defaultDetailEnd);
-  const [search, setSearch] = useState("");
-  const [photoModal, setPhotoModal] = useState(null);
 
-  const fetchAttendance = useCallback(async (showLoader = true) => {
+  // Debounced search (BUG-EA05)
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [photoModal, setPhotoModal] = useState(null);
+  // BUG-TA08: Track broken image states in modal
+  const [photoErrors, setPhotoErrors] = useState({ in: false, out: false });
+
+  // BUG-TA04: Request tracking to prevent stale asynchronous response overwrite
+  const requestIdRef = useRef(0);
+
+  const openPhotoModal = useCallback((photoData) => {
+    setPhotoErrors({ in: false, out: false });
+    setPhotoModal(photoData);
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // BUG-TA04: Reset employee selection and employee detail whenever the active site changes
+  useEffect(() => {
+    setEmployeeId("");
+    setData((prev) => ({
+      ...prev,
+      selected_employee_detail: null,
+    }));
+  }, [querySiteId]);
+
+  const fetchAttendance = useCallback(async (showLoader = true, overrideEmployeeId = null) => {
+    const currentReqId = ++requestIdRef.current;
     if (showLoader) {
       setLoading(true);
     } else {
       setRefreshing(true);
     }
 
+    const activeEmpId = overrideEmployeeId !== null ? overrideEmployeeId : employeeId;
+
     try {
       const params = {
         month,
         detail_start: detailStart,
         detail_end: detailEnd,
+        site_id: querySiteId,
+        page: "all",
       };
-      if (employeeId) {
-        params.employee_id = employeeId;
+      if (activeEmpId) {
+        params.employee_id = activeEmpId;
       }
       const res = await API.get("/attendance/team-attendance/", { params });
+      if (currentReqId !== requestIdRef.current) return;
+
       setData({
         ...emptyData,
         ...(res.data || {}),
@@ -122,37 +223,72 @@ export default function TeamAttendance() {
         selected_employee_detail: res.data?.selected_employee_detail || null,
       });
     } catch (err) {
+      if (currentReqId !== requestIdRef.current) return;
       console.error("Team attendance fetch error:", err.response?.data || err.message);
+
+      // BUG-TA04: Gracefully recover if a selected employee is not in the chosen site
+      if (err.response?.status === 403 && activeEmpId) {
+        setEmployeeId("");
+        showPopup("Selected employee is not assigned to the chosen site. Cleared selection.", "warning");
+        // Immediately reload site register without the invalid employee ID
+        fetchAttendance(false, "");
+        return;
+      }
+
       showPopup(err.response?.data?.error || "Unable to load team attendance", "error");
       setData(emptyData);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (currentReqId === requestIdRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [detailEnd, detailStart, employeeId, month]);
+  }, [detailEnd, detailStart, employeeId, month, querySiteId, showPopup]);
 
   useEffect(() => {
     fetchAttendance();
   }, [fetchAttendance]);
 
-  useRealtime("attendance_update", () => fetchAttendance(false));
-  useRealtime("leave_update", () => fetchAttendance(false));
+  // BUG-TA05: Stable real-time listeners avoiding unsubscribe/resubscribe churn on every render
+  const handleRealtimeUpdate = useCallback(() => {
+    fetchAttendance(false);
+  }, [fetchAttendance]);
+
+  useRealtime("attendance_update", handleRealtimeUpdate);
+  useRealtime("leave_update", handleRealtimeUpdate);
+  useRealtime("employee_update", handleRealtimeUpdate);
 
   const filteredRows = useMemo(() => {
-    const query = search.trim().toLowerCase();
+    const query = debouncedSearch.trim().toLowerCase();
     return data.register_rows.filter((row) => {
       if (!query) return true;
       return [row.employee_name, row.username, row.employee_code, row.today_status]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(query));
     });
-  }, [data.register_rows, search]);
+  }, [data.register_rows, debouncedSearch]);
+  const pagination = usePagination(filteredRows);
 
+  // BUG-TA06: Validate detailStart <= detailEnd before requesting
   const handleApplyDetailRange = () => {
+    if (!detailStart || !detailEnd) {
+      showPopup("Please select both start and end dates", "warning");
+      return;
+    }
+    if (detailStart > detailEnd) {
+      showPopup("Detail start date cannot be after end date", "warning");
+      return;
+    }
     fetchAttendance(false);
   };
 
+  // BUG-TA09: Prevent empty register exports and download with formula protection
   const exportRegister = () => {
+    if (!filteredRows || filteredRows.length === 0) {
+      showPopup("No attendance records available to export.", "warning");
+      return;
+    }
+
     const header = [
       "Emp Code",
       "Emp Name",
@@ -161,6 +297,7 @@ export default function TeamAttendance() {
       "Leave",
       "Pending",
       "Absent",
+      "Holidays",
       "Shortfall Days",
       "Working Hours",
     ];
@@ -173,6 +310,7 @@ export default function TeamAttendance() {
       row.leave_marks,
       row.pending_marks,
       row.absent_marks,
+      row.holiday_marks || 0,
       row.shortfall_days,
       Number(row.total_work_hours || 0).toFixed(2),
     ]);
@@ -180,8 +318,12 @@ export default function TeamAttendance() {
     downloadCsv(`team-attendance-${data.summary.month || month}.csv`, [header, ...rows]);
   };
 
+  // BUG-TA09: Prevent empty employee history exports and download with formula protection
   const exportEmployeeHistory = () => {
-    if (!data.selected_employee_detail) return;
+    if (!data.selected_employee_detail || !data.selected_employee_detail.history?.length) {
+      showPopup("No attendance records available to export.", "warning");
+      return;
+    }
     const detail = data.selected_employee_detail;
     const header = [
       "Date",
@@ -227,14 +369,13 @@ export default function TeamAttendance() {
             <div className="max-w-3xl">
               <p className="mb-3 inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.24em] text-cyan-100">
                 <FileSpreadsheet size={14} />
-                Team Attendance
+                {roleContext.tag}
               </p>
               <h1 className="text-3xl font-bold tracking-tight">
-                Review your full team attendance register and drill into any employee
+                {roleContext.title}
               </h1>
               <p className="mt-3 text-sm text-slate-200">
-                See the full monthly attendance sheet, export it to Excel, and open
-                any team member&apos;s last 6 months attendance with date-wise export.
+                {roleContext.description}
               </p>
             </div>
 
@@ -252,7 +393,7 @@ export default function TeamAttendance() {
             <div>
               <h2 className="text-xl font-semibold text-slate-900">Attendance Controls</h2>
               <p className="mt-1 text-sm text-slate-500">
-                Switch month, search team members, and export the register or employee history.
+                Switch month, search employees, and export the register or employee history.
               </p>
             </div>
 
@@ -288,12 +429,12 @@ export default function TeamAttendance() {
             <label className="block">
               <span className="mb-2 inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                 <Search size={16} />
-                Search Team
+                Search Employees
               </span>
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by employee name or code"
+                placeholder="Search by employee name, code, or status"
                 className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white"
               />
             </label>
@@ -305,7 +446,7 @@ export default function TeamAttendance() {
                 onChange={(e) => setEmployeeId(e.target.value)}
                 className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white"
               >
-                <option value="">All Team Members</option>
+                <option value="">{roleContext.selectLabel}</option>
                 {data.employees.map((employee) => (
                   <option key={employee.user_id} value={employee.user_id}>
                     {employee.employee_name || employee.username}
@@ -319,9 +460,11 @@ export default function TeamAttendance() {
         <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
             <div>
-              <h2 className="text-xl font-semibold text-slate-900">Monthly Team Attendance Register</h2>
+              <h2 className="text-xl font-semibold text-slate-900">
+                {role === "manager" ? "Monthly Team Attendance Register" : "Monthly Workforce Attendance Register"}
+              </h2>
               <p className="mt-1 text-sm text-slate-500">
-                {data.summary.month_label || "Selected month"} attendance sheet for all direct reports.
+                {data.summary.month_label || "Selected month"} attendance sheet {roleContext.scopeLabel}.
               </p>
             </div>
           </div>
@@ -342,26 +485,27 @@ export default function TeamAttendance() {
                       <div className="mt-1 text-[10px]">{day.weekday}</div>
                     </th>
                   ))}
-                  <th className="px-3 py-3 text-center font-semibold">P</th>
-                  <th className="px-3 py-3 text-center font-semibold">L</th>
-                  <th className="px-3 py-3 text-center font-semibold">PR</th>
-                  <th className="px-3 py-3 text-center font-semibold">A</th>
-                  <th className="px-3 py-3 text-center font-semibold">Short</th>
-                  <th className="px-3 py-3 text-center font-semibold">Hours</th>
+                  <th className="px-3 py-3 text-center font-semibold" title="Present">P</th>
+                  <th className="px-3 py-3 text-center font-semibold" title="Leave">L</th>
+                  <th className="px-3 py-3 text-center font-semibold" title="Pending">PR</th>
+                  <th className="px-3 py-3 text-center font-semibold" title="Absent">A</th>
+                  <th className="px-3 py-3 text-center font-semibold" title="Holidays">H</th>
+                  <th className="px-3 py-3 text-center font-semibold" title="Shortfall">Short</th>
+                  <th className="px-3 py-3 text-center font-semibold" title="Working Hours">Hours</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={data.register_dates.length + 7}
+                      colSpan={data.register_dates.length + 8}
                       className="px-6 py-10 text-center text-sm text-slate-500"
                     >
-                      No team attendance rows match this search.
+                      No attendance rows match this search.
                     </td>
                   </tr>
                 ) : (
-                  filteredRows.map((row) => (
+                  pagination.pageItems.map((row) => (
                     <tr key={row.user_id} className="border-t border-slate-100">
                       <td className="sticky left-0 z-10 bg-white px-4 py-3">
                         <div className="font-semibold text-slate-900">{row.employee_name || row.username}</div>
@@ -371,18 +515,28 @@ export default function TeamAttendance() {
                         <td key={cell.date} className="px-1 py-2 text-center border-r border-slate-50 last:border-r-0">
                           <div className="flex flex-col items-center gap-1 min-w-[64px]">
                             <span
-                              title={`${cell.date} | ${cell.punch_in} - ${cell.punch_out} | ${formatHours(cell.work_hours)}`}
-                              className={`inline-flex min-w-[32px] justify-center rounded px-1.5 py-0.5 text-[10px] font-bold ${codeStyles[cell.code] || codeStyles.A}`}
+                              title={
+                                cell.holiday_name
+                                  ? `${cell.date} | Holiday: ${cell.holiday_name}`
+                                  : `${cell.date} | ${cell.punch_in} - ${cell.punch_out} | ${formatHours(cell.work_hours)}`
+                              }
+                              className={`inline-flex min-w-[32px] justify-center rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                codeStyles[cell.code] || codeStyles.A
+                              }`}
                             >
                               {cell.code}
                             </span>
-                            {cell.code !== "A" && cell.code !== "WO" && (
+                            {cell.code !== "A" && cell.code !== "WO" && cell.code !== "H" && cell.code !== "L" && (
                               <div className="text-[9px] text-slate-500 font-mono flex flex-col items-center leading-tight">
-                                <span>{cell.punch_in}</span>
-                                <span>{cell.punch_out}</span>
+                                {(cell.punch_in !== "--" || cell.punch_out !== "--") && (
+                                  <>
+                                    <span>{cell.punch_in}</span>
+                                    <span>{cell.punch_out}</span>
+                                  </>
+                                )}
                                 {(cell.punch_in_photo || cell.punch_out_photo) && (
                                   <button
-                                    onClick={() => setPhotoModal({
+                                    onClick={() => openPhotoModal({
                                       employeeName: row.employee_name || row.username,
                                       date: cell.date,
                                       punchIn: cell.punch_in,
@@ -405,6 +559,7 @@ export default function TeamAttendance() {
                       <td className="px-3 py-3 text-center font-semibold text-slate-900">{row.leave_marks}</td>
                       <td className="px-3 py-3 text-center font-semibold text-amber-700">{row.pending_marks}</td>
                       <td className="px-3 py-3 text-center font-semibold text-slate-700">{row.absent_marks}</td>
+                      <td className="px-3 py-3 text-center font-semibold text-teal-700">{row.holiday_marks || 0}</td>
                       <td className="px-3 py-3 text-center font-semibold text-rose-700">{row.shortfall_days}</td>
                       <td className="px-3 py-3 text-center font-semibold text-slate-900">{formatHours(row.total_work_hours)}</td>
                     </tr>
@@ -413,6 +568,7 @@ export default function TeamAttendance() {
               </tbody>
             </table>
           </div>
+          <Pagination {...pagination} itemLabel="employees" />
         </section>
 
         {data.selected_employee_detail ? (
@@ -443,7 +599,7 @@ export default function TeamAttendance() {
                 <MetricCard title="Leave Days" value={data.selected_employee_detail.summary.leave_days} subtitle="Approved leave overlap" />
                 <MetricCard title="Work Hours" value={formatHours(data.selected_employee_detail.summary.total_work_hours)} subtitle="Counted approved hours" />
                 <MetricCard title="Shortfall Days" value={data.selected_employee_detail.summary.shortfall_days} subtitle="Approved days below 8h" />
-                <MetricCard title="Employee Code" value={data.selected_employee_detail.username} subtitle="Selected team member" />
+                <MetricCard title="Employee Code" value={data.selected_employee_detail.username} subtitle="Selected member" />
               </div>
 
               <div className="mt-5 grid gap-4 lg:grid-cols-[1fr_1fr_auto_auto]">
@@ -531,38 +687,50 @@ export default function TeamAttendance() {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.selected_employee_detail.history.map((item, index) => (
-                      <tr key={`${item.date}-${index}`} className="border-t border-slate-100">
-                        <td className="px-6 py-4 font-medium text-slate-900">{item.date}</td>
-                        <td className="px-6 py-4 text-slate-700">{item.status}</td>
-                        <td className="px-6 py-4 text-slate-700">{item.punch_in}</td>
-                        <td className="px-6 py-4 text-slate-700">{item.punch_out}</td>
-                        <td className="px-6 py-4 text-slate-700">{formatHours(item.work_hours)}</td>
-                        <td className="px-6 py-4 text-slate-700 font-medium">
-                          {item.punch_in_status}/{item.punch_out_status}
-                        </td>
-                        <td className="px-6 py-4 text-slate-700">
-                          {item.punch_in_photo || item.punch_out_photo ? (
-                            <button
-                              onClick={() => setPhotoModal({
-                                employeeName: data.selected_employee_detail.employee_name,
-                                date: item.date,
-                                punchIn: item.punch_in,
-                                punchOut: item.punch_out,
-                                punchInPhoto: item.punch_in_photo,
-                                punchOutPhoto: item.punch_out_photo,
-                              })}
-                              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 text-xs font-semibold transition cursor-pointer"
-                            >
-                              <Eye size={14} />
-                              View Photos
-                            </button>
-                          ) : (
-                            "--"
-                          )}
+                    {/* BUG-TA07: Clear empty state message spanning all columns when employee has zero attendance records */}
+                    {data.selected_employee_detail.history.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={7}
+                          className="px-6 py-10 text-center text-sm text-slate-500"
+                        >
+                          No attendance records found for the selected date range.
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      data.selected_employee_detail.history.map((item, index) => (
+                        <tr key={`${item.date}-${index}`} className="border-t border-slate-100">
+                          <td className="px-6 py-4 font-medium text-slate-900">{item.date}</td>
+                          <td className="px-6 py-4 text-slate-700">{item.status}</td>
+                          <td className="px-6 py-4 text-slate-700">{item.punch_in}</td>
+                          <td className="px-6 py-4 text-slate-700">{item.punch_out}</td>
+                          <td className="px-6 py-4 text-slate-700">{formatHours(item.work_hours)}</td>
+                          <td className="px-6 py-4 text-slate-700 font-medium">
+                            {item.punch_in_status}/{item.punch_out_status}
+                          </td>
+                          <td className="px-6 py-4 text-slate-700">
+                            {item.punch_in_photo || item.punch_out_photo ? (
+                              <button
+                                onClick={() => openPhotoModal({
+                                  employeeName: data.selected_employee_detail.employee_name,
+                                  date: item.date,
+                                  punchIn: item.punch_in,
+                                  punchOut: item.punch_out,
+                                  punchInPhoto: item.punch_in_photo,
+                                  punchOutPhoto: item.punch_out_photo,
+                                })}
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 text-xs font-semibold transition cursor-pointer"
+                              >
+                                <Eye size={14} />
+                                View Photos
+                              </button>
+                            ) : (
+                              "--"
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -574,10 +742,10 @@ export default function TeamAttendance() {
               <Users size={28} />
             </div>
             <h3 className="mt-4 text-lg font-semibold text-slate-900">
-              Select a team member to open the 6-month attendance view
+              Select an employee to open the 6-month attendance view
             </h3>
             <p className="mt-2 text-sm text-slate-500">
-              You can export the full team register already, or choose one employee for detailed history.
+              You can export the full attendance register already, or choose one employee for detailed history.
             </p>
           </section>
         )}
@@ -619,19 +787,19 @@ export default function TeamAttendance() {
                   <span className="text-sm text-slate-700 font-mono mb-4">
                     Time: {photoModal.punchIn || "--"}
                   </span>
-                  {photoModal.punchInPhoto ? (
+                  {/* BUG-TA08: Handle valid image, broken image, and missing image states independently */}
+                  {photoModal.punchInPhoto && !photoErrors.in ? (
                     <img
-                      src={photoModal.punchInPhoto.startsWith("http")
-                        ? photoModal.punchInPhoto
-                        : (photoModal.punchInPhoto.startsWith("/media")
-                          ? `http://127.0.0.1:8000${photoModal.punchInPhoto}`
-                          : `http://127.0.0.1:8000/media/${photoModal.punchInPhoto}`)}
+                      src={resolvePhotoUrl(photoModal.punchInPhoto)}
                       alt="Punch In Verification"
+                      onError={() => setPhotoErrors((prev) => ({ ...prev, in: true }))}
                       className="w-full h-64 object-cover rounded-xl shadow-md border border-white"
                     />
                   ) : (
                     <div className="w-full h-64 flex flex-col items-center justify-center rounded-xl bg-slate-100 text-slate-400">
-                      <span className="text-xs font-medium">No Punch In Photo</span>
+                      <span className="text-xs font-medium">
+                        {photoErrors.in ? "Photo unavailable" : "No Punch In Photo"}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -644,19 +812,19 @@ export default function TeamAttendance() {
                   <span className="text-sm text-slate-700 font-mono mb-4">
                     Time: {photoModal.punchOut || "--"}
                   </span>
-                  {photoModal.punchOutPhoto ? (
+                  {/* BUG-TA08: Handle valid image, broken image, and missing image states independently */}
+                  {photoModal.punchOutPhoto && !photoErrors.out ? (
                     <img
-                      src={photoModal.punchOutPhoto.startsWith("http")
-                        ? photoModal.punchOutPhoto
-                        : (photoModal.punchOutPhoto.startsWith("/media")
-                          ? `http://127.0.0.1:8000${photoModal.punchOutPhoto}`
-                          : `http://127.0.0.1:8000/media/${photoModal.punchOutPhoto}`)}
+                      src={resolvePhotoUrl(photoModal.punchOutPhoto)}
                       alt="Punch Out Verification"
+                      onError={() => setPhotoErrors((prev) => ({ ...prev, out: true }))}
                       className="w-full h-64 object-cover rounded-xl shadow-md border border-white"
                     />
                   ) : (
                     <div className="w-full h-64 flex flex-col items-center justify-center rounded-xl bg-slate-100 text-slate-400">
-                      <span className="text-xs font-medium">No Punch Out Photo</span>
+                      <span className="text-xs font-medium">
+                        {photoErrors.out ? "Photo unavailable" : "No Punch Out Photo"}
+                      </span>
                     </div>
                   )}
                 </div>
