@@ -60,6 +60,9 @@ services:
   # ============================================================================
   backend:
     image: hrms-production-backend:latest
+    build:
+      context: ./node_backend
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       mysql:
@@ -127,6 +130,9 @@ services:
   # ============================================================================
   worker:
     image: hrms-production-worker:latest
+    build:
+      context: ./node_backend
+      dockerfile: Dockerfile
     restart: unless-stopped
     command: ["npm", "run", "start:worker"]
     depends_on:
@@ -177,6 +183,9 @@ services:
   # ============================================================================
   frontend:
     image: hrms-production-frontend:latest
+    build:
+      context: ./hrms_saas
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       backend:
