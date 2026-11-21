@@ -516,13 +516,18 @@ jobs:
       - name: Deploy to Coolify via Webhook
         env:
           COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
         run: |
           if [ -z "$COOLIFY_WEBHOOK" ]; then
             echo "::warning ::COOLIFY_WEBHOOK_URL secret is not set. Skipping automatic deployment trigger. Configure this secret in GitHub repo settings once your Coolify service is created."
             exit 0
           fi
           echo "Triggering Coolify production deployment..."
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$COOLIFY_WEBHOOK")
+          if [ -n "$COOLIFY_TOKEN" ]; then
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Authorization: Bearer $COOLIFY_TOKEN" "$COOLIFY_WEBHOOK")
+          else
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$COOLIFY_WEBHOOK")
+          fi
           HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
           BODY=$(echo "$RESPONSE" | sed '$d')
           echo "Coolify response: $BODY (HTTP $HTTP_STATUS)"
