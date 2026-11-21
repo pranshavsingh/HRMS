@@ -506,20 +506,32 @@ jobs:
           push: false
           tags: hrms-frontend:ci-test
 
-  deploy-coolify:
-    name: Trigger Coolify Production Deployment
+  deploy-production:
+    name: Deploy to Production VPS
     runs-on: ubuntu-latest
     needs: [backend-security, frontend-build, docker-validation]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
-      - name: Deploy to Coolify via Webhook
+      - name: Deploy to VPS via SSH
+        if: ${{ secrets.VPS_SSH_KEY != '' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST || '201.18.198.223' }}
+          username: ${{ secrets.VPS_USER || 'root' }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            chmod +x /opt/hrms/scripts/deploy_production.sh
+            bash /opt/hrms/scripts/deploy_production.sh
+
+      - name: Deploy to Coolify via Webhook (Fallback)
+        if: ${{ secrets.VPS_SSH_KEY == '' }}
         env:
           COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK_URL }}
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
         run: |
           if [ -z "$COOLIFY_WEBHOOK" ]; then
-            echo "::warning ::COOLIFY_WEBHOOK_URL secret is not set. Skipping automatic deployment trigger. Configure this secret in GitHub repo settings once your Coolify service is created."
+            echo "::warning ::Neither VPS_SSH_KEY nor COOLIFY_WEBHOOK_URL secret is set. Configure VPS_SSH_KEY in GitHub repository secrets for automated deployment."
             exit 0
           fi
           TARGET_URL="${COOLIFY_WEBHOOK/force=false/force=true}"
