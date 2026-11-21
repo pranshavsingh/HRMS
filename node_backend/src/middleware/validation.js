@@ -204,16 +204,16 @@ export const createEmployeeSchema = z.object({
     dl_file: z.array(z.any()).optional()
   }).optional()
 }).superRefine(async (data, ctx) => {
-  if (["employee", "manager", "hr"].includes(data.body.role) && !data.body.site_id) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "A work site is required for employee, manager, and HR accounts", path: ["body", "site_id"] });
-  }
-  const photoList = data.files?.photo_copy || data.files?.photo_file;
-  if (!photoList || photoList.length === 0) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Photo Copy document is required",
-      path: ["photo_copy"]
-    });
+  const hasFiles = data.files && Object.keys(data.files).length > 0;
+  if (hasFiles) {
+    const photoList = data.files.photo_copy || data.files.photo_file;
+    if (!photoList || photoList.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Photo Copy document is required",
+        path: ["photo_copy"]
+      });
+    }
   }
   if (!data.files) return;
   const fields = ["photo_copy", "photo_file", "aadhar_file", "pan_file", "bank_file", "cv_file", "voter_file", "dl_file"];
