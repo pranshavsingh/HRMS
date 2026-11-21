@@ -1,6 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useRef } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef } from "react";
 import { io } from "socket.io-client";
-import API from "../api/axios";
+import API, { getInMemoryToken } from "../api/axios";
 
 const RealtimeContext = createContext(null);
 
@@ -10,6 +10,7 @@ export const RealtimeProvider = ({ children }) => {
   const listenersRef = useRef({});
   const reconnectTimerRef = useRef(null);
   const connectionAttemptRef = useRef(0);
+  const retryCountRef = useRef(0);
 
   const dispatchEvent = useCallback((type, data) => {
     const listeners = listenersRef.current[type] || [];
@@ -21,7 +22,7 @@ export const RealtimeProvider = ({ children }) => {
 
   const connectSse = useCallback(async () => {
     const attempt = ++connectionAttemptRef.current;
-    const token = localStorage.getItem("token");
+    const token = getInMemoryToken() || localStorage.getItem("token");
     if (!token) return;
 
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
@@ -34,19 +35,21 @@ export const RealtimeProvider = ({ children }) => {
       const response = await API.post("/v1/auth/realtime/ticket/");
       const ticket = response.data?.ticket || response.data?.data?.ticket;
       if (!ticket) throw new Error("Realtime ticket was not returned");
-      if (attempt !== connectionAttemptRef.current || !localStorage.getItem("token")) return;
+      if (attempt !== connectionAttemptRef.current || !(getInMemoryToken() || localStorage.getItem("token"))) return;
 
       const base = API.defaults.baseURL || "/api";
       es = new EventSource(`${base}/v1/auth/realtime?ticket=${encodeURIComponent(ticket)}`);
     } catch (error) {
       if (attempt !== connectionAttemptRef.current) return;
       console.warn("[Realtime] Could not open live updates; will retry.", error?.message);
-      reconnectTimerRef.current = setTimeout(() => connectSse(), 5000);
+      const nextDelay = Math.min(5000 * Math.pow(1.5, Math.min(retryCountRef.current++, 5)), 60000);
+      reconnectTimerRef.current = setTimeout(() => connectSse(), nextDelay);
       return;
     }
     eventSourceRef.current = es;
 
     es.onopen = () => {
+      retryCountRef.current = 0;
       console.log("[Realtime] Connected to live updates stream");
     };
 
@@ -54,8 +57,9 @@ export const RealtimeProvider = ({ children }) => {
       if (attempt !== connectionAttemptRef.current) return;
       es.close();
       if (eventSourceRef.current === es) eventSourceRef.current = null;
-      if (localStorage.getItem("token")) {
-        reconnectTimerRef.current = setTimeout(() => connectSse(), 5000);
+      if (getInMemoryToken() || localStorage.getItem("token")) {
+        const nextDelay = Math.min(5000 * Math.pow(1.5, Math.min(retryCountRef.current++, 5)), 60000);
+        reconnectTimerRef.current = setTimeout(() => connectSse(), nextDelay);
       }
     };
 
@@ -80,7 +84,7 @@ export const RealtimeProvider = ({ children }) => {
   }, [dispatchEvent]);
 
   const connectSocket = useCallback((requestedTenantId) => {
-    const token = localStorage.getItem("token");
+    const token = getInMemoryToken() || localStorage.getItem("token");
     if (!token) return;
     socketRef.current?.disconnect();
 
@@ -128,7 +132,7 @@ export const RealtimeProvider = ({ children }) => {
     }
   }, []);
 
-  const subscribe = (event, callback) => {
+  const subscribe = useCallback((event, callback) => {
     if (!listenersRef.current[event]) {
       listenersRef.current[event] = [];
     }
@@ -136,9 +140,9 @@ export const RealtimeProvider = ({ children }) => {
 
     // Return unsubscribe function
     return () => {
-      listenersRef.current[event] = listenersRef.current[event].filter(cb => cb !== callback);
+      listenersRef.current[event] = (listenersRef.current[event] || []).filter(cb => cb !== callback);
     };
-  };
+  }, []);
 
   useEffect(() => {
     const handleRefresh = () => {
@@ -151,7 +155,7 @@ export const RealtimeProvider = ({ children }) => {
     window.addEventListener("auth-logout", disconnect);
     window.addEventListener("realtime-tenant-change", handleTenantChange);
 
-    const token = localStorage.getItem("token");
+    const token = getInMemoryToken() || localStorage.getItem("token");
     if (token) {
       connect();
     }
@@ -164,8 +168,14 @@ export const RealtimeProvider = ({ children }) => {
     };
   }, [connect, connectSocket, disconnect]);
 
+  const contextValue = useMemo(() => ({
+    connect,
+    disconnect,
+    subscribe
+  }), [connect, disconnect, subscribe]);
+
   return (
-    <RealtimeContext.Provider value={{ connect, disconnect, subscribe }}>
+    <RealtimeContext.Provider value={contextValue}>
       {children}
     </RealtimeContext.Provider>
   );

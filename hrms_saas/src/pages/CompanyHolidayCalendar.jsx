@@ -38,11 +38,6 @@ export default function CompanyHolidayCalendar() {
   const canManage = ["hr", "admin", "superadmin"].includes(role);
   const isSuperadmin = role === "superadmin";
   const [month, setMonth] = useState(() => {
-    const saved = localStorage.getItem("holidayCalendarMonth");
-    if (saved && /^\d{4}-\d{2}$/.test(saved)) {
-      const [year, number] = saved.split("-").map(Number);
-      return new Date(year, number - 1, 1);
-    }
     const today = new Date();
     return new Date(today.getFullYear(), today.getMonth(), 1);
   });

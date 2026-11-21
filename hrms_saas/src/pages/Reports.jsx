@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BarChart3,
   Calendar,
@@ -32,7 +32,7 @@ export default function Reports() {
   );
   const pagination = usePagination(previewRows);
 
-  const loadPreviewData = async (targetMonth) => {
+  const loadPreviewData = useCallback(async (targetMonth) => {
     if (!targetMonth) return;
     setPreviewLoading(true);
     try {
@@ -47,11 +47,11 @@ export default function Reports() {
     } finally {
       setPreviewLoading(false);
     }
-  };
+  }, [querySiteId, showPopup]);
 
   useEffect(() => {
     loadPreviewData(month);
-  }, [month, querySiteId]);
+  }, [loadPreviewData, month]);
 
   useRealtime("attendance_update", () => loadPreviewData(month));
   useRealtime("leave_update", () => loadPreviewData(month));
@@ -84,16 +84,26 @@ export default function Reports() {
     return "bg-slate-50 text-slate-600 border border-slate-200";
   };
 
+  const sanitizeCsvValue = (val) => {
+    if (val === null || val === undefined) return '""';
+    let str = typeof val === "object" ? JSON.stringify(val) : String(val);
+    const trimmed = str.trimStart();
+    if (trimmed.length > 0 && ["=", "+", "-", "@", "\t", "\r"].includes(trimmed[0])) {
+      str = "'" + str;
+    }
+    return `"${str.replace(/"/g, '""')}"`;
+  };
+
   const downloadCsv = (filename, rows) => {
     const csv = rows
       .map((row) =>
         row
-          .map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`)
+          .map(sanitizeCsvValue)
           .join(",")
       )
       .join("\n");
 
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;

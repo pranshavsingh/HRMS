@@ -64,10 +64,8 @@ export function AuthProvider({ children }) {
       }
       return true;
     } catch {
-      // If refresh fails on mount and there is no valid access token in memory or storage
-      if (!getInMemoryToken() && !localStorage.getItem("token")) {
-        clearSession();
-      }
+      // If refresh fails on mount, clear session to prevent stale phantom sessions
+      clearSession();
       return false;
     }
   }, [handleTokenUpdate, clearSession]);
@@ -132,7 +130,7 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const isAuthenticated = Boolean(accessToken || localStorage.getItem("token") || user);
+  const isAuthenticated = Boolean((accessToken || getInMemoryToken() || localStorage.getItem("token")) && user);
 
   return (
     <AuthContext.Provider

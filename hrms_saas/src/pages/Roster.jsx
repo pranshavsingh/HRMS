@@ -20,6 +20,7 @@ import {
   X,
   Ban,
   FileSpreadsheet,
+  Coffee,
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
@@ -44,8 +45,31 @@ const sanitizeCsvValue = (val) => {
   return `"${str}"`;
 };
 
+// Safe date formatting with readable weekday (BUG FIX 06)
+const formatReadableDate = (dateStr) => {
+  if (!dateStr) return "";
+  const [year, month, day] = String(dateStr).slice(0, 10).split("-").map(Number);
+  if (!year || !month || !day) return dateStr;
+  const d = new Date(year, month - 1, day);
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${weekdays[d.getDay()]}, ${String(day).padStart(2, "0")} ${months[d.getMonth()]}`;
+};
+
+// Safe numeric working hours formatting (BUG FIX 07)
+const formatWorkHours = (val) => {
+  if (val === null || val === undefined || val === "") return "0.00";
+  const num = Number(val);
+  if (Number.isNaN(num) || !Number.isFinite(num) || num < 0) return "0.00";
+  return num.toFixed(2);
+};
+
 export default function Roster() {
   const popup = usePopup();
+  const popupRef = useRef(popup);
+  useEffect(() => {
+    popupRef.current = popup;
+  }, [popup]);
   const { querySiteId, siteId } = useSite();
   const { role: authRole } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -67,7 +91,7 @@ export default function Roster() {
   };
 
   const [activeTab, setActiveTab] = useState(getInitialTab);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   // Synchronize activeTab when searchParams change externally
   useEffect(() => {
@@ -99,6 +123,8 @@ export default function Roster() {
 
   // --- My Roster State ---
   const [myRoster, setMyRoster] = useState(null);
+  const [myRosterError, setMyRosterError] = useState("");
+  const [retryingMyRoster, setRetryingMyRoster] = useState(false);
 
   // --- Shift Masters & Employees for Modals ---
   const [shiftList, setShiftList] = useState([]);
@@ -186,7 +212,7 @@ export default function Roster() {
   }, [currentDate, viewMode]);
 
   // Load calendar
-  const loadCalendar = async () => {
+  const loadCalendar = useCallback(async () => {
     try {
       setLoading(true);
       const params = {
@@ -206,10 +232,10 @@ export default function Roster() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [dateRange.endDate, dateRange.startDate, isAdminOrHr, popup, querySiteId]);
 
   // Load assignments
-  const loadAssignments = async () => {
+  const loadAssignments = useCallback(async () => {
     try {
       setLoading(true);
       const params = { limit: 100 };
@@ -222,10 +248,10 @@ export default function Roster() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [assignFilterStatus, popup, querySiteId]);
 
   // Load rotations
-  const loadRotations = async () => {
+  const loadRotations = useCallback(async () => {
     try {
       setLoading(true);
       const data = await shiftsApi.listRotations();
@@ -235,23 +261,44 @@ export default function Roster() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [popup]);
 
-  // Load My Roster
-  const loadMyRoster = async () => {
+  // Load My Roster with dedicated error handling & retry state (BUG FIX 02)
+  const loadMyRoster = useCallback(async (isRetry = false) => {
     try {
-      setLoading(true);
+      if (isRetry) {
+        setRetryingMyRoster(true);
+      } else {
+        setLoading(true);
+      }
+      setMyRosterError("");
       const data = await shiftsApi.getMyRoster();
       setMyRoster(data);
     } catch (err) {
-      popup?.showPopup(err?.response?.data?.error || "Failed to load your roster", "error");
+      const errorMsg =
+        err?.response?.data?.error ||
+        (err?.response?.status >= 500
+          ? "The server encountered an error while retrieving your schedule. Please try again."
+          : err?.response?.status === 401
+          ? "Your session has expired. Please refresh or log in again."
+          : err?.response?.status === 403
+          ? "You do not have permission to view this schedule."
+          : !navigator.onLine
+          ? "You are currently offline. Check your network connection and try again."
+          : "Unable to load your shift schedule. Please check your connection and try again.");
+      setMyRosterError(errorMsg);
+      if (isRetry) {
+        popupRef.current?.showPopup(errorMsg, "error");
+      }
     } finally {
       setLoading(false);
+      setRetryingMyRoster(false);
     }
-  };
+  }, []);
 
-  // Load masters (shifts & employees)
-  const loadMasters = async () => {
+  // Load masters (shifts & employees) - restricted to Admin and HR (BUG FIX 01)
+  const loadMasters = useCallback(async () => {
+    if (!isAdminOrHr) return;
     try {
       const sData = await shiftsApi.list({ is_active: true, limit: 100 });
       setShiftList(sData.items || []);
@@ -265,11 +312,13 @@ export default function Roster() {
     } catch (err) {
       console.error(err);
     }
-  };
+  }, [isAdminOrHr, querySiteId]);
 
   useEffect(() => {
-    loadMasters();
-  }, [querySiteId]);
+    if (isAdminOrHr) {
+      loadMasters();
+    }
+  }, [isAdminOrHr, loadMasters]);
 
   useEffect(() => {
     if (activeTab === "calendar" && isManagerOrAdmin) {
@@ -281,7 +330,7 @@ export default function Roster() {
     } else if (activeTab === "my-schedule") {
       loadMyRoster();
     }
-  }, [activeTab, dateRange, assignFilterStatus, querySiteId]);
+  }, [activeTab, isAdminOrHr, isManagerOrAdmin, loadAssignments, loadCalendar, loadMyRoster, loadRotations]);
 
   // BUG-RS10: Stabilized callback avoiding subscription churn on every render
   const activeTabRef = useRef(activeTab);
@@ -293,7 +342,7 @@ export default function Roster() {
     else if (tab === "assignments") loadAssignments();
     else if (tab === "rotations") loadRotations();
     else if (tab === "my-schedule") loadMyRoster();
-  }, []);
+  }, [loadAssignments, loadCalendar, loadMyRoster, loadRotations]);
 
   useRealtime("schedule_update", handleRealtimeUpdate);
 
@@ -727,12 +776,16 @@ export default function Roster() {
 
         <div className="roster-guide" role="note">
           <CalendarIcon size={19} aria-hidden="true" />
-          {isAdminOrHr ? (
+          {activeTab === "my-schedule" ? (
+            <p><strong>Your personal schedule:</strong> My Schedule displays today&apos;s active shift or scheduled off day, along with your confirmed shifts, weekly offs, and company holidays for the upcoming 14 days.</p>
+          ) : activeTab === "assignments" ? (
+            <p><strong>Shift Assignments:</strong> Assign fixed shifts to employees with effective start and end dates. These assignments apply automatically across attendance tracking and roster scheduling.</p>
+          ) : activeTab === "rotations" ? (
+            <p><strong>Rotation Patterns:</strong> Define cyclic repeating shift schedules (e.g., 5 days working, 2 days off) and enroll employees with custom start dates and cycle offsets.</p>
+          ) : isAdminOrHr ? (
             <p><strong>How scheduling works:</strong> Create shifts in Shift Management, set fixed assignments or repeating rotation patterns, then generate a roster for the selected dates. The calendar shows team coverage; each shift also shows its source and draft or published status.</p>
-          ) : isManagerOrAdmin ? (
-            <p><strong>What this page shows:</strong> Use Roster Calendar to review your team's shifts. My Schedule shows your own upcoming shifts. HR and admins create and publish rosters.</p>
           ) : (
-            <p><strong>Your schedule:</strong> My Schedule shows today's assigned shift and upcoming shifts published by your HR team.</p>
+            <p><strong>Team Calendar:</strong> Review your team&apos;s scheduled shifts and daily coverage across the selected date range.</p>
           )}
         </div>
 
@@ -1007,6 +1060,12 @@ export default function Roster() {
                     Clear Search
                   </button>
                 )}
+
+                {assignments.length >= 100 && (
+                  <span className="text-xs text-amber-400 font-medium">
+                    (Displaying first 100 records. Filter by status to narrow results)
+                  </span>
+                )}
               </div>
             </div>
 
@@ -1197,39 +1256,182 @@ export default function Roster() {
               <div className="p-16 flex justify-center bg-gray-900 border border-gray-800 rounded-2xl">
                 <Loader />
               </div>
+            ) : myRosterError ? (
+              /* BUG FIX 02: Dedicated error banner with retry button */
+              <div className="bg-rose-950/40 border border-rose-800/60 p-6 rounded-2xl space-y-4">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="text-rose-400 shrink-0 mt-0.5" size={24} />
+                  <div>
+                    <h3 className="text-base font-bold text-white">Unable to Load Shift Schedule</h3>
+                    <p className="text-sm text-rose-300/90 mt-1">{myRosterError}</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadMyRoster(true)}
+                  disabled={retryingMyRoster}
+                  className="flex items-center gap-2 px-4 py-2 bg-rose-700 hover:bg-rose-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition shadow-sm"
+                >
+                  <RefreshCw size={16} className={retryingMyRoster ? "animate-spin" : ""} />
+                  {retryingMyRoster ? "Retrying..." : "Retry"}
+                </button>
+              </div>
             ) : (
               <>
-                {myRoster?.current_shift && (
-                  <div className="bg-gradient-to-r from-emerald-950/60 to-gray-900 border border-emerald-800/60 p-6 rounded-2xl">
-                    <div className="flex items-center justify-between mb-1">
-                      <div className="text-xs uppercase tracking-wider text-emerald-400 font-bold">Today's Active Shift</div>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                        myRoster.current_shift.source === "fixed_assignment"
-                          ? "bg-blue-950 text-blue-400 border border-blue-800"
-                          : "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                      }`}>
-                        {myRoster.current_shift.source === "fixed_assignment" ? "Fixed Shift" : myRoster.current_shift.source === "rotation" ? "Rotation" : "Roster"}
-                      </span>
-                    </div>
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                      <div>
-                        <h2 className="text-2xl font-black text-white">{myRoster.current_shift.shift_name}</h2>
-                        <p className="text-sm text-gray-300 mt-0.5">
-                          {myRoster.current_shift.start_time?.slice(0, 5)} - {myRoster.current_shift.end_time?.slice(0, 5)}
-                          {myRoster.current_shift.is_overnight && (
-                            <span className="ml-2 px-2 py-0.5 rounded bg-indigo-950 text-indigo-400 border border-indigo-800 text-xs">
-                              Overnight (+1 day)
-                            </span>
-                          )}
-                        </p>
-                      </div>
-                      <div className="px-4 py-2 bg-emerald-900/40 border border-emerald-700/50 rounded-xl text-emerald-300 text-sm font-semibold">
-                        Scheduled: {myRoster.current_shift.total_work_hours} hrs
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {/* BUG FIX 04: Today's Card Supporting Working, Off, Holiday, and Rest Day states */}
+                {(() => {
+                  const todayItem =
+                    myRoster?.today_entry ||
+                    (myRoster?.schedule && myRoster.schedule.find((s) => s.work_date === myRoster?.today)) ||
+                    myRoster?.current_shift;
 
+                  const isWorking = todayItem && !todayItem.is_off_day && Boolean(todayItem.shift_name);
+                  const isHoliday = todayItem?.status === "holiday";
+                  const isWeeklyOff = todayItem?.status === "weekly_off";
+                  const isRestDay = todayItem?.status === "rest_day";
+
+                  if (isWorking) {
+                    return (
+                      <div className="bg-gradient-to-r from-emerald-950/60 to-gray-900 border border-emerald-800/60 p-6 rounded-2xl">
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="text-xs uppercase tracking-wider text-emerald-400 font-bold">Today&apos;s Active Shift</div>
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            todayItem.source === "fixed_assignment"
+                              ? "bg-blue-950 text-blue-400 border border-blue-800"
+                              : todayItem.source === "rotation"
+                              ? "bg-indigo-950 text-indigo-400 border border-indigo-800"
+                              : "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                          }`}>
+                            {todayItem.source === "fixed_assignment" ? "Fixed Shift" : todayItem.source === "rotation" ? "Rotation" : "Published Roster"}
+                          </span>
+                        </div>
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                          <div>
+                            <h2 className="text-2xl font-black text-white">{todayItem.shift_name}</h2>
+                            <p className="text-sm text-gray-300 mt-0.5">
+                              <span className="font-semibold text-emerald-300">{formatReadableDate(todayItem.work_date)}:</span>{" "}
+                              {todayItem.start_time?.slice(0, 5)} - {todayItem.end_time?.slice(0, 5)}
+                              {todayItem.is_overnight && (
+                                <span className="ml-2 px-2 py-0.5 rounded bg-indigo-950 text-indigo-400 border border-indigo-800 text-xs font-medium">
+                                  Overnight (+1 day)
+                                </span>
+                              )}
+                            </p>
+                          </div>
+                          <div className="px-4 py-2 bg-emerald-900/40 border border-emerald-700/50 rounded-xl text-emerald-300 text-sm font-semibold">
+                            Scheduled: {formatWorkHours(todayItem.total_work_hours)} hrs
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (isHoliday) {
+                    return (
+                      <div className="bg-gradient-to-r from-purple-950/60 to-gray-900 border border-purple-800/60 p-6 rounded-2xl">
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="text-xs uppercase tracking-wider text-purple-400 font-bold">Today is a Company Holiday</div>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-950 text-purple-300 border border-purple-800">
+                            Company Holiday
+                          </span>
+                        </div>
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                          <div>
+                            <h2 className="text-2xl font-black text-white flex items-center gap-2">
+                              <Sun size={24} className="text-amber-400" />
+                              {todayItem.holiday_name || "Official Company Holiday"}
+                            </h2>
+                            <p className="text-sm text-purple-200/90 mt-0.5">
+                              {formatReadableDate(todayItem.work_date)} • Office is closed for observance. No working shift scheduled.
+                            </p>
+                          </div>
+                          <div className="px-4 py-2 bg-purple-900/40 border border-purple-700/50 rounded-xl text-purple-300 text-sm font-semibold">
+                            Holiday (0.00 hrs)
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (isWeeklyOff) {
+                    return (
+                      <div className="bg-gradient-to-r from-blue-950/60 to-gray-900 border border-blue-800/60 p-6 rounded-2xl">
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="text-xs uppercase tracking-wider text-blue-400 font-bold">Today is Your Weekly Off</div>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-950 text-blue-300 border border-blue-800">
+                            Weekly Off
+                          </span>
+                        </div>
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                          <div>
+                            <h2 className="text-2xl font-black text-white flex items-center gap-2">
+                              <Coffee size={24} className="text-blue-400" />
+                              Scheduled Day of Rest
+                            </h2>
+                            <p className="text-sm text-blue-200/90 mt-0.5">
+                              {formatReadableDate(todayItem.work_date)} • Authorized weekly off. No working shift scheduled.
+                            </p>
+                          </div>
+                          <div className="px-4 py-2 bg-blue-900/40 border border-blue-700/50 rounded-xl text-blue-300 text-sm font-semibold">
+                            Weekly Off
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (isRestDay) {
+                    return (
+                      <div className="bg-gradient-to-r from-teal-950/60 to-gray-900 border border-teal-800/60 p-6 rounded-2xl">
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="text-xs uppercase tracking-wider text-teal-400 font-bold">Today is Your Rest Day</div>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-teal-950 text-teal-300 border border-teal-800">
+                            Rest Day
+                          </span>
+                        </div>
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                          <div>
+                            <h2 className="text-2xl font-black text-white flex items-center gap-2">
+                              <Moon size={24} className="text-teal-400" />
+                              Roster Rest Day
+                            </h2>
+                            <p className="text-sm text-teal-200/90 mt-0.5">
+                              {formatReadableDate(todayItem.work_date)} • Scheduled non-working day under published roster.
+                            </p>
+                          </div>
+                          <div className="px-4 py-2 bg-teal-900/40 border border-teal-700/50 rounded-xl text-teal-300 text-sm font-semibold">
+                            Rest Day
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // Default Unassigned
+                  return (
+                    <div className="bg-gradient-to-r from-gray-900 to-gray-950 border border-gray-800 p-6 rounded-2xl">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="text-xs uppercase tracking-wider text-gray-400 font-bold">Today&apos;s Schedule Status</div>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-gray-800 text-gray-400 border border-gray-700">
+                          Unassigned
+                        </span>
+                      </div>
+                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                        <div>
+                          <h2 className="text-2xl font-black text-white">No Shift Assigned for Today</h2>
+                          <p className="text-sm text-gray-400 mt-0.5">
+                            {todayItem?.work_date ? formatReadableDate(todayItem.work_date) : formatReadableDate(dateOnly(new Date()))} • No shift has been assigned for today. Contact HR or your manager if this is unexpected.
+                          </p>
+                        </div>
+                        <div className="px-4 py-2 bg-gray-800/60 border border-gray-700 rounded-xl text-gray-400 text-sm font-semibold">
+                          No Shift
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* 14-Day Upcoming Schedule Grid (BUG FIX 05, 06, 07) */}
                 <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -1239,28 +1441,92 @@ export default function Roster() {
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                    {myRoster?.schedule?.length ? myRoster.schedule.map((item) => (
-                      <div key={item.entry_id} className="p-4 bg-gray-950 border border-gray-800 rounded-xl space-y-2 hover:border-gray-700 transition">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-gray-400 font-semibold">{item.work_date}</span>
-                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
-                            item.source === "fixed_assignment"
-                              ? "bg-blue-950/80 text-blue-400 border border-blue-800"
-                              : "bg-emerald-950/80 text-emerald-400 border border-emerald-800"
-                          }`}>
-                            {item.source === "fixed_assignment" ? "Fixed" : item.source === "rotation" ? "Rotation" : "Roster"}
-                          </span>
-                        </div>
-                        <div className="text-white font-bold text-sm truncate">{item.shift_name}</div>
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-emerald-400 font-medium">
-                            {item.start_time?.slice(0, 5)} - {item.end_time?.slice(0, 5)}
-                            {item.is_overnight && " (+1d)"}
-                          </span>
-                          <span className="text-gray-500 text-[11px]">{item.total_work_hours} hrs</span>
-                        </div>
-                      </div>
-                    )) : (
+                    {myRoster?.schedule?.length ? (
+                      myRoster.schedule.map((item) => {
+                        const isWorking = !item.is_off_day && Boolean(item.shift_name);
+                        const isHoliday = item.status === "holiday";
+                        const isWeeklyOff = item.status === "weekly_off";
+                        const isRestDay = item.status === "rest_day";
+                        const isUnassigned = item.status === "unassigned";
+
+                        let cardBg = "bg-gray-950 border-gray-800 hover:border-emerald-800/60";
+                        let badgeClass = "bg-emerald-950/80 text-emerald-400 border-emerald-800";
+                        let badgeText = item.source === "fixed_assignment" ? "Fixed" : item.source === "rotation" ? "Rotation" : "Roster";
+
+                        if (isHoliday) {
+                          cardBg = "bg-purple-950/20 border-purple-900/40 hover:border-purple-700/60";
+                          badgeClass = "bg-purple-950 text-purple-300 border-purple-800";
+                          badgeText = "Holiday";
+                        } else if (isWeeklyOff) {
+                          cardBg = "bg-blue-950/20 border-blue-900/40 hover:border-blue-700/60";
+                          badgeClass = "bg-blue-950 text-blue-300 border-blue-800";
+                          badgeText = "Weekly Off";
+                        } else if (isRestDay) {
+                          cardBg = "bg-teal-950/20 border-teal-900/40 hover:border-teal-700/60";
+                          badgeClass = "bg-teal-950 text-teal-300 border-teal-800";
+                          badgeText = "Rest Day";
+                        } else if (isUnassigned) {
+                          cardBg = "bg-gray-950/40 border-dashed border-gray-800";
+                          badgeClass = "bg-gray-800 text-gray-400 border-gray-700";
+                          badgeText = "Unassigned";
+                        }
+
+                        return (
+                          <div
+                            key={item.entry_id || item.work_date}
+                            className={`p-4 border rounded-xl space-y-2 transition ${cardBg}`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs text-gray-300 font-bold">
+                                {formatReadableDate(item.work_date)}
+                              </span>
+                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase border ${badgeClass}`}>
+                                {badgeText}
+                              </span>
+                            </div>
+
+                            {isWorking ? (
+                              <>
+                                <div className="text-white font-bold text-sm truncate" title={item.shift_name}>
+                                  {item.shift_name}
+                                </div>
+                                <div className="flex items-center justify-between text-xs">
+                                  <span className="text-emerald-400 font-medium">
+                                    {item.start_time?.slice(0, 5)} - {item.end_time?.slice(0, 5)}
+                                    {item.is_overnight && " (+1d)"}
+                                  </span>
+                                  <span className="text-gray-400 text-[11px]">
+                                    {formatWorkHours(item.total_work_hours)} hrs
+                                  </span>
+                                </div>
+                              </>
+                            ) : isHoliday ? (
+                              <>
+                                <div className="text-purple-200 font-bold text-sm truncate" title={item.holiday_name || "Company Holiday"}>
+                                  {item.holiday_name || "Company Holiday"}
+                                </div>
+                                <div className="text-xs text-purple-400/80">Official Non-Working Holiday</div>
+                              </>
+                            ) : isWeeklyOff ? (
+                              <>
+                                <div className="text-blue-200 font-bold text-sm truncate">Weekly Off</div>
+                                <div className="text-xs text-blue-400/80">Scheduled day of rest</div>
+                              </>
+                            ) : isRestDay ? (
+                              <>
+                                <div className="text-teal-200 font-bold text-sm truncate">Rest Day</div>
+                                <div className="text-xs text-teal-400/80">Roster scheduled rest day</div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="text-gray-400 font-bold text-sm truncate">No Shift Assigned</div>
+                                <div className="text-xs text-gray-500">Not scheduled</div>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })
+                    ) : (
                       <div className="col-span-full py-10 px-4 text-center bg-gray-950/50 border border-dashed border-gray-800 rounded-xl space-y-3">
                         <Clock size={36} className="text-gray-500 mx-auto" />
                         <div className="text-sm font-semibold text-gray-300">No shifts scheduled for the next 14 days</div>
@@ -1271,7 +1537,7 @@ export default function Roster() {
                           <div className="font-bold text-emerald-400 text-xs">How shift scheduling works:</div>
                           <div className="flex items-start gap-2">
                             <span className="bg-gray-800 text-gray-300 w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0 mt-0.5">1</span>
-                            <span><strong>Shift Management:</strong> HR configures shift timings & breaks.</span>
+                            <span><strong>Shift Management:</strong> HR configures shift timings &amp; breaks.</span>
                           </div>
                           <div className="flex items-start gap-2">
                             <span className="bg-gray-800 text-gray-300 w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0 mt-0.5">2</span>

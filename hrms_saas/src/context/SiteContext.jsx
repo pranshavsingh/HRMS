@@ -21,7 +21,13 @@ export function SiteProvider({ children }) {
 
   useEffect(() => { refreshSites(); }, [refreshSites, user?.id]);
   useEffect(() => {
-    if (siteId !== "all" && siteId !== "unassigned" && sites.length && !sites.some((site) => site.is_active && String(site.id) === String(siteId))) setSiteId("all");
+    if (siteId !== "all" && siteId !== "unassigned" && sites.length && !sites.some((site) => site.is_active && String(site.id) === String(siteId))) {
+      const inactiveSite = sites.find((s) => String(s.id) === String(siteId));
+      const siteName = inactiveSite ? inactiveSite.name : `ID #${siteId}`;
+      console.warn(`[SiteContext] Selected site "${siteName}" is no longer active. Resetting filter to "all".`);
+      setSiteId("all");
+      window.dispatchEvent(new CustomEvent("site-inactive-reset", { detail: { siteName } }));
+    }
   }, [siteId, sites]);
   useEffect(() => { localStorage.setItem("hrms.siteId", siteId); }, [siteId]);
 

@@ -1,4 +1,4 @@
-import { createElement, useEffect, useState, useMemo } from "react";
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Clock,
   Plus,
@@ -177,13 +177,18 @@ export default function Shifts() {
   };
 
   // BUG-SH04 & BUG-SH05: Safe server-side loading supporting explicit overrides
-  const loadShifts = async (page = 1, overrides = {}) => {
+  const filterParamsRef = useRef({ searchTerm, statusFilter, typeFilter, versionTabShiftId });
+  useEffect(() => {
+    filterParamsRef.current = { searchTerm, statusFilter, typeFilter, versionTabShiftId };
+  });
+
+  const loadShifts = useCallback(async (page = 1, overrides = {}) => {
     try {
       setLoading(true);
       setLoadError("");
-      const search = overrides.search !== undefined ? overrides.search : searchTerm;
-      const status = overrides.status !== undefined ? overrides.status : statusFilter;
-      const type = overrides.type !== undefined ? overrides.type : typeFilter;
+      const search = overrides.search !== undefined ? overrides.search : filterParamsRef.current.searchTerm;
+      const status = overrides.status !== undefined ? overrides.status : filterParamsRef.current.statusFilter;
+      const type = overrides.type !== undefined ? overrides.type : filterParamsRef.current.typeFilter;
 
       const params = {
         page,
@@ -199,7 +204,7 @@ export default function Shifts() {
       setPagination(data.pagination || { page, limit: 10, total: items.length, totalPages: 1 });
 
       // Default selection for Version History Tab if needed
-      if (!versionTabShiftId && items.length > 0) {
+      if (!filterParamsRef.current.versionTabShiftId && items.length > 0) {
         setVersionTabShiftId(items[0].id);
       }
     } catch (err) {
@@ -207,13 +212,13 @@ export default function Shifts() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadShifts(1);
-  }, []);
+  }, [loadShifts]);
 
-  const loadPolicies = async (tab = activeTab) => {
+  const loadPolicies = useCallback(async (tab) => {
     if (tab !== "policies" && tab !== "weekly-off") return;
     setPolicyLoading(true);
     setPolicyError("");
@@ -228,11 +233,11 @@ export default function Shifts() {
     } finally {
       setPolicyLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadPolicies(activeTab);
-  }, [activeTab]);
+  }, [loadPolicies, activeTab]);
 
   // Load versions when Version History Tab is active (BUG-SH14)
   useEffect(() => {

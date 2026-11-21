@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { useLocation } from "react-router-dom";
 import {
   AlertCircle,
@@ -20,6 +20,7 @@ import Pagination from "../../components/common/Pagination";
 import { usePagination } from "../../hooks/usePagination";
 import API from "../../api/axios";
 import { useRealtime } from "../../context/RealtimeContext";
+import { useAuth } from "../../context/AuthContext";
 
 const emptySummary = {
   staff: 0,
@@ -53,7 +54,8 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [warning, setWarning] = useState("");
 
-  const role = localStorage.getItem("role");
+  const { role: authRole } = useAuth();
+  const role = authRole || localStorage.getItem("role");
 
   const location = useLocation();
   const searchParams = new URLSearchParams(location.search);
@@ -65,7 +67,7 @@ export default function AdminDashboard() {
     setActiveTab(view === "personal" ? "personal" : "system");
   }, [view]);
 
-  const loadData = async (showLoader = false) => {
+  const loadData = useCallback(async (showLoader = false) => {
     if (showLoader) setLoading(true);
     try {
       const calls = [
@@ -107,11 +109,11 @@ export default function AdminDashboard() {
     } finally {
       if (showLoader) setLoading(false);
     }
-  };
+  }, [role]);
 
   useEffect(() => {
     loadData(true);
-  }, [role]);
+  }, [loadData]);
 
   useRealtime("attendance_update", () => loadData(false));
   useRealtime("leave_update", () => loadData(false));
@@ -552,7 +554,7 @@ export default function AdminDashboard() {
                     <HeroCard
                       icon={<Clock3 size={18} />}
                       label="Weekly Hours"
-                      value={personalData.total_working_hours.toFixed(2)}
+                      value={Number(personalData.total_working_hours || 0).toFixed(2)}
                     />
                     <HeroCard
                       icon={<Timer size={18} />}

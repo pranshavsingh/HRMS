@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   FileBadge2,
   FileUp,
@@ -32,7 +32,7 @@ export default function UploadDocuments() {
   });
   const [file, setFile] = useState(null);
 
-  const loadEmployees = async () => {
+  const loadEmployees = useCallback(async () => {
     try {
       const res = await API.get("/auth/employees/");
       setEmployees(Array.isArray(res.data) ? res.data : (res.data?.data || []));
@@ -42,11 +42,11 @@ export default function UploadDocuments() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [showPopup]);
 
   useEffect(() => {
     loadEmployees();
-  }, []);
+  }, [loadEmployees]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

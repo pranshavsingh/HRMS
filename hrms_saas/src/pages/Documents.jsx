@@ -85,6 +85,7 @@ export default function Documents() {
 
   const handleDownload = async (doc) => {
     const targetUrl = doc.download_url || getFileUrl(doc.file);
+    const cleanTitle = (doc.title || "document").replace(/[^a-zA-Z0-9_-]/g, "_");
     setDownloadingId(doc.id);
     try {
       const res = await fetch(targetUrl);
@@ -93,7 +94,6 @@ export default function Documents() {
       const blobUrl = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = blobUrl;
-      const cleanTitle = (doc.title || "document").replace(/[^a-zA-Z0-9_-]/g, "_");
       let ext = "";
       if (blob.type === "application/pdf") ext = ".pdf";
       else if (blob.type.includes("webp")) ext = ".webp";
@@ -110,9 +110,15 @@ export default function Documents() {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(blobUrl);
     } catch (err) {
-      console.warn("Direct blob download failed, falling back to secure attachment URL:", err);
-      // Fallback: trigger browser download directly via Cloudinary signed attachment URL
-      window.location.assign(targetUrl);
+      console.warn("Direct blob download failed, opening secure attachment safely in new tab:", err);
+      // Fallback: open attachment safely in a new tab without navigating away from the HRMS application
+      const fallbackLink = document.createElement("a");
+      fallbackLink.href = targetUrl;
+      fallbackLink.target = "_blank";
+      fallbackLink.rel = "noopener noreferrer";
+      document.body.appendChild(fallbackLink);
+      fallbackLink.click();
+      document.body.removeChild(fallbackLink);
     } finally {
       setDownloadingId(null);
     }

@@ -91,7 +91,7 @@ export default function SiteManagement() {
     setSavingEdit(true);
 
     try {
-      await API.patch(`/workforce/sites/${editingSite.id}`, {
+      await API.patch(`/workforce/sites/${editingSite.id}/`, {
         name: editForm.name.trim(),
         code: editForm.code.trim().toUpperCase(),
         address: editForm.address.trim() || null,
@@ -114,7 +114,7 @@ export default function SiteManagement() {
     setDeleting(true);
 
     try {
-      await API.delete(`/workforce/sites/${deletingSite.id}`);
+      await API.delete(`/workforce/sites/${deletingSite.id}/`);
       await refreshSites();
       setMessage({ type: "success", text: `Work site "${deletingSite.name}" deleted successfully.` });
       setDeletingSite(null);
@@ -130,7 +130,7 @@ export default function SiteManagement() {
     if (!deletingSite) return;
     setDeleting(true);
     try {
-      await API.patch(`/workforce/sites/${deletingSite.id}`, { is_active: false });
+      await API.patch(`/workforce/sites/${deletingSite.id}/`, { is_active: false });
       await refreshSites();
       setMessage({
         type: "success",

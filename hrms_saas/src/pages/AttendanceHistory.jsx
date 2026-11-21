@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CalendarDays,
   CheckCircle2,
@@ -113,25 +113,24 @@ const getReviewLabel = (item) => {
 
 export default function AttendanceHistory() {
   const { showPopup } = usePopup();
-  const today = new Date().toISOString().split("T")[0];
-  const monthAgo = new Date(Date.now() - 29 * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .split("T")[0];
-  const initialFilters = useMemo(
-    () => ({
-      startDate: monthAgo,
-      endDate: today,
-    }),
-    [monthAgo, today]
+
+  const today = useMemo(() => new Date().toISOString().split("T")[0], []);
+  const monthAgo = useMemo(
+    () => new Date(Date.now() - 29 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+    []
   );
+
+  const [filters, setFilters] = useState(() => ({
+    startDate: monthAgo,
+    endDate: today,
+  }));
 
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [filters, setFilters] = useState(initialFilters);
   const pagination = usePagination(records);
 
-  const fetchHistory = async (activeFilters, showLoader = true) => {
+  const fetchHistory = useCallback(async (activeFilters, showLoader = true) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -143,7 +142,7 @@ export default function AttendanceHistory() {
         limit: 500,
       };
 
-      if (activeFilters.startDate && activeFilters.endDate) {
+      if (activeFilters?.startDate && activeFilters?.endDate) {
         params.start_date = activeFilters.startDate;
         params.end_date = activeFilters.endDate;
       }
@@ -157,11 +156,11 @@ export default function AttendanceHistory() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [showPopup]);
 
   useEffect(() => {
-    fetchHistory(initialFilters);
-  }, [initialFilters]);
+    fetchHistory(filters, true);
+  }, [fetchHistory, filters]);
 
   useRealtime("attendance_update", () => fetchHistory(filters, false));
   useRealtime("leave_update", () => fetchHistory(filters, false));
@@ -237,22 +236,22 @@ export default function AttendanceHistory() {
               <SummaryCard
                 icon={<Clock3 size={18} />}
                 label="Working Days"
-                value={summary.totalDays}
+                value={summary?.totalDays || 0}
               />
               <SummaryCard
                 icon={<Timer size={18} />}
                 label="Total Hours"
-                value={summary.totalHours.toFixed(2)}
+                value={Number(summary?.totalHours || 0).toFixed(2)}
               />
               <SummaryCard
                 icon={<CheckCircle2 size={18} />}
                 label="Approved"
-                value={summary.approved}
+                value={summary?.approved || 0}
               />
               <SummaryCard
                 icon={<MapPinned size={18} />}
                 label="Pending"
-                value={summary.pending}
+                value={summary?.pending || 0}
               />
             </div>
           </div>
@@ -339,6 +338,11 @@ export default function AttendanceHistory() {
               </h2>
               <p className="text-sm text-slate-500">
                 {records.length} record{records.length === 1 ? "" : "s"} found
+                {records.length >= 500 && (
+                  <span className="ml-2 font-medium text-amber-600">
+                    (Showing latest 500 records. Filter by date to view older records)
+                  </span>
+                )}
               </p>
             </div>
 

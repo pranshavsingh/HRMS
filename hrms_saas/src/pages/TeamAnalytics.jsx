@@ -137,7 +137,7 @@ export default function TeamAnalytics() {
   querySiteIdRef.current = querySiteId;
 
   // TA-AN09: Include site_id in query parameters
-  const fetchAnalytics = async (selectedDays, showLoader = true) => {
+  const fetchAnalytics = useCallback(async (selectedDays, showLoader = true) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -171,16 +171,16 @@ export default function TeamAnalytics() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [showPopup]);
 
   useEffect(() => {
     fetchAnalytics(days);
-  }, [days, querySiteId]);
+  }, [fetchAnalytics, days, querySiteId]);
 
   // TA-AN08: Stable real-time SSE listener avoiding subscription churn
   const handleRealtimeUpdate = useCallback(() => {
     fetchAnalytics(daysRef.current, false);
-  }, []);
+  }, [fetchAnalytics]);
 
   useRealtime("attendance_update", handleRealtimeUpdate);
   useRealtime("leave_update", handleRealtimeUpdate);

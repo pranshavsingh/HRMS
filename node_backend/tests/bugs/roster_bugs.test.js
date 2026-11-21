@@ -2,6 +2,22 @@ import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const findRepoRoot = () => {
+  let curr = __dirname;
+  for (let i = 0; i < 5; i++) {
+    if (fs.existsSync(path.join(curr, "hrms_saas")) && fs.existsSync(path.join(curr, "node_backend"))) {
+      return curr;
+    }
+    curr = path.dirname(curr);
+  }
+  return process.cwd();
+};
+const repoRoot = findRepoRoot();
+const resolvePath = (rel) => path.resolve(repoRoot, rel);
 
 describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => {
   after(() => {
@@ -13,7 +29,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS01: Manager RBAC Desynchronization", () => {
     it("Roster.jsx includes manager in isManagerOrAdmin and defaults to calendar tab for managers", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes('["admin", "superadmin", "hr", "manager"].includes(userRole)'),
         "isManagerOrAdmin must include manager role"
@@ -29,7 +45,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
     });
 
     it("Sidebar.jsx links to /roster?tab=my-schedule for employees and /roster?tab=calendar for managers and HR", () => {
-      const sidebarCode = fs.readFileSync(path.resolve("hrms_saas/src/components/layout/Sidebar.jsx"), "utf8");
+      const sidebarCode = fs.readFileSync(resolvePath("hrms_saas/src/components/layout/Sidebar.jsx"), "utf8");
       assert.ok(
         sidebarCode.includes('to="/roster?tab=my-schedule"'),
         "My Schedule link must pass tab=my-schedule"
@@ -46,7 +62,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS02: Direct localStorage Role Access", () => {
     it("Roster.jsx consumes role from useAuth() context", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("useAuth"),
         "Roster.jsx must import and use useAuth"
@@ -63,7 +79,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS03: Publish Draft Banner Runtime Crash", () => {
     it("Roster.jsx safely checks publishableDraft before calling publish API and disables button", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("publishableDraft && handlePublishRoster(publishableDraft.id)"),
         "Publish button must guard against undefined publishableDraft.id"
@@ -106,7 +122,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS04: Calendar Month Navigation Date Rollover", () => {
     it("Roster.jsx clamps to day 1 before altering month in handlePrev, handleNext, and dateRange", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("nextD.setDate(1);\n      nextD.setMonth(nextD.getMonth() - 1);") ||
         pageCode.includes("nextD.setDate(1);\r\n      nextD.setMonth(nextD.getMonth() - 1);"),
@@ -159,7 +175,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS05: Missing Employee Search and Team Filter in Calendar", () => {
     it("Roster.jsx filters calendarData.employees via filteredEmployees and provides UI controls", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("const filteredEmployees = useMemo("),
         "Roster.jsx must compute filteredEmployees memo"
@@ -206,7 +222,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS06: Missing Search in Shift Assignments", () => {
     it("Roster.jsx provides search input and filters assignments reactively", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("const filteredAssignments = useMemo("),
         "Roster.jsx must compute filteredAssignments memo"
@@ -227,7 +243,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS07: Rotation Pattern Enrollment Starting Step Failure", () => {
     it("Roster.jsx uses selectedRotation.steps as reliable steps source in enroll modal", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("selectedRotation?.steps?.length ? selectedRotation.steps : (rotationPreview?.rotation?.steps || [])"),
         "Enroll modal must read from selectedRotation.steps when rotationPreview is null"
@@ -258,7 +274,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS08: Manual Numeric Shift Version ID", () => {
     it("Roster.jsx renders human-readable version card and disables assignment if no published version", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         !pageCode.includes('<input\n                    type="number"\n                    value={assignmentForm.shift_version_id}') &&
         !pageCode.includes('<input\r\n                    type="number"\r\n                    value={assignmentForm.shift_version_id}'),
@@ -275,7 +291,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
     });
 
     it("shift-assignment.service.js enforces that shift_version_id is published", () => {
-      const serviceCode = fs.readFileSync(path.resolve("node_backend/src/services/shift-assignment.service.js"), "utf8");
+      const serviceCode = fs.readFileSync(resolvePath("node_backend/src/services/shift-assignment.service.js"), "utf8");
       assert.ok(
         serviceCode.includes("shiftVersion.status !== \"published\""),
         "Backend must independently verify shift_version is published"
@@ -288,7 +304,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS09: Missing Loading States", () => {
     it("Roster.jsx guards Shift Assignments, Rotations, and My Schedule with explicit loading checks", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("{activeTab === \"assignments\" && isAdminOrHr && (\n          <div className=\"space-y-4\">\n") ||
         pageCode.includes("activeTab === \"assignments\""),
@@ -314,7 +330,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS10: SSE Listener Churn and Potential Memory Leak", () => {
     it("Roster.jsx creates stabilized realtime handler reference", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("const activeTabRef = useRef(activeTab);"),
         "Roster.jsx must maintain activeTabRef"
@@ -335,7 +351,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS11: Roster Generation Excludes Mid-Period Site Assignments", () => {
     it("roster.service.js uses formattedEnd and formattedStart for site assignment overlap check", () => {
-      const serviceCode = fs.readFileSync(path.resolve("node_backend/src/services/roster.service.js"), "utf8");
+      const serviceCode = fs.readFileSync(resolvePath("node_backend/src/services/roster.service.js"), "utf8");
       assert.ok(
         serviceCode.includes("empParams.push(tenantId, Number(site_id), formattedEnd, formattedStart);"),
         "generateDraftRoster must check esa.effective_from <= formattedEnd AND (esa.effective_to IS NULL OR esa.effective_to >= formattedStart)"
@@ -368,7 +384,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS12: Phantom Shifts on Published Off-Days", () => {
     it("roster.service.js tracks published roster headers and suppresses fallback shifts on published off-days", () => {
-      const serviceCode = fs.readFileSync(path.resolve("node_backend/src/services/roster.service.js"), "utf8");
+      const serviceCode = fs.readFileSync(resolvePath("node_backend/src/services/roster.service.js"), "utf8");
       assert.ok(
         serviceCode.includes("const publishedHeaders = await db.all("),
         "getMyRoster must query published roster headers covering the employee and date range"
@@ -415,7 +431,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS13: Missing Team Roster Calendar CSV Export", () => {
     it("Roster.jsx implements handleExportCalendarCsv and formula injection protection", () => {
-      const pageCode = fs.readFileSync(path.resolve("hrms_saas/src/pages/Roster.jsx"), "utf8");
+      const pageCode = fs.readFileSync(resolvePath("hrms_saas/src/pages/Roster.jsx"), "utf8");
       assert.ok(
         pageCode.includes("const sanitizeCsvValue = (val) =>"),
         "Roster.jsx must define sanitizeCsvValue"
@@ -459,7 +475,7 @@ describe("HRMS Roster Management Bug Fixes Suite (BUG-RS01 to BUG-RS14)", () => 
   // =========================================================================
   describe("BUG-RS14: Minimum Rest Validation Result Is Handled", () => {
     it("roster.service.js captures restValidation result, logs audit warning, and returns violations", () => {
-      const serviceCode = fs.readFileSync(path.resolve("node_backend/src/services/roster.service.js"), "utf8");
+      const serviceCode = fs.readFileSync(resolvePath("node_backend/src/services/roster.service.js"), "utf8");
       assert.ok(
         serviceCode.includes("const restValidation = rosterValidationService.validateConsecutiveShiftRest("),
         "generateDraftRoster must capture validateConsecutiveShiftRest result"

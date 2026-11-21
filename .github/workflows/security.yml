@@ -406,6 +406,12 @@ jobs:
           cd node_backend
           npm run test:e2e
 
+      - name: Run Roster Management & My Schedule Bug Regression Tests
+        run: |
+          cd node_backend
+          node --test tests/bugs/roster_bugs.test.js
+          node --test tests/bugs/my_schedule_fixes.test.js
+
   frontend-build:
     name: Frontend Quality & Build Verification
     runs-on: ubuntu-latest

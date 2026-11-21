@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -162,7 +162,7 @@ export default function LeaveApprovals() {
     return () => clearTimeout(timer);
   }, [search]);
 
-  const fetchApprovals = async (showLoader = true) => {
+  const fetchApprovals = useCallback(async (showLoader = true) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -198,7 +198,7 @@ export default function LeaveApprovals() {
       setTotalPages(pagesCount);
 
       if (currentPage > pagesCount && pagesCount >= 1) {
-        setCurrentPage(pagesCount);
+        setCurrentPage((prev) => (prev > pagesCount ? pagesCount : prev));
       }
 
       if (payload.summary) {
@@ -214,11 +214,11 @@ export default function LeaveApprovals() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [currentPage, debouncedSearch, pageSize, querySiteId, roleFilter, showPopup, statusFilter]);
 
   useEffect(() => {
     fetchApprovals();
-  }, [querySiteId, currentPage, pageSize, debouncedSearch, statusFilter, roleFilter]);
+  }, [fetchApprovals]);
 
   useRealtime("leave_update", () => fetchApprovals(false));
 

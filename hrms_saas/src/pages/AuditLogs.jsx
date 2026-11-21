@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   ArrowUpDown,
@@ -155,8 +155,13 @@ export default function AuditLogs() {
   // Selected Log detail popup state
   const [selectedLog, setSelectedLog] = useState(null);
 
+  const filtersRef = useRef({ search, actionType, severity, startDate, endDate, sort, page });
+  useEffect(() => {
+    filtersRef.current = { search, actionType, severity, startDate, endDate, sort, page };
+  });
+
   // BUG-AL03 & BUG-AL08: Explicit parameter-driven fetch
-  const fetchLogs = async (targetPage = page, showLoader = true, overrides = {}) => {
+  const fetchLogs = useCallback(async (targetPage = filtersRef.current.page, showLoader = true, overrides = {}) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -164,12 +169,12 @@ export default function AuditLogs() {
     }
 
     try {
-      const activeSearch = overrides.search !== undefined ? overrides.search : search;
-      const activeAction = overrides.actionType !== undefined ? overrides.actionType : actionType;
-      const activeSeverity = overrides.severity !== undefined ? overrides.severity : severity;
-      const activeStartDate = overrides.startDate !== undefined ? overrides.startDate : startDate;
-      const activeEndDate = overrides.endDate !== undefined ? overrides.endDate : endDate;
-      const activeSort = overrides.sort !== undefined ? overrides.sort : sort;
+      const activeSearch = overrides.search !== undefined ? overrides.search : filtersRef.current.search;
+      const activeAction = overrides.actionType !== undefined ? overrides.actionType : filtersRef.current.actionType;
+      const activeSeverity = overrides.severity !== undefined ? overrides.severity : filtersRef.current.severity;
+      const activeStartDate = overrides.startDate !== undefined ? overrides.startDate : filtersRef.current.startDate;
+      const activeEndDate = overrides.endDate !== undefined ? overrides.endDate : filtersRef.current.endDate;
+      const activeSort = overrides.sort !== undefined ? overrides.sort : filtersRef.current.sort;
 
       const params = {
         limit: 50,
@@ -196,11 +201,11 @@ export default function AuditLogs() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [showPopup]);
 
   useEffect(() => {
     fetchLogs(1, true);
-  }, []);
+  }, [fetchLogs]);
 
   // BUG-AL07: Bounded realtime updates (capped to limit of 50, pagination recalculated)
   useRealtime("new_audit_log", (newLog) => {
@@ -499,7 +504,7 @@ export default function AuditLogs() {
               </p>
             </div>
             <button
-              onClick={() => fetchLogs(false)}
+              onClick={() => fetchLogs(page, false)}
               className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
             >
               <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />

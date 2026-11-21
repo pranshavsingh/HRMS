@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useState, useCallback, useMemo } from "react";
 import { AlertTriangle, CheckCircle, Info, X, XCircle } from "lucide-react";
 
 const PopupContext = createContext(null);
@@ -15,7 +15,7 @@ export function usePopup() {
 export function PopupProvider({ children }) {
   const [popup, setPopup] = useState(null); // { message, tone: 'success' | 'error' | 'warning' | 'info', title }
 
-  const showPopup = (message, tone = "info", title = "") => {
+  const showPopup = useCallback((message, tone = "info", title = "") => {
     return new Promise((resolve) => {
       let defaultTitle = "";
       if (tone === "success") defaultTitle = "Success";
@@ -33,7 +33,7 @@ export function PopupProvider({ children }) {
         },
       });
     });
-  };
+  }, []);
 
   const getToneDetails = (tone) => {
     switch (tone) {
@@ -75,8 +75,10 @@ export function PopupProvider({ children }) {
 
   const toneDetails = popup ? getToneDetails(popup.tone) : null;
 
+  const value = useMemo(() => ({ showPopup }), [showPopup]);
+
   return (
-    <PopupContext.Provider value={{ showPopup }}>
+    <PopupContext.Provider value={value}>
       {children}
       {popup && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">

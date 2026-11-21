@@ -1,10 +1,11 @@
 import { LogOut, Bell, User, CalendarDays } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useSite } from "../../context/SiteContext";
+import { useAuth } from "../../context/AuthContext";
 
 export default function Navbar() {
-  const role = localStorage.getItem("role");
-  const username = localStorage.getItem("username"); // optional (if you store)
+  const { user, role: authRole, logout } = useAuth();
+  const role = authRole || localStorage.getItem("role");
   const storedUser = (() => {
     try {
       return JSON.parse(localStorage.getItem("user") || "{}");
@@ -12,12 +13,17 @@ export default function Navbar() {
       return {};
     }
   })();
-  const profilePic = storedUser?.profile_picture;
+  const username = user?.username || localStorage.getItem("username");
+  const profilePic = user?.profile_picture || storedUser?.profile_picture;
   const { sites, siteId, setSiteId } = useSite();
 
-  const handleLogout = () => {
-    localStorage.clear();
-    window.location.href = "/";
+  const handleLogout = async () => {
+    try {
+      await logout();
+    } catch {
+      localStorage.clear();
+      window.location.href = "/";
+    }
   };
 
   return (
@@ -62,7 +68,13 @@ export default function Navbar() {
         </Link>
 
         {/* 🔔 Notification (future use) */}
-        <button className="p-2 rounded-full hover:bg-gray-100">
+        <button
+          type="button"
+          disabled
+          title="Notifications (coming soon)"
+          aria-label="Notifications (coming soon)"
+          className="p-2 rounded-full text-slate-400 cursor-not-allowed opacity-50"
+        >
           <Bell size={18} />
         </button>
 

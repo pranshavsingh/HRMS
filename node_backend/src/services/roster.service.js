@@ -690,11 +690,15 @@ export const rosterService = {
     `;
     const entries = await db.all(sql, [tenantId, userId, formattedStart, formattedEnd]);
     const holidays = await db.all(
-      `SELECT holiday_date FROM workforce_company_holiday
+      `SELECT holiday_date, name FROM workforce_company_holiday
        WHERE tenant_id = ? AND is_optional = 0 AND holiday_date BETWEEN ? AND ?`,
       [tenantId, formattedStart, formattedEnd]
     );
     const holidayDates = new Set(holidays.map((holiday) => formatDateToYMD(holiday.holiday_date)));
+    const holidayMap = new Map();
+    for (const h of holidays) {
+      holidayMap.set(formatDateToYMD(h.holiday_date), h);
+    }
     const weeklyOffCache = new Map();
     const isWeeklyOff = async (shiftVersionId, dateStr) => {
       if (!shiftVersionId) return false;
@@ -745,7 +749,7 @@ export const rosterService = {
              rh.team_name IS NOT NULL
              AND EXISTS (
                SELECT 1 FROM accounts_employeeprofile ep
-               WHERE ep.user_id = ? AND ep.team_name = rh.team_name
+               WHERE ep.user_id = ? AND BINARY ep.team_name = BINARY rh.team_name
              )
            )
          )`,
@@ -764,26 +768,36 @@ export const rosterService = {
       }
     }
 
-    // Build schedule by prioritizing published roster entries, falling back to active fixed assignment
+    const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const getWeekday = (dateStr) => {
+      const d = new Date(`${dateStr}T00:00:00Z`);
+      return WEEKDAY_NAMES[d.getUTCDay()];
+    };
+
+    // Build schedule for every date in range (including weekly offs, holidays, rest days, and shifts)
     const schedule = [];
     const curDate = new Date(`${formattedStart}T00:00:00Z`);
     const endDateObj = new Date(`${formattedEnd}T00:00:00Z`);
 
     while (curDate <= endDateObj) {
       const dateStr = curDate.toISOString().slice(0, 10);
+      const weekday = getWeekday(dateStr);
+
       if (entryDateMap.has(dateStr)) {
         const e = entryDateMap.get(dateStr);
         schedule.push({
           entry_id: e.entry_id,
           work_date: dateStr,
-          status: e.status,
+          day_of_week: weekday,
+          status: e.status || "published",
+          is_off_day: false,
           shift_name: e.shift_name,
           shift_code: e.shift_code,
           timezone: e.timezone,
           version_number: e.version_number,
           start_time: e.start_time,
           end_time: e.end_time,
-          total_work_hours: Number(e.total_work_hours),
+          total_work_hours: Number(e.total_work_hours || 0),
           duration_minutes: e.duration_minutes,
           is_overnight: Boolean(e.is_overnight),
           source: "published_roster",
@@ -792,40 +806,123 @@ export const rosterService = {
         // Date is inside an active published roster covering this employee, but has no entry =>
         // Intentionally scheduled Off Day in the published roster.
         // DO NOT fall back to fixed or rotating shifts to prevent phantom shifts.
+        const holiday = holidayMap.get(dateStr);
+        if (holiday) {
+          schedule.push({
+            entry_id: `holiday-${dateStr}`,
+            work_date: dateStr,
+            day_of_week: weekday,
+            status: "holiday",
+            is_off_day: true,
+            holiday_name: holiday.name || "Company Holiday",
+            off_day_reason: holiday.name || "Company Holiday",
+            source: "company_holiday",
+            total_work_hours: 0,
+          });
+        } else {
+          schedule.push({
+            entry_id: `rest-${dateStr}`,
+            work_date: dateStr,
+            day_of_week: weekday,
+            status: "rest_day",
+            is_off_day: true,
+            off_day_reason: "Roster Rest Day",
+            source: "published_roster",
+            total_work_hours: 0,
+          });
+        }
+      } else if (holidayMap.has(dateStr)) {
+        const holiday = holidayMap.get(dateStr);
+        schedule.push({
+          entry_id: `holiday-${dateStr}`,
+          work_date: dateStr,
+          day_of_week: weekday,
+          status: "holiday",
+          is_off_day: true,
+          holiday_name: holiday.name || "Company Holiday",
+          off_day_reason: holiday.name || "Company Holiday",
+          source: "company_holiday",
+          total_work_hours: 0,
+        });
       } else {
         const fixed = await shiftAssignmentService.getActiveAssignmentForEmployee(tenantId, userId, dateStr);
-        if (fixed && !holidayDates.has(dateStr) && !(await isWeeklyOff(fixed.shift_version_id, dateStr))) {
-          schedule.push({
-            entry_id: `fixed-${fixed.id}-${dateStr}`,
-            work_date: dateStr,
-            status: "published",
-            shift_name: fixed.shift_name,
-            shift_code: fixed.shift_code,
-            timezone: fixed.timezone || "UTC",
-            version_number: fixed.version_number,
-            start_time: fixed.start_time,
-            end_time: fixed.end_time,
-            total_work_hours: Number(fixed.total_work_hours),
-            duration_minutes: fixed.duration_minutes,
-            is_overnight: fixed.end_time < fixed.start_time,
-            source: "fixed_assignment",
-          });
-        } else if (!fixed && !holidayDates.has(dateStr)) {
-          const rotation = await rotationService.calculateShiftForDate(tenantId, userId, dateStr);
-          if (rotation && !rotation.is_off_day && rotation.shift_version_id && !(await isWeeklyOff(rotation.shift_version_id, dateStr))) {
+        if (fixed) {
+          const isOff = await isWeeklyOff(fixed.shift_version_id, dateStr);
+          if (isOff) {
             schedule.push({
-              entry_id: `rotation-${rotation.rotation_id}-${dateStr}`,
+              entry_id: `weekly-off-${fixed.id}-${dateStr}`,
               work_date: dateStr,
+              day_of_week: weekday,
+              status: "weekly_off",
+              is_off_day: true,
+              off_day_reason: "Weekly Off",
+              source: "fixed_assignment",
+              shift_name: fixed.shift_name,
+              total_work_hours: 0,
+            });
+          } else {
+            schedule.push({
+              entry_id: `fixed-${fixed.id}-${dateStr}`,
+              work_date: dateStr,
+              day_of_week: weekday,
               status: "published",
-              shift_name: rotation.shift_name,
-              shift_code: rotation.shift_code,
-              timezone: rotation.timezone || "UTC",
-              start_time: rotation.start_time,
-              end_time: rotation.end_time,
-              total_work_hours: Number(rotation.total_work_hours),
-              duration_minutes: rotation.duration_minutes,
-              is_overnight: rotation.end_time < rotation.start_time,
-              source: "rotation",
+              is_off_day: false,
+              shift_name: fixed.shift_name,
+              shift_code: fixed.shift_code,
+              timezone: fixed.timezone || "UTC",
+              version_number: fixed.version_number,
+              start_time: fixed.start_time,
+              end_time: fixed.end_time,
+              total_work_hours: Number(fixed.total_work_hours || 0),
+              duration_minutes: fixed.duration_minutes,
+              is_overnight: fixed.end_time < fixed.start_time,
+              source: "fixed_assignment",
+            });
+          }
+        } else {
+          const rotation = await rotationService.calculateShiftForDate(tenantId, userId, dateStr);
+          if (rotation) {
+            const isOff = rotation.is_off_day || (rotation.shift_version_id && (await isWeeklyOff(rotation.shift_version_id, dateStr)));
+            if (isOff) {
+              schedule.push({
+                entry_id: `rotation-off-${rotation.rotation_id}-${dateStr}`,
+                work_date: dateStr,
+                day_of_week: weekday,
+                status: "weekly_off",
+                is_off_day: true,
+                off_day_reason: rotation.is_off_day ? "Rotation Off Day" : "Weekly Off",
+                source: "rotation",
+                shift_name: rotation.shift_name || "Rotation Off",
+                total_work_hours: 0,
+              });
+            } else {
+              schedule.push({
+                entry_id: `rotation-${rotation.rotation_id}-${dateStr}`,
+                work_date: dateStr,
+                day_of_week: weekday,
+                status: "published",
+                is_off_day: false,
+                shift_name: rotation.shift_name,
+                shift_code: rotation.shift_code,
+                timezone: rotation.timezone || "UTC",
+                start_time: rotation.start_time,
+                end_time: rotation.end_time,
+                total_work_hours: Number(rotation.total_work_hours || 0),
+                duration_minutes: rotation.duration_minutes,
+                is_overnight: rotation.end_time < rotation.start_time,
+                source: "rotation",
+              });
+            }
+          } else {
+            schedule.push({
+              entry_id: `unassigned-${dateStr}`,
+              work_date: dateStr,
+              day_of_week: weekday,
+              status: "unassigned",
+              is_off_day: true,
+              off_day_reason: "No Shift Assigned",
+              source: "none",
+              total_work_hours: 0,
             });
           }
         }
@@ -838,7 +935,8 @@ export const rosterService = {
 
     return {
       today,
-      current_shift: todayEntry,
+      current_shift: todayEntry && !todayEntry.is_off_day ? todayEntry : null,
+      today_entry: todayEntry,
       schedule,
     };
   }

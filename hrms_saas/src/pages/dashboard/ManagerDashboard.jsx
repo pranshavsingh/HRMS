@@ -35,7 +35,7 @@ export default function ManagerDashboard() {
       setData(mergeDashboard(res.data));
       setWarning("");
     } catch (managerErr) {
-      console.log("Manager dashboard API failed:", managerErr);
+      console.error("Manager dashboard API failed:", managerErr);
 
       try {
         const fallback = await API.get("/attendance/dashboard/");
@@ -55,7 +55,7 @@ export default function ManagerDashboard() {
         });
         setWarning("");
       } catch (fallbackErr) {
-        console.log("Fallback dashboard API failed:", fallbackErr);
+        console.error("Fallback dashboard API failed:", fallbackErr);
         setData(emptyDashboard);
         setWarning(
           "Dashboard data could not be loaded right now. Please refresh after the backend is running."

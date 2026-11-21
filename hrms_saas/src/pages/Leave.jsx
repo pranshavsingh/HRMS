@@ -14,6 +14,7 @@ import Loader from "../components/common/Loader";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
+import { useAuth } from "../context/AuthContext";
 import CompanyLeavePolicy from "./leave/CompanyLeavePolicy";
 
 const leaveTypes = [
@@ -77,10 +78,12 @@ const dayDifference = (fromDate, toDate) => {
 
 export default function Leave() {
   const { showPopup } = usePopup();
+  const { role: authRole } = useAuth();
+  const role = authRole || localStorage.getItem("role");
   const showPopupRef = useRef(showPopup);
   showPopupRef.current = showPopup;
   const today = new Date().toISOString().split("T")[0];
-  const canManagePolicy = ["hr", "admin", "superadmin"].includes(localStorage.getItem("role"));
+  const canManagePolicy = ["hr", "admin", "superadmin"].includes(role);
   const [activeTab, setActiveTab] = useState("leave");
 
   const [loading, setLoading] = useState(true);

@@ -28,11 +28,18 @@ const formatTimelineDate = (value) => {
 
 export default function EmployeeDashboard() {
   const [data, setData] = useState(null);
+  const [error, setError] = useState("");
 
   const loadData = () => {
     API.get("/attendance/dashboard/")
-      .then((res) => setData(res.data))
-      .catch((err) => console.log(err));
+      .then((res) => {
+        setData(res.data);
+        setError("");
+      })
+      .catch((err) => {
+        console.error("Dashboard load error:", err);
+        setError(err?.response?.data?.detail || err?.response?.data?.error || "Failed to load dashboard data.");
+      });
   };
 
   useEffect(() => {
@@ -53,6 +60,25 @@ export default function EmployeeDashboard() {
     return (total / data.daily_work.length).toFixed(2);
   }, [data]);
   const timelinePagination = usePagination(data?.daily_work || []);
+
+  if (error && !data) {
+    return (
+      <Layout>
+        <div className="flex flex-col items-center justify-center p-12 text-center">
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-rose-800 max-w-md">
+            <h3 className="font-semibold text-base mb-2">Unable to load dashboard</h3>
+            <p className="text-sm text-rose-600 mb-4">{error}</p>
+            <button
+              onClick={loadData}
+              className="px-4 py-2 bg-rose-600 text-white rounded-xl text-sm font-medium hover:bg-rose-700 transition"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      </Layout>
+    );
+  }
 
   if (!data) return <Loader />;
 
@@ -79,7 +105,7 @@ export default function EmployeeDashboard() {
               <HeroCard
                 icon={<Clock3 size={18} />}
                 label="Weekly Hours"
-                value={data.total_working_hours.toFixed(2)}
+                value={Number(data.total_working_hours || 0).toFixed(2)}
               />
               <HeroCard
                 icon={<Timer size={18} />}

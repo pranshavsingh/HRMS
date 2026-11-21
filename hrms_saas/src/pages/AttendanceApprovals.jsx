@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   AlertCircle,
   Camera,
@@ -158,7 +158,7 @@ export default function AttendanceApprovals() {
   }, [search]);
 
   // Fetch approvals from server
-  const fetchApprovals = async (showLoader = true) => {
+  const fetchApprovals = useCallback(async (showLoader = true) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -194,7 +194,7 @@ export default function AttendanceApprovals() {
       setTotalPages(pagesCount);
 
       if (currentPage > pagesCount && pagesCount >= 1) {
-        setCurrentPage(pagesCount);
+        setCurrentPage((prev) => (prev > pagesCount ? pagesCount : prev));
       }
 
       if (payload.summary) {
@@ -210,11 +210,11 @@ export default function AttendanceApprovals() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [currentPage, debouncedSearch, pageSize, querySiteId, showPopup, statusFilter, typeFilter]);
 
   useEffect(() => {
     fetchApprovals();
-  }, [querySiteId, currentPage, pageSize, debouncedSearch, statusFilter, typeFilter]);
+  }, [fetchApprovals]);
 
   useRealtime("attendance_update", () => fetchApprovals(false));
 

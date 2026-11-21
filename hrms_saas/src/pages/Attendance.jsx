@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Camera,
   CheckCircle2,
@@ -184,7 +184,7 @@ export default function Attendance() {
     }
   };
 
-  const startDetectionLoop = () => {
+  const startDetectionLoop = useCallback(() => {
     if (loopRef.current) clearInterval(loopRef.current);
 
     loopRef.current = setInterval(async () => {
@@ -284,15 +284,15 @@ export default function Attendance() {
         console.error("Face detection loop error:", err);
       }
     }, 400);
-  };
+  }, [modelsLoaded]);
 
-  const stopDetectionLoop = () => {
+  const stopDetectionLoop = useCallback(() => {
     if (loopRef.current) {
       clearInterval(loopRef.current);
       loopRef.current = null;
     }
     setValidation({ isValid: false, message: "Camera off" });
-  };
+  }, []);
 
   useEffect(() => {
     if (cameraOn && modelsLoaded && videoRef.current) {
@@ -306,7 +306,7 @@ export default function Attendance() {
     } else {
       stopDetectionLoop();
     }
-  }, [cameraOn, modelsLoaded]);
+  }, [cameraOn, modelsLoaded, startDetectionLoop, stopDetectionLoop]);
 
   useEffect(() => {
     if (
@@ -357,15 +357,17 @@ export default function Attendance() {
   }, []);
 
   const openCamera = async (punchType) => {
+    let mediaStream = null;
     try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
+      mediaStream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: false,
       });
-      const coords = await getLocation();
-
       streamRef.current = mediaStream;
       setStream(mediaStream);
+
+      const coords = await getLocation();
+
       setCameraOn(true);
       setType(punchType);
       setPunchDetails({
@@ -376,13 +378,21 @@ export default function Attendance() {
       });
     } catch (err) {
       console.error("Camera error:", err);
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+      }
+      stopCamera();
 
       if (err.name === "NotAllowedError") {
         showPopup("Camera permission denied", "error");
       } else if (err.name === "NotReadableError") {
         showPopup("Camera already in use", "warning");
+      } else if (err.code === 1) {
+        showPopup("Location permission denied. Please allow location access to punch.", "error");
+      } else if (err.code === 3) {
+        showPopup("Location request timed out. Please try again.", "error");
       } else {
-        showPopup("Camera not working", "error");
+        showPopup(err.message || "Camera or location error", "error");
       }
     }
   };

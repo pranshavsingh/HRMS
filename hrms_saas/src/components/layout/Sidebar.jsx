@@ -19,10 +19,23 @@ export default function Sidebar() {
 
   const menuClass = (path) => {
     const current = location.pathname + location.search;
-    const active = current === path ||
-                   (path === "/roster?tab=calendar" && location.pathname === "/roster" && (!location.search || location.search === "?tab=calendar")) ||
-                   (path === "/roster?tab=my-schedule" && location.pathname === "/roster" && location.search === "?tab=my-schedule") ||
-                   (path === "/dashboard" && location.pathname === "/dashboard" && !location.search);
+    const searchParams = new URLSearchParams(location.search);
+    const tabParam = searchParams.get("tab");
+
+    let active = current === path;
+
+    if (!active && location.pathname === "/roster") {
+      const isManagerOrAdmin = ["admin", "superadmin", "hr", "manager"].includes(role);
+      const effectiveTab = tabParam || (isManagerOrAdmin ? "calendar" : "my-schedule");
+      if (path === `/roster?tab=${effectiveTab}`) {
+        active = true;
+      }
+    }
+
+    if (!active && path === "/dashboard" && location.pathname === "/dashboard" && !location.search) {
+      active = true;
+    }
+
     return `flex items-center gap-3 px-4 py-2 rounded-lg transition ${
       active
         ? "bg-blue-600 text-white"

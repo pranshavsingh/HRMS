@@ -33,7 +33,7 @@ export default function HRDashboard() {
       setData(mergeDashboard(res.data));
       setWarning("");
     } catch (hrErr) {
-      console.log("HR dashboard API failed:", hrErr);
+      console.error("HR dashboard API failed:", hrErr);
       setData(emptyDashboard);
       setWarning(
         "Dashboard data could not be loaded right now. Please refresh after the backend is running."

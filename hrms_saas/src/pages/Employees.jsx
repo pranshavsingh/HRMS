@@ -133,7 +133,14 @@ function getAvatarStyle(role, name = "") {
 export default function Employees() {
   const { role: authRole, user: authUser } = useAuth();
   const userRole = authRole || localStorage.getItem("role") || "employee";
-  const currentUserId = authUser?.id || (localStorage.getItem("user") ? JSON.parse(localStorage.getItem("user"))?.id : null);
+  const currentUserId = authUser?.id || (() => {
+    try {
+      const stored = localStorage.getItem("user");
+      return stored ? JSON.parse(stored)?.id : null;
+    } catch {
+      return null;
+    }
+  })();
   const { sites, querySiteId } = useSite();
 
   const [loading, setLoading] = useState(true);

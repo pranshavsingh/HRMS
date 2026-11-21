@@ -19,14 +19,33 @@ export default function Login() {
   const [forgotLoading, setForgotLoading] = useState(false);
   const [forgotMsg, setForgotMsg] = useState("");
 
-  const handleLogin = async () => {
+  const handleLogin = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (loading) return;
+
+    const username = form.username.trim();
+    const password = form.password;
+
+    if (!username && !password) {
+      setError("Please enter your username and password.");
+      return;
+    }
+    if (!username) {
+      setError("Please enter your username or email.");
+      return;
+    }
+    if (!password) {
+      setError("Please enter your password.");
+      return;
+    }
+
     setError("");
     try {
       setLoading(true);
-      await login(form.username, form.password);
+      await login(username, password);
       navigate("/dashboard");
     } catch (err) {
-      setError(err.response?.data?.error || "Invalid credentials");
+      setError(err.response?.data?.error || err.response?.data?.detail || "Invalid credentials");
     } finally {
       setLoading(false);
     }
@@ -63,7 +82,12 @@ export default function Login() {
     }
   };
 
-  const resetPassword = async () => {
+  const resetPassword = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!newPassword || newPassword.length < 8) {
+      setForgotMsg("Password must be at least 8 characters long.");
+      return;
+    }
     try {
       setForgotLoading(true);
       setForgotMsg("");
@@ -73,11 +97,14 @@ export default function Login() {
         reset_token: resetToken,
         new_password: newPassword,
       });
-      setForgotMsg("Password reset successful. You can login now.");
-      setStep(1);
+      // M02: Reset all state and close forgot panel on success
+      setMail("");
       setOtp("");
       setResetToken("");
       setNewPassword("");
+      setStep(1);
+      setShowForgot(false);
+      setError("Password reset successful! Please log in with your new password.");
     } catch (err) {
       setForgotMsg(err.response?.data?.error || "Reset failed");
     } finally {
@@ -101,7 +128,7 @@ export default function Login() {
           <h2 className="text-3xl font-bold">Welcome back</h2>
           <p className="text-slate-500 mt-1">Login to continue to your dashboard</p>
 
-          <div className="mt-6 space-y-4">
+          <form onSubmit={handleLogin} className="mt-6 space-y-4">
             <input
               type="text"
               placeholder="Username or Email"
@@ -118,13 +145,14 @@ export default function Login() {
             />
             {error && <p className="text-sm text-red-600">{error}</p>}
             <button
-              onClick={handleLogin}
+              type="submit"
               disabled={loading}
-              className="w-full bg-blue-600 text-white p-3 rounded-xl hover:bg-blue-700 transition disabled:opacity-60"
+              className="w-full bg-blue-600 text-white p-3 rounded-xl hover:bg-blue-700 transition disabled:opacity-60 font-semibold"
             >
               {loading ? "Logging in..." : "Login"}
             </button>
             <button
+              type="button"
               onClick={() => {
                 setShowForgot(true);
                 setForgotMsg("");
@@ -133,7 +161,7 @@ export default function Login() {
             >
               Forgot password?
             </button>
-          </div>
+          </form>
 
           {showForgot && (
             <div className="mt-8 p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
