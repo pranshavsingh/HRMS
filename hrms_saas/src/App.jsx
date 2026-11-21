@@ -21,13 +21,15 @@ import Roster from "./pages/Roster";
 import CompanyHolidayCalendar from "./pages/CompanyHolidayCalendar";
 import { AuthProvider } from "./context/AuthContext";
 import { SiteProvider } from "./context/SiteContext";
+import ErrorBoundary from "./components/common/ErrorBoundary";
 
 export default function App() {
   return (
     <BrowserRouter>
-      <AuthProvider>
-        <SiteProvider>
-          <Routes>
+      <ErrorBoundary>
+        <AuthProvider>
+          <SiteProvider>
+            <Routes>
             <Route path="/" element={<Login />} />
             <Route
               path="/dashboard"
@@ -192,6 +194,7 @@ export default function App() {
           </Routes>
         </SiteProvider>
       </AuthProvider>
-    </BrowserRouter>
+    </ErrorBoundary>
+  </BrowserRouter>
   );
 }
