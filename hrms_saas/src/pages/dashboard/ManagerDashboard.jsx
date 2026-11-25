@@ -74,7 +74,13 @@ export default function ManagerDashboard() {
   useRealtime("leave_update", () => loadDashboard(false));
   useRealtime("employee_update", () => loadDashboard(false));
 
-  if (loading) return <Loader />;
+  if (loading) {
+    return (
+      <Layout>
+        <Loader />
+      </Layout>
+    );
+  }
 
   const own = data?.own_summary || emptyDashboard.own_summary;
 

@@ -12,6 +12,7 @@ import { formatDateToYMD } from "./shift-validation.service.js";
 import { canonicalizeJson, generateSnapshotPayloadHash } from "./shift-snapshot.service.js";
 import { auditService } from "./audit.service.js";
 import realtimeService from "./realtime.service.js";
+import logger from "../utils/logger.js";
 
 function wrapTx(conn) {
   if (!conn) return conn;
@@ -29,22 +30,30 @@ async function runWithTx(existingTx, fn) {
 }
 
 const schemaColumnChecks = new Map();
-function hasColumn(tableName, columnName) {
+async function hasColumn(tableName, columnName) {
   const key = `${tableName}.${columnName}`;
   if (!schemaColumnChecks.has(key)) {
-    const check = config.dbClient === "mysql"
-      ? db.get(
-        `SELECT 1 AS present FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`,
-        [tableName, columnName]
-      ).then(Boolean)
-      : db.all(`PRAGMA table_info(${tableName})`).then((columns) =>
-        columns.some((column) => column.name === columnName)
-      );
-    schemaColumnChecks.set(key, check.catch((error) => {
-      schemaColumnChecks.delete(key);
-      throw error;
-    }));
+    const check = (async () => {
+      if (!/^[a-zA-Z0-9_]+$/.test(tableName) || !/^[a-zA-Z0-9_]+$/.test(columnName)) {
+        return false;
+      }
+      try {
+        if (config.dbClient === "sqlite") {
+          const columns = await db.all(`PRAGMA table_info("${tableName}")`);
+          return Array.isArray(columns) && columns.some((col) => col.name === columnName);
+        }
+        const row = await db.get(
+          `SELECT 1 AS present FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`,
+          [tableName, columnName]
+        );
+        return Boolean(row && (row.present || row.PRESENT));
+      } catch (err) {
+        logger.warn(`hasColumn check failed for ${key}: ${err.message}`);
+        return false;
+      }
+    })();
+    schemaColumnChecks.set(key, check);
   }
   return schemaColumnChecks.get(key);
 }
@@ -62,7 +71,10 @@ async function listLegacyAssignments(tenantId, { userId = null, team = null, sta
   const params = [tenantId];
   if (userId) { conditions.push("wefa.user_id = ?"); params.push(userId); }
   if (team) { conditions.push("ep.team_name = ?"); params.push(team); }
-  if (actor?.role === "manager") { conditions.push("ep.manager_id = ?"); params.push(actor.id); }
+  if (actor?.role === "manager") {
+    conditions.push("(ep.manager_id = ? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))");
+    params.push(actor.id, actor.id);
+  }
   if (siteScope?.unassigned) conditions.push(`NOT EXISTS (SELECT 1 FROM workforce_employee_site_assignment esa WHERE esa.tenant_id=wefa.tenant_id AND esa.user_id=wefa.user_id AND esa.effective_from<=wefa.effective_from AND (esa.effective_to IS NULL OR esa.effective_to>=wefa.effective_from))`);
   else if (siteScope?.siteIds) {
     if (!siteScope.siteIds.length) conditions.push("1 = 0");
@@ -145,7 +157,10 @@ export const shiftAssignmentService = {
       whereConditions.push("ep.team_name = ?");
       params.push(team);
     }
-    if (actor?.role === "manager") { whereConditions.push("ep.manager_id = ?"); params.push(actor.id); }
+    if (actor?.role === "manager") {
+      whereConditions.push("(ep.manager_id = ? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))");
+      params.push(actor.id, actor.id);
+    }
     if (siteScope?.unassigned) whereConditions.push(`NOT EXISTS (SELECT 1 FROM workforce_employee_site_assignment esa WHERE esa.tenant_id=wefa.tenant_id AND esa.user_id=wefa.user_id AND esa.effective_from<=wefa.effective_from AND (esa.effective_to IS NULL OR esa.effective_to>=wefa.effective_from))`);
     else if (siteScope?.siteIds) {
       if (!siteScope.siteIds.length) whereConditions.push("1 = 0");
@@ -470,8 +485,8 @@ export const shiftAssignmentService = {
         if (activeFrom <= newTo && activeTo >= effectiveFrom) {
           if (activeFrom < effectiveFrom) {
             // Case: Prior active assignment started before new one. Supersede by setting effective_to to day before effectiveFrom
-            const prevDayDate = new Date(effectiveFrom);
-            prevDayDate.setDate(prevDayDate.getDate() - 1);
+            const prevDayDate = new Date(`${effectiveFrom}T00:00:00Z`);
+            prevDayDate.setUTCDate(prevDayDate.getUTCDate() - 1);
             const closedEffectiveTo = prevDayDate.toISOString().slice(0, 10);
 
             await tx.run(

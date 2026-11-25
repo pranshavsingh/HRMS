@@ -8,6 +8,7 @@ import { db } from "../db/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { validateEffectiveDates } from "./shift-validation.service.js";
 import { auditService } from "./audit.service.js";
+import { realtimeService } from "./realtime.service.js";
 
 export const weeklyOffPolicyService = {
   /**
@@ -252,7 +253,7 @@ export const weeklyOffPolicyService = {
    * Publish a draft weekly-off policy version (Findings C1, C2, C6).
    */
   async publishPolicyVersion(tenantId, policyId, versionId, actorUser) {
-    return db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       // 1. Monotonic Lock: Lock parent policy header
       const [pRows] = await tx.execute(
         `SELECT id FROM workforce_weekly_off_policy WHERE id = ? AND tenant_id = ? FOR UPDATE`,
@@ -326,6 +327,8 @@ export const weeklyOffPolicyService = {
         effective_from: effectiveFrom
       };
     });
+    realtimeService.emitToTenant(tenantId, "policy:updated", { policyId, versionId, type: "weekly_off_policy_published" });
+    return result;
   },
 
   /**

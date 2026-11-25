@@ -1,22 +1,27 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import {
   ActivityIndicator,
   Alert,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
 import { useRouter } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
 import api from "../services/api";
-import { FileUp, Upload, CheckCircle2, FileText } from "lucide-react-native";
+import { useRealtime } from "../context/RealtimeContext";
+import { FileUp, Upload, CheckCircle2, FileText, Search, ChevronDown, User, X } from "lucide-react-native";
 
 interface Employee {
   id: number;
   username: string;
   name?: string;
+  first_name?: string;
+  last_name?: string;
+  employee_code?: string;
 }
 
 const documentOptions = [
@@ -36,6 +41,7 @@ export default function DocumentUploadScreen() {
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   const [selectedEmpId, setSelectedEmpId] = useState<string>("");
+  const [empSearchQuery, setEmpSearchQuery] = useState<string>("");
   const [selectedDocType, setSelectedDocType] = useState<string>("Aadhar Card");
   const [selectedFile, setSelectedFile] = useState<{
     uri: string;
@@ -49,8 +55,17 @@ export default function DocumentUploadScreen() {
 
   const fetchEmployees = async () => {
     try {
-      const res = await api.get("/auth/employees/");
-      setEmployees(Array.isArray(res.data) ? res.data : (res.data?.data || []));
+      const res = await api.get("/auth/employees/", {
+        params: { limit: 100 },
+      });
+      const data = Array.isArray(res.data)
+        ? res.data
+        : Array.isArray(res.data?.data)
+        ? res.data.data
+        : Array.isArray(res.data?.records)
+        ? res.data.records
+        : [];
+      setEmployees(data);
     } catch (err) {
       console.error("Failed to load employees:", err);
       Alert.alert("Error", "Unable to load employees list");
@@ -60,8 +75,24 @@ export default function DocumentUploadScreen() {
   };
 
   useEffect(() => {
-    fetchEmployees();
+    const t = setTimeout(() => { void fetchEmployees(); }, 0);
+    return () => clearTimeout(t);
   }, []);
+
+  useRealtime("document_update", () => fetchEmployees());
+  useRealtime("employee_update", () => fetchEmployees());
+  useRealtime("realtime:connected", () => fetchEmployees());
+
+  const filteredEmployees = useMemo(() => {
+    const q = empSearchQuery.trim().toLowerCase();
+    if (!q) return employees;
+    return employees.filter((e) => {
+      const name = `${e.first_name || ""} ${e.last_name || ""}`.toLowerCase();
+      const uname = (e.username || "").toLowerCase();
+      const code = (e.employee_code || "").toLowerCase();
+      return name.includes(q) || uname.includes(q) || code.includes(q);
+    });
+  }, [employees, empSearchQuery]);
 
   const handlePickDocument = async () => {
     try {
@@ -125,18 +156,21 @@ export default function DocumentUploadScreen() {
   if (loading) {
     return (
       <View style={styles.centerContainer}>
-        <ActivityIndicator size="large" color="#6366f1" />
+        <ActivityIndicator size="large" color="#2457D6" />
       </View>
     );
   }
 
-  const selectedEmployeeName = employees.find((e) => String(e.id) === selectedEmpId)?.username || "Select Employee";
+  const selectedEmp = employees.find((e) => String(e.id) === selectedEmpId);
+  const selectedEmployeeName = selectedEmp
+    ? `${selectedEmp.first_name || ""} ${selectedEmp.last_name || ""}`.trim() || selectedEmp.username
+    : "Select Employee...";
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
       <View style={styles.heroCard}>
         <View style={styles.heroHeader}>
-          <FileUp size={20} color="#6366f1" style={{ marginRight: 8 }} />
+          <FileUp size={20} color="#2457D6" style={{ marginRight: 8 }} />
           <Text style={styles.heroTitle}>Document Upload Desk</Text>
         </View>
         <Text style={styles.heroDesc}>
@@ -152,23 +186,60 @@ export default function DocumentUploadScreen() {
             style={styles.selectorBtn}
             onPress={() => setShowEmpSelector(!showEmpSelector)}
           >
-            <Text style={styles.selectorBtnText}>{selectedEmployeeName}</Text>
+            <Text style={[styles.selectorBtnText, !selectedEmpId && styles.placeholderText]}>
+              {selectedEmployeeName}
+            </Text>
+            <ChevronDown size={16} color="#68758A" />
           </TouchableOpacity>
 
           {showEmpSelector && (
-            <View style={styles.dropdownList}>
-              {employees.map((emp) => (
-                <TouchableOpacity
-                  key={emp.id}
-                  style={[styles.dropdownItem, selectedEmpId === String(emp.id) && styles.dropdownItemActive]}
-                  onPress={() => {
-                    setSelectedEmpId(String(emp.id));
-                    setShowEmpSelector(false);
-                  }}
-                >
-                  <Text style={styles.dropdownItemText}>{emp.username}</Text>
-                </TouchableOpacity>
-              ))}
+            <View style={styles.dropdownContainer}>
+              {/* Search input for large employee rosters */}
+              <View style={styles.searchRow}>
+                <Search size={14} color="#68758A" style={{ marginRight: 6 }} />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Search staff by name or code..."
+                  placeholderTextColor="#8995A7"
+                  value={empSearchQuery}
+                  onChangeText={setEmpSearchQuery}
+                />
+                {empSearchQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => setEmpSearchQuery("")}>
+                    <X size={14} color="#8995A7" />
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <ScrollView nestedScrollEnabled style={styles.dropdownScroll}>
+                {filteredEmployees.length === 0 ? (
+                  <Text style={styles.emptySearchText}>No matching staff members found.</Text>
+                ) : (
+                  filteredEmployees.map((emp) => {
+                    const fullName = `${emp.first_name || ""} ${emp.last_name || ""}`.trim();
+                    const isSelected = selectedEmpId === String(emp.id);
+                    return (
+                      <TouchableOpacity
+                        key={emp.id}
+                        style={[styles.dropdownItem, isSelected && styles.dropdownItemActive]}
+                        onPress={() => {
+                          setSelectedEmpId(String(emp.id));
+                          setShowEmpSelector(false);
+                        }}
+                      >
+                        <View style={styles.empRow}>
+                          <Text style={[styles.empName, isSelected && styles.empNameActive]}>
+                            {fullName || emp.username}
+                          </Text>
+                          <Text style={styles.empMeta}>
+                            {emp.employee_code ? `Code: ${emp.employee_code} • ` : ""}@{emp.username}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })
+                )}
+              </ScrollView>
             </View>
           )}
         </View>
@@ -181,10 +252,11 @@ export default function DocumentUploadScreen() {
             onPress={() => setShowDocSelector(!showDocSelector)}
           >
             <Text style={styles.selectorBtnText}>{selectedDocType}</Text>
+            <ChevronDown size={16} color="#68758A" />
           </TouchableOpacity>
 
           {showDocSelector && (
-            <View style={styles.dropdownList}>
+            <View style={styles.dropdownContainer}>
               {documentOptions.map((opt) => (
                 <TouchableOpacity
                   key={opt}
@@ -194,7 +266,7 @@ export default function DocumentUploadScreen() {
                     setShowDocSelector(false);
                   }}
                 >
-                  <Text style={styles.dropdownItemText}>{opt}</Text>
+                  <Text style={[styles.empName, selectedDocType === opt && styles.empNameActive]}>{opt}</Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -208,7 +280,7 @@ export default function DocumentUploadScreen() {
             style={styles.filePickerBtn}
             onPress={handlePickDocument}
           >
-            <FileText size={18} color="#94a3b8" style={{ marginRight: 8 }} />
+            <FileText size={18} color="#68758A" style={{ marginRight: 8 }} />
             <Text style={styles.filePickerText} numberOfLines={1}>
               {selectedFile ? selectedFile.name : "Choose File..."}
             </Text>
@@ -238,7 +310,7 @@ export default function DocumentUploadScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0f172a", // Dark slate background matching the web theme
+    backgroundColor: "#F6F8FC",
   },
   scrollContent: {
     padding: 20,
@@ -246,17 +318,22 @@ const styles = StyleSheet.create({
   },
   centerContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     justifyContent: "center",
     alignItems: "center",
   },
   heroCard: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
     padding: 20,
     marginBottom: 20,
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   heroHeader: {
     flexDirection: "row",
@@ -264,99 +341,150 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   heroTitle: {
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: "700",
-    color: "#ffffff",
+    color: "#152238",
   },
   heroDesc: {
-    fontSize: 12,
-    color: "#94a3b8",
-    lineHeight: 16,
+    fontSize: 13,
+    color: "#68758A",
+    lineHeight: 18,
   },
   formCard: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
     padding: 20,
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   inputGroup: {
-    marginBottom: 20,
+    marginBottom: 18,
   },
   label: {
     fontSize: 12,
     fontWeight: "700",
-    color: "#94a3b8",
+    color: "#68758A",
     marginBottom: 8,
     textTransform: "uppercase",
-    letterSpacing: 0.5,
   },
   selectorBtn: {
-    backgroundColor: "#0f172a",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#F8FAFC",
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 16,
+    borderColor: "#E2E8F0",
+    paddingVertical: 12,
     paddingHorizontal: 16,
-    paddingVertical: 14,
   },
   selectorBtnText: {
+    color: "#152238",
     fontSize: 14,
-    color: "#ffffff",
     fontWeight: "600",
   },
-  dropdownList: {
-    backgroundColor: "#0f172a",
+  placeholderText: {
+    color: "#8995A7",
+    fontWeight: "normal",
+  },
+  dropdownContainer: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 16,
-    marginTop: 8,
+    borderColor: "#E2E8F0",
+    marginTop: 6,
     overflow: "hidden",
+    elevation: 3,
+    shadowColor: "#000000",
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  searchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F8FAFC",
+    borderBottomWidth: 1,
+    borderBottomColor: "#EDF1F6",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  searchInput: {
+    flex: 1,
+    color: "#152238",
+    fontSize: 13,
+    paddingVertical: 4,
+  },
+  dropdownScroll: {
+    maxHeight: 200,
   },
   dropdownItem: {
-    paddingHorizontal: 16,
     paddingVertical: 12,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#1e293b",
+    borderBottomColor: "#EDF1F6",
   },
   dropdownItemActive: {
-    backgroundColor: "rgba(99, 102, 241, 0.15)",
+    backgroundColor: "#EAF0FF",
   },
-  dropdownItemText: {
+  empRow: {
+    flexDirection: "column",
+  },
+  empName: {
+    color: "#152238",
     fontSize: 14,
-    color: "#cbd5e1",
-    fontWeight: "500",
+    fontWeight: "600",
+  },
+  empNameActive: {
+    color: "#2457D6",
+    fontWeight: "700",
+  },
+  empMeta: {
+    color: "#68758A",
+    fontSize: 11,
+    marginTop: 2,
+  },
+  emptySearchText: {
+    color: "#8995A7",
+    fontSize: 12,
+    textAlign: "center",
+    paddingVertical: 16,
   },
   filePickerBtn: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F8FAFC",
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 16,
+    borderColor: "#E2E8F0",
+    paddingVertical: 12,
     paddingHorizontal: 16,
-    paddingVertical: 14,
   },
   filePickerText: {
+    color: "#68758A",
     fontSize: 14,
-    color: "#ffffff",
-    fontWeight: "500",
     flex: 1,
   },
   uploadBtn: {
     flexDirection: "row",
-    backgroundColor: "#6366f1", // Indigo button color
-    borderRadius: 16,
+    backgroundColor: "#2457D6",
+    borderRadius: 12,
     paddingVertical: 14,
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 10,
+    marginTop: 8,
   },
   uploadBtnDisabled: {
     opacity: 0.5,
   },
   uploadBtnText: {
+    color: "#ffffff",
     fontSize: 15,
     fontWeight: "700",
-    color: "#ffffff",
   },
 });

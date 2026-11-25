@@ -1,7 +1,5 @@
 import React from "react";
-import { StyleSheet, Text, View, Dimensions } from "react-native";
-
-const { width, height } = Dimensions.get("window");
+import { StyleSheet, Text, View, useWindowDimensions } from "react-native";
 
 interface CameraViewOverlayProps {
   message?: string;
@@ -12,6 +10,8 @@ export default function CameraViewOverlay({
   message = "Center your face within the oval",
   status = "neutral",
 }: CameraViewOverlayProps) {
+  const { width, height } = useWindowDimensions();
+
   const getBorderColor = () => {
     switch (status) {
       case "success":
@@ -38,12 +38,14 @@ export default function CameraViewOverlay({
     }
   };
 
+  const topSegmentHeight = Math.max(16, (height - 300) / 2);
+
   return (
     <View style={StyleSheet.absoluteFill}>
       {/* Outer semi-transparent background mask */}
       <View style={styles.maskContainer}>
-        {/* Top bar */}
-        <View style={[styles.maskSegment, { height: (height - 300) / 2 }]} />
+        {/* Top bar dynamically computed from window dimensions */}
+        <View style={[styles.maskSegment, { height: topSegmentHeight }]} />
 
         {/* Middle row containing left-side mask, center cut-out, right-side mask */}
         <View style={styles.middleRow}>

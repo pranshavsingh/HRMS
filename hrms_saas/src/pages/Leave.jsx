@@ -11,11 +11,13 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import Pagination from "../components/common/Pagination";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
 import { useAuth } from "../context/AuthContext";
 import CompanyLeavePolicy from "./leave/CompanyLeavePolicy";
+import { getCompanyLocalDate } from "../utils/date";
 
 const leaveTypes = [
   { value: "casual", label: "Casual Leave" },
@@ -27,6 +29,17 @@ const statusStyles = {
   approved: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   pending: "bg-amber-50 text-amber-700 ring-amber-200",
   rejected: "bg-rose-50 text-rose-700 ring-rose-200",
+};
+
+const normalizeDateOnly = (value) => {
+  if (!value) return null;
+  if (typeof value === "string") {
+    return value.slice(0, 10);
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  return null;
 };
 
 const formatDate = (value) => {
@@ -79,10 +92,10 @@ const dayDifference = (fromDate, toDate) => {
 export default function Leave() {
   const { showPopup } = usePopup();
   const { role: authRole } = useAuth();
-  const role = authRole || localStorage.getItem("role");
+  const role = authRole || "employee";
   const showPopupRef = useRef(showPopup);
   showPopupRef.current = showPopup;
-  const today = new Date().toISOString().split("T")[0];
+  const today = getCompanyLocalDate();
   const canManagePolicy = ["hr", "admin", "superadmin"].includes(role);
   const [activeTab, setActiveTab] = useState("leave");
 
@@ -92,6 +105,10 @@ export default function Leave() {
   const [insufficientWarning, setInsufficientWarning] = useState(null);
   const [leaves, setLeaves] = useState([]);
   const [availableLeaveTypes, setAvailableLeaveTypes] = useState(leaveTypes);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   const [leaveSummary, setLeaveSummary] = useState({
     leave_allotted: 0,
     leaves_taken: 0,
@@ -108,7 +125,7 @@ export default function Leave() {
     reason: "",
   });
 
-  const fetchLeaves = useCallback(async (showLoader = true) => {
+  const fetchLeaves = useCallback(async (showLoader = true, pageToFetch = currentPage, sizeToFetch = pageSize) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -116,30 +133,46 @@ export default function Leave() {
     }
 
     try {
-      const res = await API.get("/leave/my/");
+      const res = await API.get("/leave/my/", {
+        params: {
+          page: pageToFetch,
+          limit: sizeToFetch,
+        },
+      });
       const records = Array.isArray(res.data)
         ? res.data
         : Array.isArray(res.data?.records)
           ? res.data.records
-          : [];
+          : Array.isArray(res.data?.data)
+            ? res.data.data
+            : [];
       const summary = res.data?.summary || null;
+      const pagination = res.data?.pagination || null;
+      const totalCount = Number(pagination?.total ?? summary?.total_requests ?? records.length);
+      const pagesCount = Number(pagination?.totalPages ?? Math.max(1, Math.ceil(totalCount / sizeToFetch)));
 
       setLeaves(records);
+      setTotalRecords(totalCount);
+      setTotalPages(pagesCount);
       setLeaveSummary({
         leave_allotted: Number(summary?.leave_allotted || 0),
         leaves_taken: Number(summary?.leaves_taken || 0),
         leave_balance: Number(summary?.leave_balance || 0),
-        total_requests: Number(summary?.total_requests || records.length),
+        total_requests: totalCount,
         approved_requests: Number(
-          summary?.approved_requests || records.filter((item) => item.status === "approved").length
+          summary?.approved_requests ?? records.filter((item) => item.status === "approved").length
         ),
         pending_requests: Number(
-          summary?.pending_requests || records.filter((item) => item.status === "pending").length
+          summary?.pending_requests ?? records.filter((item) => item.status === "pending").length
         ),
         rejected_requests: Number(
-          summary?.rejected_requests || records.filter((item) => item.status === "rejected").length
+          summary?.rejected_requests ?? records.filter((item) => item.status === "rejected").length
         ),
       });
+
+      if (pageToFetch > pagesCount && pagesCount >= 1) {
+        setCurrentPage(pagesCount);
+      }
     } catch (err) {
       console.error("Leave fetch error:", err.response?.data || err.message);
       showPopupRef.current("Unable to load leave records", "error");
@@ -147,14 +180,26 @@ export default function Leave() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [currentPage, pageSize]);
 
   useEffect(() => {
     fetchLeaves();
     API.get("/leave/policy/available-types/")
       .then((res) => {
         const types = res.data?.leave_types || [];
-        if (types.length) setAvailableLeaveTypes(types.map((type) => ({ value: type.leave_code, label: type.leave_name, requires_document: type.requires_document })));
+        if (types.length) {
+          const mapped = types.map((type) => ({
+            value: type.leave_code,
+            label: type.leave_name,
+            requires_document: type.requires_document,
+          }));
+          setAvailableLeaveTypes(mapped);
+          setForm((prev) =>
+            mapped.some((t) => t.value === prev.leave_type)
+              ? prev
+              : { ...prev, leave_type: mapped[0].value }
+          );
+        }
       })
       .catch(() => {});
   }, [fetchLeaves]);
@@ -210,9 +255,20 @@ export default function Leave() {
 
   const hasOverlap = useMemo(() => {
     if (!form.from_date || !form.to_date) return false;
+    const requestedFrom = normalizeDateOnly(form.from_date);
+    const requestedTo = normalizeDateOnly(form.to_date);
+    if (!requestedFrom || !requestedTo) return false;
+
     return leaves.some((r) => {
       if (r.status !== "approved") return false;
-      return r.from <= form.to_date && r.to >= form.from_date;
+      const existingFrom = normalizeDateOnly(r.from || r.from_date);
+      const existingTo = normalizeDateOnly(r.to || r.to_date);
+      return (
+        existingFrom &&
+        existingTo &&
+        existingFrom <= requestedTo &&
+        existingTo >= requestedFrom
+      );
     });
   }, [form.from_date, form.to_date, leaves]);
 
@@ -253,7 +309,8 @@ export default function Leave() {
       const res = await API.post("/leave/apply/", payload);
       showPopup(res.data.message || "Leave applied successfully", "success");
       resetForm();
-      fetchLeaves(false);
+      setCurrentPage(1);
+      fetchLeaves(false, 1, pageSize);
     } catch (err) {
       console.error("Leave apply error:", err.response?.data || err.message);
 
@@ -285,8 +342,8 @@ export default function Leave() {
       <div className="space-y-6">
         <section className="relative overflow-hidden rounded-3xl bg-[linear-gradient(135deg,#0f172a_0%,#1e293b_45%,#14532d_100%)] px-8 py-8 text-white shadow-xl">
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.16),_transparent_28%),radial-gradient(circle_at_bottom_right,_rgba(134,239,172,0.18),_transparent_30%)]" />
-          <div className="relative flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-            <div className="max-w-2xl">
+          <div className="relative flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
+            <div className="max-w-xl">
               <p className="mb-3 inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.24em] text-emerald-100">
                 <CalendarCheck2 size={14} />
                 Leave Management
@@ -300,7 +357,7 @@ export default function Leave() {
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5 shrink-0">
               <MetricCard
                 icon={<FileText size={18} />}
                 label="Allotted"
@@ -482,78 +539,94 @@ export default function Leave() {
                 </p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-                    <tr>
-                      <th className="px-6 py-4 font-semibold">Type</th>
-                      <th className="px-6 py-4 font-semibold">From</th>
-                      <th className="px-6 py-4 font-semibold">To</th>
-                      <th className="px-6 py-4 font-semibold">Days</th>
-                      <th className="px-6 py-4 font-semibold">Reason</th>
-                      <th className="px-6 py-4 font-semibold">Status</th>
-                      <th className="px-6 py-4 font-semibold">Decision By</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {leaves.map((item) => (
-                      <tr
-                        key={item.id}
-                        className="border-t border-slate-100 transition hover:bg-slate-50/80"
-                      >
-                        <td className="px-6 py-4 font-medium capitalize text-slate-900">
-                          {item.type}
-                        </td>
-                        <td className="px-6 py-4 text-slate-700">
-                          {formatDate(item.from)}
-                        </td>
-                        <td className="px-6 py-4 text-slate-700">
-                          {formatDate(item.to)}
-                        </td>
-                        <td className="px-6 py-4 text-slate-700">
-                          {dayDifference(item.from, item.to)}
-                        </td>
-                        <td className="max-w-xs px-6 py-4 text-slate-600">
-                          <span className="line-clamp-2">{item.reason}</span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span
-                            className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold capitalize ring-1 ${
-                              statusStyles[item.status] || "bg-slate-100 text-slate-700 ring-slate-200"
-                            }`}
-                          >
-                            {item.status === "approved" && <ShieldCheck size={14} />}
-                            {item.status === "pending" && <Clock3 size={14} />}
-                            {item.status === "rejected" && <XCircle size={14} />}
-                            {item.status}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-slate-700">
-                          {item.status === "pending" ? (
-                            <div>
-                              <div className="font-medium text-amber-700">
-                                Waiting for review
-                              </div>
-                              <div className="mt-1 text-xs text-slate-500">
-                                Route: {item.approval_route || "--"}
-                              </div>
-                            </div>
-                          ) : (
-                            <div>
-                              <div className="font-medium text-slate-900">
-                                {item.action_by_name || "Unknown reviewer"}
-                              </div>
-                              <div className="mt-1 text-xs text-slate-500">
-                                {formatDateTime(item.action_at)}
-                              </div>
-                            </div>
-                          )}
-                        </td>
+              <>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="px-6 py-4 font-semibold">Type</th>
+                        <th className="px-6 py-4 font-semibold">From</th>
+                        <th className="px-6 py-4 font-semibold">To</th>
+                        <th className="px-6 py-4 font-semibold">Days</th>
+                        <th className="px-6 py-4 font-semibold">Reason</th>
+                        <th className="px-6 py-4 font-semibold">Status</th>
+                        <th className="px-6 py-4 font-semibold">Decision By</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {leaves.map((item) => (
+                        <tr
+                          key={item.id}
+                          className="border-t border-slate-100 transition hover:bg-slate-50/80"
+                        >
+                          <td className="px-6 py-4 font-medium capitalize text-slate-900">
+                            {item.type}
+                          </td>
+                          <td className="px-6 py-4 text-slate-700">
+                            {formatDate(item.from)}
+                          </td>
+                          <td className="px-6 py-4 text-slate-700">
+                            {formatDate(item.to)}
+                          </td>
+                          <td className="px-6 py-4 text-slate-700">
+                            {dayDifference(item.from, item.to)}
+                          </td>
+                          <td className="max-w-xs px-6 py-4 text-slate-600">
+                            <span className="line-clamp-2">{item.reason}</span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span
+                              className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold capitalize ring-1 ${
+                                statusStyles[item.status] || "bg-slate-100 text-slate-700 ring-slate-200"
+                              }`}
+                            >
+                              {item.status === "approved" && <ShieldCheck size={14} />}
+                              {item.status === "pending" && <Clock3 size={14} />}
+                              {item.status === "rejected" && <XCircle size={14} />}
+                              {item.status}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-slate-700">
+                            {item.status === "pending" ? (
+                              <div>
+                                <div className="font-medium text-amber-700">
+                                  Waiting for review
+                                </div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                  Route: {item.approval_route || "--"}
+                                </div>
+                              </div>
+                            ) : (
+                              <div>
+                                <div className="font-medium text-slate-900">
+                                  {item.action_by_name || "Unknown reviewer"}
+                                </div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                  {formatDateTime(item.action_at)}
+                                </div>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <Pagination
+                  page={currentPage}
+                  setPage={setCurrentPage}
+                  pageSize={pageSize}
+                  changePageSize={(size) => {
+                    const newSize = Number(size);
+                    setPageSize(newSize);
+                    setCurrentPage(1);
+                  }}
+                  total={totalRecords}
+                  pageCount={totalPages}
+                  itemLabel="leave requests"
+                />
+              </>
             )}
           </section>
         </div>}

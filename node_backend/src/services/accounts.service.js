@@ -3,6 +3,7 @@ import crypto from "crypto";
 import accountsRepository from "../repositories/accounts.repository.js";
 import auditRepository from "../repositories/audit.repository.js";
 import { realtimeManager } from "../utils/realtime.js";
+import { realtimeService } from "./realtime.service.js";
 import auditService from "./audit.service.js";
 import storageService from "./storage.service.js";
 import outboxRepository from "../repositories/outbox.repository.js";
@@ -66,12 +67,15 @@ export const accountsService = {
     if (!user) {
       throw new AppError("Invalid credentials", 400);
     }
-    if (!user.is_active) {
-      throw new AppError("Account is inactive. Reactivate it from HR employee management and try again.", 400);
-    }
 
     const verification = await verifyPassword(password, user.password);
     if (!verification.valid) {
+      throw new AppError("Invalid credentials", 400);
+    }
+
+    // BUG-A03: Prevent account enumeration. Only verify active status after valid credentials,
+    // and return generic message to avoid disclosing inactive account existence.
+    if (!user.is_active) {
       throw new AppError("Invalid credentials", 400);
     }
 
@@ -328,7 +332,17 @@ export const accountsService = {
       }
     }
 
-    // 1. Blacklist access token JTI with safe positive TTL
+    // 1. Resolve target user and purge session cache
+    const targetUserId = reqUser?.id || accessTokenPayload?.userId || tokenRecord?.user_id;
+    if (targetUserId) {
+      try {
+        await redisService.del(`user:session:${targetUserId}`);
+      } catch (err) {
+        logger.warn("[Logout] Session cache purge error: %s", err.message);
+      }
+    }
+
+    // 2. Blacklist access token JTI with safe positive TTL in Redis and persistent DB fallback (BUG-A07)
     if (accessTokenPayload?.jti && accessTokenPayload?.exp) {
       try {
         const remainingSeconds = accessTokenPayload.exp - Math.floor(Date.now() / 1000);
@@ -339,15 +353,16 @@ export const accountsService = {
       } catch (err) {
         logger.warn("[Logout] JTI blacklist error: %s", err.message);
       }
-    }
 
-    // 2. Resolve target user and purge session cache
-    const targetUserId = reqUser?.id || accessTokenPayload?.userId || tokenRecord?.user_id;
-    if (targetUserId) {
+      // Persistent database fallback: ensures token is revoked even if Redis is down or restarts
       try {
-        await redisService.del(`user:session:${targetUserId}`);
-      } catch (err) {
-        logger.warn("[Logout] Session cache purge error: %s", err.message);
+        const expDate = new Date(accessTokenPayload.exp * 1000);
+        await db.run(
+          "INSERT IGNORE INTO accounts_revoked_token (jti, user_id, expires_at) VALUES (?, ?, ?)",
+          [accessTokenPayload.jti, targetUserId || null, expDate]
+        );
+      } catch (dbErr) {
+        logger.warn("[Logout] DB token blacklist error: %s", dbErr.message);
       }
     }
 
@@ -647,7 +662,11 @@ export const accountsService = {
         return { created, uploaded };
       });
 
-      realtimeManager.broadcast("employee_update", { actorId: actor.id });
+      realtimeManager.broadcast(
+        "employee_update",
+        { actorId: actor.id, userId: Number(employee.created?.id), action: "created" },
+        { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(employee.created?.id)] }
+      );
       return {
         message: `${role[0].toUpperCase()}${role.slice(1)} created successfully`,
         employee: await this.serializeStaffMember(employee.created, null, tenantId),
@@ -807,7 +826,7 @@ export const accountsService = {
     });
   },
 
-  async getAdminSummary() {
+  async getAdminSummary(tenantId = 1) {
     const [
       userRoleCounts,
       pendingAttendance,
@@ -816,29 +835,41 @@ export const accountsService = {
     ] = await Promise.all([
       db.get(`
         SELECT 
-          COUNT(CASE WHEN role IN ('employee','manager','hr') AND is_active=1 THEN 1 END) AS staff,
-          COUNT(CASE WHEN role = 'manager' THEN 1 END) AS managers,
-          COUNT(CASE WHEN role = 'employee' THEN 1 END) AS employees,
-          COUNT(CASE WHEN role = 'hr' THEN 1 END) AS hr
-        FROM accounts_user 
-        WHERE deleted_at IS NULL
-      `),
-      db.get("SELECT COUNT(*) c FROM attendance_attendanceapproval WHERE status='pending'"),
-      db.get("SELECT COUNT(*) c FROM leave_leave WHERE status='pending'"),
+          COUNT(CASE WHEN u.role IN ('employee','manager','hr') AND u.is_active=1 THEN 1 END) AS staff,
+          COUNT(CASE WHEN u.role = 'manager' THEN 1 END) AS managers,
+          COUNT(CASE WHEN u.role = 'employee' THEN 1 END) AS employees,
+          COUNT(CASE WHEN u.role = 'hr' THEN 1 END) AS hr
+        FROM accounts_user u
+        JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+        WHERE u.deleted_at IS NULL
+      `, [tenantId]),
+      db.get(
+        `SELECT COUNT(*) c
+         FROM attendance_attendanceapproval aa
+         JOIN attendance_attendance a ON a.id = aa.attendance_id
+         WHERE aa.status = 'pending' AND a.tenant_id = ?`,
+        [tenantId]
+      ),
+      db.get("SELECT COUNT(*) c FROM leave_leave WHERE status='pending' AND tenant_id = ?", [tenantId]),
       db.get(
         config.dbClient === "mysql"
           ? `SELECT COUNT(DISTINCT a.user_id) c 
              FROM attendance_attendance a 
              JOIN accounts_user u ON u.id = a.user_id
-             WHERE a.date = CURDATE() 
+             JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+             WHERE a.tenant_id = ?
+               AND a.date = CURDATE() 
                AND a.status <> 'rejected'
                AND u.role IN ('employee', 'manager', 'hr')`
           : `SELECT COUNT(DISTINCT a.user_id) c 
              FROM attendance_attendance a 
              JOIN accounts_user u ON u.id = a.user_id
-             WHERE a.date = date('now', 'localtime')
+             JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+             WHERE a.tenant_id = ?
+               AND a.date = date('now', 'localtime')
                AND a.status <> 'rejected'
-               AND u.role IN ('employee', 'manager', 'hr')`
+               AND u.role IN ('employee', 'manager', 'hr')`,
+        [tenantId, tenantId]
       ),
     ]);
 
@@ -851,7 +882,9 @@ export const accountsService = {
         ? `SELECT a.*, u.username, u.role, u.first_name, u.last_name 
            FROM attendance_attendance a 
            JOIN accounts_user u ON u.id = a.user_id 
+           JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
            WHERE u.deleted_at IS NULL 
+             AND a.tenant_id = ?
              AND a.status <> 'rejected'
              AND a.date = CURDATE()
              AND u.role IN ('employee', 'manager', 'hr')
@@ -859,11 +892,14 @@ export const accountsService = {
         : `SELECT a.*, u.username, u.role, u.first_name, u.last_name 
            FROM attendance_attendance a 
            JOIN accounts_user u ON u.id = a.user_id 
+           JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
            WHERE u.deleted_at IS NULL 
+             AND a.tenant_id = ?
              AND a.status <> 'rejected'
              AND a.date = date('now', 'localtime')
              AND u.role IN ('employee', 'manager', 'hr')
-           ORDER BY a.punch_in_time DESC`
+           ORDER BY a.punch_in_time DESC`,
+      [tenantId, tenantId]
     );
 
     return {
@@ -1074,24 +1110,47 @@ export const accountsService = {
     });
 
     await redisService.del(`user:session:${employeeId}`);
-    realtimeManager.broadcast("employee_update", { actorId: actor.id });
+    realtimeManager.broadcast(
+      "employee_update",
+      { actorId: actor.id, userId: Number(employeeId) },
+      { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(employeeId)] }
+    );
+    if (data.is_active === false || data.is_active === 0) {
+      realtimeService.disconnectUser(Number(employeeId), "Account deactivated");
+    }
     return {
       message: "Employee details updated successfully",
       employee: await this.serializeStaffMember(updated, null, tenantId)
     };
   },
 
-  async deleteEmployee(userId, actorUser) {
+  async deleteEmployee(userId, actorUser, tenantId = 1) {
     if (!["admin", "superadmin"].includes(actorUser.role)) {
       throw new AppError("Only admin and superadmin can delete employee records", 403);
+    }
+    if (Number(userId) === Number(actorUser.id)) {
+      throw new AppError("You cannot delete your own account", 400);
     }
     const user = await accountsRepository.findById(userId);
     if (!user) {
       throw new AppError("Employee not found", 404);
     }
+    const membership = await db.get(
+      "SELECT 1 AS present FROM workforce_user_tenant WHERE tenant_id = ? AND user_id = ? AND is_active = 1",
+      [tenantId, userId]
+    );
+    if (!membership) {
+      throw new AppError("Employee not found in this organization", 404);
+    }
     await accountsRepository.deleteUser(userId);
     await redisService.del(`user:session:${userId}`);
     await redisService.set(`user:revoked:${userId}`, Date.now(), 86400);
+    realtimeManager.broadcast(
+      "employee_update",
+      { actorId: actorUser.id, userId: Number(userId), action: "deleted" },
+      { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
+    );
+    realtimeService.disconnectUser(Number(userId), "Account deleted");
     return { success: true };
   },
 

@@ -1,49 +1,37 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { 
-  Clock3, 
-  FileText, 
-  CheckCircle2, 
-  CalendarDays, 
-  AlertCircle, 
-  Users 
-} from "lucide-react-native";
+import { Clock3, FileText, CheckCircle2, CalendarDays, AlertCircle, Users } from "lucide-react-native";
 
 interface CardProps {
   title: string;
   value: string;
   info?: string;
-  icon: "Clock3" | "FileText" | "CheckCircle2" | "CalendarDays" | "AlertCircle" | "Users";
+  icon: "Clock3" | "FileText" | "CheckCircle2" | "CalendarDays" | "AlertCircle" | "Users" | string;
   tone: "cyan" | "emerald" | "amber" | "violet" | "rose";
+  fullWidth?: boolean;
 }
 
-const iconMap = {
-  Clock3,
-  FileText,
-  CheckCircle2,
-  CalendarDays,
-  AlertCircle,
-  Users,
+const iconMap: Record<string, any> = { Clock3, FileText, CheckCircle2, CalendarDays, AlertCircle, Users };
+
+const toneStyles = {
+  cyan: { bg: "#F4F8FF", border: "#DCE8FF", iconBg: "#E4EEFF", iconColor: "#2457D6", text: "#152238" },
+  emerald: { bg: "#F1FBF7", border: "#D5F1E4", iconBg: "#DCF6E9", iconColor: "#11845B", text: "#152238" },
+  amber: { bg: "#FFF9ED", border: "#F8E6BA", iconBg: "#FFF0CB", iconColor: "#A86500", text: "#152238" },
+  violet: { bg: "#F7F4FF", border: "#E6DDFC", iconBg: "#EEE7FF", iconColor: "#6C43C8", text: "#152238" },
+  rose: { bg: "#FFF5F5", border: "#F7DCDC", iconBg: "#FFE6E6", iconColor: "#C23838", text: "#152238" },
 };
 
-export default function Card({ title, value, info, icon, tone }: CardProps) {
-  const IconComponent = iconMap[icon] || FileText;
-
-  const toneStyles = {
-    cyan: { bg: "#083344", border: "#0e749030", iconColor: "#22d3ee", text: "#e0f7fa" },
-    emerald: { bg: "#064e3b", border: "#04785730", iconColor: "#34d399", text: "#e8f5e9" },
-    amber: { bg: "#78350f", border: "#b4530930", iconColor: "#fbbf24", text: "#fff8e1" },
-    violet: { bg: "#2e1065", border: "#6d28d930", iconColor: "#c084fc", text: "#f3e5f5" },
-    rose: { bg: "#7f1d1d", border: "#be123c30", iconColor: "#f87171", text: "#ffebee" },
-  };
-
+export default function Card({ title, value, info, icon, tone, fullWidth }: CardProps) {
+  const IconComponent = iconMap[icon] || AlertCircle;
   const style = toneStyles[tone] || toneStyles.cyan;
 
   return (
-    <View style={[styles.card, { backgroundColor: style.bg, borderColor: style.border }]}>
+    <View style={[styles.card, fullWidth && styles.cardFullWidth, { backgroundColor: style.bg, borderColor: style.border }]}>
       <View style={styles.cardHeader}>
         <Text style={styles.cardTitle}>{title}</Text>
-        <IconComponent size={18} color={style.iconColor} />
+        <View style={[styles.iconWrap, { backgroundColor: style.iconBg }]}>
+          <IconComponent size={17} color={style.iconColor} strokeWidth={2.2} />
+        </View>
       </View>
       <Text style={[styles.cardValue, { color: style.text }]}>{value}</Text>
       {info && <Text style={styles.cardInfo}>{info}</Text>}
@@ -54,37 +42,46 @@ export default function Card({ title, value, info, icon, tone }: CardProps) {
 const styles = StyleSheet.create({
   card: {
     width: "48%",
-    borderRadius: 20,
-    padding: 16,
-    marginBottom: 12,
+    borderRadius: 18,
+    padding: 15,
+    marginBottom: 14,
     borderWidth: 1,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 4,
+    shadowColor: "#243B64",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  cardFullWidth: {
+    width: "100%",
   },
   cardHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 8,
+    marginBottom: 14,
+  },
+  iconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
   },
   cardTitle: {
-    color: "#94a3b8",
-    fontSize: 11,
+    color: "#718096",
+    fontSize: 10,
     fontWeight: "700",
     textTransform: "uppercase",
     letterSpacing: 0.5,
   },
   cardValue: {
-    fontSize: 20,
-    fontWeight: "800",
-    marginTop: 4,
+    fontSize: 22,
+    fontWeight: "700",
   },
   cardInfo: {
-    color: "#64748b",
-    fontSize: 10,
-    marginTop: 4,
+    color: "#718096",
+    fontSize: 11,
+    marginTop: 5,
   },
 });

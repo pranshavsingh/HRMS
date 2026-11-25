@@ -55,8 +55,13 @@ export const leaveRepository = {
       where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager')";
       params.push(tenantId);
     } else {
-      where = "WHERE l.tenant_id=? AND u.role='employee' AND ep.manager_id=?";
-      params.push(tenantId, viewerUserId);
+      where = `WHERE l.tenant_id=? AND u.role='employee' AND (
+        ep.manager_id=? 
+        OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (
+          SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?
+        ))
+      )`;
+      params.push(tenantId, viewerUserId, viewerUserId);
     }
 
     return db.all(
@@ -90,8 +95,13 @@ export const leaveRepository = {
       where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager')";
       params.push(tenantId);
     } else {
-      where = "WHERE l.tenant_id=? AND u.role='employee' AND ep.manager_id=?";
-      params.push(tenantId, viewerUserId);
+      where = `WHERE l.tenant_id=? AND u.role='employee' AND (
+        ep.manager_id=? 
+        OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (
+          SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?
+        ))
+      )`;
+      params.push(tenantId, viewerUserId, viewerUserId);
     }
 
     params.push(limit, offset);
@@ -128,8 +138,13 @@ export const leaveRepository = {
       where = "WHERE l.tenant_id=? AND u.role IN ('employee', 'manager')";
       params.push(tenantId);
     } else {
-      where = "WHERE l.tenant_id=? AND u.role='employee' AND ep.manager_id=?";
-      params.push(tenantId, viewerUserId);
+      where = `WHERE l.tenant_id=? AND u.role='employee' AND (
+        ep.manager_id=? 
+        OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (
+          SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?
+        ))
+      )`;
+      params.push(tenantId, viewerUserId, viewerUserId);
     }
 
     const row = await db.get(

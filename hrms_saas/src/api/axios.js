@@ -20,9 +20,9 @@ const API = axios.create({
   },
 });
 
-// Request interceptor: Attach access token from memory (with localStorage fallback for backwards compatibility)
+// Request interceptor: Attach access token strictly from memory
 API.interceptors.request.use((req) => {
-  const token = inMemoryAccessToken || localStorage.getItem("token");
+  const token = inMemoryAccessToken;
 
   if (token && !req.url.includes("/auth/login/")) {
     req.headers.Authorization = `Bearer ${token}`;
@@ -60,6 +60,7 @@ API.interceptors.response.use(
         localStorage.removeItem("refresh_token");
         localStorage.removeItem("role");
         localStorage.removeItem("username");
+        localStorage.removeItem("user");
         window.dispatchEvent(new Event("auth-logout"));
         return Promise.reject(error);
       }
@@ -94,11 +95,9 @@ API.interceptors.response.use(
         }
 
         setInMemoryToken(access);
-        localStorage.setItem("token", access); // backward compatibility during migration
-        // NEVER overwrite storage with null or string 'null'
-        if (res.data.refresh) {
-          localStorage.setItem("refresh_token", res.data.refresh);
-        }
+        // Secure in-memory token architecture: do NOT persist access token to localStorage
+        localStorage.removeItem("token");
+        localStorage.removeItem("refresh_token");
 
         API.defaults.headers.common["Authorization"] = `Bearer ${access}`;
         originalRequest.headers.Authorization = `Bearer ${access}`;
@@ -113,6 +112,7 @@ API.interceptors.response.use(
         localStorage.removeItem("refresh_token");
         localStorage.removeItem("role");
         localStorage.removeItem("username");
+        localStorage.removeItem("user");
         window.dispatchEvent(new Event("auth-logout"));
         return Promise.reject(err);
       } finally {

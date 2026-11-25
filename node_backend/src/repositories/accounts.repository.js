@@ -316,8 +316,8 @@ export const accountsRepository = {
     const params = [tenantId];
 
     if (managerId) {
-      whereConditions.push("ep.manager_id = ?");
-      params.push(managerId);
+      whereConditions.push("(ep.manager_id = ? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))");
+      params.push(managerId, managerId);
     }
 
     if (role && role !== "all") {

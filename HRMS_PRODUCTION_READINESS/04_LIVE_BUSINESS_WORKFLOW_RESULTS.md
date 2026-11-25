@@ -1,0 +1,17 @@
+# 04. Live Business Workflow Results (`WF-01` through `WF-11`)
+
+**Environment:** Live staging (`127.0.0.1:8000` API, `127.0.0.1:5173` Web, `127.0.0.1:3306` MySQL 8.0.46 `hrms_staging`, `127.0.0.1:6379` Redis 8.10.3, `127.0.0.1:1025` SMTP capture).
+
+| Workflow | Name | Starting Role | Key Evidence & DB/UI Result | Status |
+|---|---|---|---|---|
+| `WF-01` | Authentication & Refresh Token Rotation | `employee` (`stg_emp1`), `superadmin` (`stg_superadmin`) | Bad login `400`; Login `200`; Dashboard `200`; Mobile RTR `200` (15s grace window active per `jwt.test.js` 6/6 PASS); Logout `200`; Post-logout API `401`. Edge CDP UI login -> `/dashboard` PASS. | **PASS** |
+| `WF-02` | OTP Password Reset (Outbox -> BullMQ -> SMTP) | Public (`emp2@staging.hrms.local`) | `/forgot-password/request-otp/` `200` -> Outbox -> BullMQ worker -> `nodemailer` -> `captured_emails.jsonl` -> 6-digit OTP extracted -> `/verify-otp/` `200` -> `/reset/` `200` -> new login `200`. | **PASS** |
+| `WF-03` | Employee Onboarding & Lifecycle | `hr` (`stg_hr1`), `admin` (`stg_admin1`) | Employee directory search/pagination `200`, Edge CDP `/employees` PASS. Live HTTP multipart `/create-employee/` returned `500 Cloudinary storage service is not configured` (staging omits external Cloudinary keys). | **PARTIAL** |
+| `WF-04` | Attendance Punch In / Out | `employee` (`stg_emp1`) | `/attendance/status/` `200`; Service-level concurrency & geofence verified in `attendance_concurrency.test.js` (5/5 PASS). Live HTTP multipart `/punch-in/` & `/punch-out/` blocked on Cloudinary keys. | **PARTIAL** |
+| `WF-05` | Attendance Regularization & Approval | `employee` (`stg_emp1`), `manager` (`stg_mgr1`) | `/attendance/approvals/` `200`; leave-status regularization guard verified (`400 Cannot regularize an attendance record with status 'leave'`); exception approval concurrency verified (`attendance_concurrency.test.js` 5/5 PASS after `BUG-PROD-003` fix). | **PASS** |
+| `WF-06` | Leave Apply, Approval & Concessions | `employee` (`stg_emp1`), `manager` (`stg_mgr1`), `hr` (`stg_hr1`) | `/leave/apply/` `200` (`leaveId=9`) -> `/leave/action/9/` `200` (after `BUG-PROD-001` fix) -> `/leave/concessions/` `201` -> `/leave/my/` `200`. | **PASS** |
+| `WF-07` | FY Leave Policy & Reset | `hr` (`stg_hr1`), `admin` (`stg_admin1`) | `/leave/policy/` `200`; `/leave/policy/drafts/` `201`; publish conflict guard (`409`) verified; `financial_year.test.js` 4/4 PASS. | **PASS** |
+| `WF-08` | Shifts, Policies, Rotations & Rosters | `hr` (`stg_hr1`) | `/workforce/shifts/` `200`; `POST /workforce/shifts/` `201`; `/workforce/weekly-off-policies/` `200`; Edge CDP `/shifts` & `/roster` PASS. (`ROSTER-006` Shift Swap is NOT IMPLEMENTED.) | **PASS** *(excl. `ROSTER-006`)* |
+| `WF-09` | Document Upload & Secure Access | `employee` (`stg_emp1`) | `/auth/documents/my/` `200`; `/media/documents/*` static access blocked (`403`); Edge CDP `/documents` & `/employee-documents` PASS. Live Cloudinary upload blocked on external keys. | **PARTIAL** |
+| `WF-10` | Holidays & Work Sites | `hr` (`stg_hr1`), `admin` (`stg_admin1`) | `/workforce/holidays/?from=2027-01-01&to=2027-12-31` `200`; `POST /workforce/holidays/` `201`; `/workforce/sites/` `200`; Edge CDP `/holidays` & `/sites` PASS. | **PASS** |
+| `WF-11` | Audit Logs & Reports | `superadmin` (`stg_superadmin`), `hr` (`stg_hr1`) | `/auth/audit-logs/?page=1&limit=20` `200`; `/attendance/monthly-register/?month=2026-11` `200`; Edge CDP `/audit-logs` & `/reports` PASS. | **PASS** |

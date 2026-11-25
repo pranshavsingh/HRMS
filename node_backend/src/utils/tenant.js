@@ -26,28 +26,39 @@ export async function resolveTenantId(req) {
 
   if (isSuperadmin) {
     if (requestedTenantId) {
-      const tenantRow = await db.get("SELECT id, is_active FROM workforce_tenant WHERE id = ?", [requestedTenantId]);
+      let tenantRow = null;
+      try {
+        tenantRow = await db.get("SELECT id, is_active FROM workforce_tenant WHERE id = ?", [requestedTenantId]);
+      } catch {}
       if (!tenantRow || !tenantRow.is_active) {
         throw new AppError(`Tenant ${requestedTenantId} not found or inactive`, 404);
       }
       return requestedTenantId;
     }
 
-    // Default for superadmin: check workforce_user_tenant or fallback to 1 (Default Tenant)
-    const userTenant = await db.get(
-      "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 LIMIT 1",
-      [req.user.id]
-    );
-    return userTenant ? Number(userTenant.tenant_id) : 1;
+    // Default for superadmin: check workforce_user_tenant or fallback
+    let userTenant = null;
+    try {
+      userTenant = await db.get(
+        "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 LIMIT 1",
+        [req.user.id]
+      );
+    } catch {}
+    return userTenant ? Number(userTenant.tenant_id) : (req.user.tenant_id ? Number(req.user.tenant_id) : (req.user.organization_id ? Number(req.user.organization_id) : 1));
   }
 
   // Non-superadmin: Lookup tenant association
-  const userTenant = await db.get(
-    "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 LIMIT 1",
-    [req.user.id]
-  );
+  let userTenant = null;
+  try {
+    userTenant = await db.get(
+      "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 LIMIT 1",
+      [req.user.id]
+    );
+  } catch {}
 
-  const assignedTenantId = userTenant ? Number(userTenant.tenant_id) : 1;
+  const assignedTenantId = userTenant 
+    ? Number(userTenant.tenant_id) 
+    : (req.user.tenant_id ? Number(req.user.tenant_id) : (req.user.organization_id ? Number(req.user.organization_id) : 1));
 
   if (requestedTenantId && requestedTenantId !== assignedTenantId) {
     throw new AppError("Cross-tenant access prohibited", 403);

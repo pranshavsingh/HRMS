@@ -14,14 +14,14 @@ import {
 } from "react-native";
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
-import { 
-  TrendingUp, 
-  Search, 
-  X, 
-  User, 
-  Clock, 
-  Award, 
-  AlertTriangle, 
+import {
+  TrendingUp,
+  Search,
+  X,
+  User,
+  Clock,
+  Award,
+  AlertTriangle,
   Calendar,
   CheckCircle2
 } from "lucide-react-native";
@@ -37,7 +37,8 @@ interface AnalyticsMember {
   leave_days: number;
   under_target_days: number;
   shortfall_hours: number;
-  average_work_hours: number;
+  average_work_hours?: number;
+  average_hours?: number;
   pending_approval_items: number;
   rejected_days: number;
   today_status: string;
@@ -76,9 +77,11 @@ export default function TeamAnalyticsScreen() {
 
   useRealtime("attendance_update", () => fetchAnalytics(days, false));
   useRealtime("leave_update", () => fetchAnalytics(days, false));
+  useRealtime("realtime:connected", () => fetchAnalytics(days, false));
 
   useEffect(() => {
-    fetchAnalytics(days, true);
+    const t = setTimeout(() => { void fetchAnalytics(days, true); }, 0);
+    return () => clearTimeout(t);
   }, [days, fetchAnalytics]);
 
   const onRefresh = () => {
@@ -99,40 +102,39 @@ export default function TeamAnalyticsScreen() {
 
       const isAttention =
         item.under_target_days > 0 ||
+        item.shortfall_hours > 0 ||
         item.pending_approval_items > 0 ||
-        item.rejected_days > 0;
+        item.today_status === "ABSENT";
 
-      if (focusFilter === "attention") {
-        return matchesSearch && isAttention;
-      }
-      if (focusFilter === "ontrack") {
-        return matchesSearch && !isAttention;
-      }
-      return matchesSearch;
+      if (!matchesSearch) return false;
+      if (focusFilter === "attention") return isAttention;
+      if (focusFilter === "ontrack") return !isAttention;
+      return true;
     });
   }, [members, searchQuery, focusFilter]);
 
   const renderMemberItem = ({ item }: { item: AnalyticsMember }) => {
     const isAttention =
       item.under_target_days > 0 ||
+      item.shortfall_hours > 0 ||
       item.pending_approval_items > 0 ||
-      item.rejected_days > 0;
+      item.today_status === "ABSENT";
 
     return (
       <TouchableOpacity style={styles.card} onPress={() => setSelectedMember(item)}>
         <View style={styles.cardHeader}>
           <View style={styles.userRow}>
-            <User size={14} color="#94a3b8" />
+            <User size={14} color="#68758A" />
             <Text style={styles.memberName}>{item.employee_name}</Text>
           </View>
           {isAttention ? (
             <View style={styles.attentionTag}>
-              <AlertTriangle size={10} color="#f59e0b" style={{ marginRight: 4 }} />
+              <AlertTriangle size={10} color="#B45309" style={{ marginRight: 4 }} />
               <Text style={styles.attentionTagText}>Attention Required</Text>
             </View>
           ) : (
             <View style={styles.ontrackTag}>
-              <CheckCircle2 size={10} color="#10b981" style={{ marginRight: 4 }} />
+              <CheckCircle2 size={10} color="#15803D" style={{ marginRight: 4 }} />
               <Text style={styles.ontrackTagText}>On Track</Text>
             </View>
           )}
@@ -142,12 +144,12 @@ export default function TeamAnalyticsScreen() {
           <View style={styles.metricRow}>
             <Text style={styles.metricLabel}>Daily Avg Hours:</Text>
             <Text style={styles.metricValue}>
-              {Number(item.average_work_hours || 0).toFixed(2)}h
+              {Number(item.average_hours ?? item.average_work_hours ?? 0).toFixed(2)}h
             </Text>
           </View>
           <View style={styles.metricRow}>
             <Text style={styles.metricLabel}>Shortfall Hours:</Text>
-            <Text style={[styles.metricValue, item.shortfall_hours > 0 && { color: "#f87171" }]}>
+            <Text style={[styles.metricValue, item.shortfall_hours > 0 && { color: "#BE123C" }]}>
               {Number(item.shortfall_hours || 0).toFixed(2)}h
             </Text>
           </View>
@@ -159,7 +161,7 @@ export default function TeamAnalyticsScreen() {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#10b981" />
+        <ActivityIndicator size="large" color="#2457D6" />
       </View>
     );
   }
@@ -170,12 +172,12 @@ export default function TeamAnalyticsScreen() {
       <ScrollView
         style={styles.scrollView}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#10b981" />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
         }
       >
         {/* Days Period Selector */}
         <View style={styles.periodRow}>
-          {["7", "15", "30"].map((p) => {
+          {["7", "30", "90"].map((p) => {
             const active = days === p;
             return (
               <TouchableOpacity
@@ -198,43 +200,46 @@ export default function TeamAnalyticsScreen() {
               <Text style={styles.metricBoxVal}>
                 {Number(summary.average_hours_per_present_day || 0).toFixed(2)}h
               </Text>
-              <Text style={styles.metricBoxLbl}>Average hours</Text>
+              <Text style={styles.metricBoxLbl}>Average Shift</Text>
             </View>
             <View style={styles.metricBox}>
-              <Text style={[styles.metricBoxVal, { color: "#f87171" }]}>
-                {Number(summary.total_shortfall_hours || 0).toFixed(2)}h
+              <Text style={[styles.metricBoxVal, { color: "#BE123C" }]}>
+                {Number(summary.total_shortfall_hours || 0).toFixed(1)}h
               </Text>
               <Text style={styles.metricBoxLbl}>Total Shortfall</Text>
             </View>
             <View style={styles.metricBox}>
-              <Text style={[styles.metricBoxVal, { color: "#f59e0b" }]}>
-                {summary.members_below_target || 0}
+              <Text style={[styles.metricBoxVal, { color: "#2457D6" }]}>
+                {summary.team_members ?? summary.members_count ?? members.length}
               </Text>
-              <Text style={styles.metricBoxLbl}>Below Target</Text>
+              <Text style={styles.metricBoxLbl}>Team Size</Text>
             </View>
           </View>
         )}
 
-        {/* Champions / Highlights spotlight tiles */}
+        {/* Spotlight Insights */}
         {insights && (
           <View style={styles.spotlightContainer}>
-            <Text style={styles.sectionTitle}>Workplace Spotlights</Text>
+            <Text style={styles.sectionTitle}>Performance Highlights</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.spotlightScroll}>
-              {insights.highest_hours_member && (
-                <View style={styles.spotlightCard}>
-                  <Award size={18} color="#10b981" />
-                  <Text style={styles.spotlightTitle}>Work Champion</Text>
-                  <Text style={styles.spotlightVal}>{insights.highest_hours_member.name}</Text>
-                  <Text style={styles.spotlightSub}>
-                    Logged {Number(insights.highest_hours_member.total_hours).toFixed(1)}h
-                  </Text>
-                </View>
-              )}
+              {(insights.highest_hours_member || insights.most_punctual_member) && (() => {
+                const topMember = insights.highest_hours_member || insights.most_punctual_member;
+                return (
+                  <View style={styles.spotlightCard}>
+                    <Award size={18} color="#15803D" />
+                    <Text style={styles.spotlightTitle}>Top Presentee</Text>
+                    <Text style={styles.spotlightVal}>{topMember.employee_name || topMember.name || topMember.username || "--"}</Text>
+                    <Text style={styles.spotlightSub}>
+                      {topMember.present_days} Days Logged
+                    </Text>
+                  </View>
+                );
+              })()}
               {insights.highest_leave_member && (
                 <View style={styles.spotlightCard}>
-                  <Calendar size={18} color="#818cf8" />
+                  <Calendar size={18} color="#2457D6" />
                   <Text style={styles.spotlightTitle}>Time-Off Leader</Text>
-                  <Text style={styles.spotlightVal}>{insights.highest_leave_member.name}</Text>
+                  <Text style={styles.spotlightVal}>{insights.highest_leave_member.employee_name || insights.highest_leave_member.name || insights.highest_leave_member.username || "--"}</Text>
                   <Text style={styles.spotlightSub}>
                     Approved {insights.highest_leave_member.leave_days} Days
                   </Text>
@@ -242,9 +247,9 @@ export default function TeamAnalyticsScreen() {
               )}
               {insights.most_under_target_member && (
                 <View style={styles.spotlightCard}>
-                  <AlertTriangle size={18} color="#f43f5e" />
+                  <AlertTriangle size={18} color="#B45309" />
                   <Text style={styles.spotlightTitle}>Attention Spotlight</Text>
-                  <Text style={styles.spotlightVal}>{insights.most_under_target_member.name}</Text>
+                  <Text style={styles.spotlightVal}>{insights.most_under_target_member.employee_name || insights.most_under_target_member.name || insights.most_under_target_member.username || "--"}</Text>
                   <Text style={styles.spotlightSub}>
                     Shortfall {Number(insights.most_under_target_member.shortfall_hours).toFixed(1)}h
                   </Text>
@@ -284,11 +289,11 @@ export default function TeamAnalyticsScreen() {
 
         {/* Search Field */}
         <View style={styles.searchRow}>
-          <Search size={16} color="#64748b" style={styles.searchIcon} />
+          <Search size={16} color="#68758A" style={styles.searchIcon} />
           <TextInput
             style={styles.searchInput}
             placeholder="Search department analytics..."
-            placeholderTextColor="#64748b"
+            placeholderTextColor="#8995A7"
             value={searchQuery}
             onChangeText={setSearchQuery}
           />
@@ -324,7 +329,7 @@ export default function TeamAnalyticsScreen() {
                   <Text style={styles.modalSub}>{selectedMember.team_name || "Department"}</Text>
                 </View>
                 <TouchableOpacity onPress={() => setSelectedMember(null)} style={styles.closeBtn}>
-                  <X size={20} color="#ffffff" />
+                  <X size={20} color="#152238" />
                 </TouchableOpacity>
               </View>
 
@@ -340,13 +345,13 @@ export default function TeamAnalyticsScreen() {
                   </View>
                   <View style={styles.modalStatTile}>
                     <Text style={styles.modalStatLabel}>Shortfall Days</Text>
-                    <Text style={[styles.modalStatValue, selectedMember.under_target_days > 0 && { color: "#f87171" }]}>
+                    <Text style={[styles.modalStatValue, selectedMember.under_target_days > 0 && { color: "#BE123C" }]}>
                       {selectedMember.under_target_days}
                     </Text>
                   </View>
                   <View style={styles.modalStatTile}>
                     <Text style={styles.modalStatLabel}>Shortfall Hours</Text>
-                    <Text style={[styles.modalStatValue, selectedMember.shortfall_hours > 0 && { color: "#f87171" }]}>
+                    <Text style={[styles.modalStatValue, selectedMember.shortfall_hours > 0 && { color: "#BE123C" }]}>
                       {Number(selectedMember.shortfall_hours || 0).toFixed(1)}h
                     </Text>
                   </View>
@@ -358,7 +363,7 @@ export default function TeamAnalyticsScreen() {
                   </View>
                   <View style={styles.modalStatTile}>
                     <Text style={styles.modalStatLabel}>Pending Approvals</Text>
-                    <Text style={[styles.modalStatValue, selectedMember.pending_approval_items > 0 && { color: "#fbbf24" }]}>
+                    <Text style={[styles.modalStatValue, selectedMember.pending_approval_items > 0 && { color: "#B45309" }]}>
                       {selectedMember.pending_approval_items}
                     </Text>
                   </View>
@@ -367,7 +372,7 @@ export default function TeamAnalyticsScreen() {
                 <View style={styles.metaInfoBox}>
                   <Text style={styles.metaInfoText}>Email: {selectedMember.email}</Text>
                   <Text style={styles.metaInfoText}>Username: {selectedMember.username}</Text>
-                  <Text style={styles.metaInfoText}>Today's Status: {selectedMember.today_status}</Text>
+                  <Text style={styles.metaInfoText}>Today&apos;s Status: {selectedMember.today_status}</Text>
                 </View>
               </ScrollView>
             </View>
@@ -381,11 +386,11 @@ export default function TeamAnalyticsScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
   },
   loadingContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -394,12 +399,12 @@ const styles = StyleSheet.create({
   },
   periodRow: {
     flexDirection: "row",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#F1F5F9",
     margin: 16,
     borderRadius: 14,
     padding: 4,
     borderWidth: 1,
-    borderColor: "#33415550",
+    borderColor: "#E2E8F0",
   },
   periodPill: {
     flex: 1,
@@ -408,17 +413,21 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   periodPillActive: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#2457D6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
   },
   periodText: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 11,
     fontWeight: "700",
   },
   periodTextActive: {
-    color: "#10b981",
+    color: "#2457D6",
   },
   metricsContainer: {
     flexDirection: "row",
@@ -428,20 +437,24 @@ const styles = StyleSheet.create({
   },
   metricBox: {
     width: "31%",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
     borderRadius: 16,
     paddingVertical: 14,
     alignItems: "center",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 1,
   },
   metricBoxVal: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 18,
     fontWeight: "800",
   },
   metricBoxLbl: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 9,
     textTransform: "uppercase",
     fontWeight: "700",
@@ -452,7 +465,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   sectionTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 16,
     fontWeight: "800",
     marginBottom: 10,
@@ -461,41 +474,44 @@ const styles = StyleSheet.create({
     flexDirection: "row",
   },
   spotlightCard: {
-    width: 160,
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 18,
+    borderColor: "#E5EAF2",
+    borderRadius: 16,
     padding: 14,
+    minWidth: 150,
     marginRight: 12,
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 1,
   },
   spotlightTitle: {
-    color: "#64748b",
-    fontSize: 9,
-    textTransform: "uppercase",
+    color: "#68758A",
+    fontSize: 11,
     fontWeight: "700",
-    marginTop: 8,
+    marginTop: 6,
   },
   spotlightVal: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "700",
-    marginTop: 4,
+    color: "#152238",
+    fontSize: 15,
+    fontWeight: "800",
+    marginTop: 2,
   },
   spotlightSub: {
-    color: "#94a3b8",
-    fontSize: 11,
-    marginTop: 2,
+    color: "#8995A7",
+    fontSize: 10,
+    marginTop: 4,
   },
   tabContainer: {
     flexDirection: "row",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#F1F5F9",
     marginHorizontal: 16,
-    marginBottom: 12,
+    marginBottom: 14,
     borderRadius: 14,
     padding: 4,
     borderWidth: 1,
-    borderColor: "#33415550",
+    borderColor: "#E2E8F0",
   },
   tabBtn: {
     flex: 1,
@@ -504,62 +520,70 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   tabBtnActive: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#2457D6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
   },
   tabText: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 11,
     fontWeight: "700",
   },
   tabTextActive: {
-    color: "#10b981",
+    color: "#2457D6",
   },
   searchRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1e293b",
-    borderRadius: 14,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
     paddingHorizontal: 12,
     marginHorizontal: 16,
     marginBottom: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   searchIcon: {
     marginRight: 8,
   },
   searchInput: {
-    color: "#ffffff",
+    color: "#152238",
     flex: 1,
     height: 40,
-    fontSize: 14,
+    fontSize: 13,
   },
   membersListContainer: {
     paddingHorizontal: 16,
     paddingBottom: 40,
   },
   emptyText: {
-    color: "#64748b",
+    color: "#8995A7",
     fontSize: 13,
     textAlign: "center",
     paddingVertical: 20,
   },
   // Card styles
   card: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderRadius: 16,
     padding: 14,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 1,
   },
   cardHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     borderBottomWidth: 1,
-    borderBottomColor: "#33415540",
+    borderBottomColor: "#EDF1F6",
     paddingBottom: 8,
     marginBottom: 8,
   },
@@ -568,7 +592,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   memberName: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 13,
     fontWeight: "700",
     marginLeft: 6,
@@ -576,30 +600,30 @@ const styles = StyleSheet.create({
   attentionTag: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#78350f",
+    backgroundColor: "#FEF3C7",
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#92400e",
+    borderColor: "#FDE68A",
   },
   attentionTagText: {
-    color: "#fbbf24",
+    color: "#B45309",
     fontSize: 9,
     fontWeight: "700",
   },
   ontrackTag: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#064e3b",
+    backgroundColor: "#DCFCE7",
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#065f46",
+    borderColor: "#BBF7D0",
   },
   ontrackTagText: {
-    color: "#34d399",
+    color: "#15803D",
     fontSize: 9,
     fontWeight: "700",
   },
@@ -612,52 +636,52 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   metricLabel: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 12,
   },
   metricValue: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 12,
     fontWeight: "700",
   },
   // Modal details
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(15, 23, 42, 0.85)",
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
     justifyContent: "flex-end",
   },
   modalContent: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     padding: 20,
     maxHeight: "80%",
     borderTopWidth: 1,
-    borderTopColor: "#334155",
+    borderTopColor: "#E5EAF2",
   },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     borderBottomWidth: 1,
-    borderBottomColor: "#334155",
+    borderBottomColor: "#EDF1F6",
     paddingBottom: 14,
     marginBottom: 16,
   },
   modalTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 18,
     fontWeight: "800",
   },
   modalSub: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 12,
     marginTop: 2,
   },
   closeBtn: {
-    backgroundColor: "rgba(15, 23, 42, 0.75)",
+    backgroundColor: "#F1F5F9",
     padding: 6,
-    borderRadius: 14,
+    borderRadius: 12,
   },
   modalScroll: {
     paddingBottom: 24,
@@ -669,35 +693,35 @@ const styles = StyleSheet.create({
   },
   modalStatTile: {
     width: "48%",
-    backgroundColor: "#0f172a60",
-    borderRadius: 16,
+    backgroundColor: "#F8FAFC",
+    borderRadius: 14,
     padding: 12,
     marginVertical: 6,
     borderWidth: 1,
-    borderColor: "#33415580",
+    borderColor: "#E2E8F0",
   },
   modalStatLabel: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 10,
     textTransform: "uppercase",
     fontWeight: "700",
   },
   modalStatValue: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 16,
     fontWeight: "800",
     marginTop: 4,
   },
   metaInfoBox: {
-    backgroundColor: "#0f172a70",
-    borderRadius: 18,
+    backgroundColor: "#F8FAFC",
+    borderRadius: 16,
     padding: 16,
     marginTop: 16,
     borderWidth: 1,
-    borderColor: "#33415580",
+    borderColor: "#E2E8F0",
   },
   metaInfoText: {
-    color: "#94a3b8",
+    color: "#152238",
     fontSize: 12,
     lineHeight: 18,
     marginBottom: 4,

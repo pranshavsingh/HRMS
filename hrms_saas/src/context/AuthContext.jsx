@@ -30,11 +30,8 @@ export function AuthProvider({ children }) {
   const handleTokenUpdate = useCallback((token) => {
     setAccessToken(token);
     setInMemoryToken(token);
-    if (token) {
-      localStorage.setItem("token", token);
-    } else {
-      localStorage.removeItem("token");
-    }
+    // Secure in-memory token architecture: do NOT persist access token to localStorage
+    localStorage.removeItem("token");
   }, []);
 
   const clearSession = useCallback(() => {
@@ -45,6 +42,7 @@ export function AuthProvider({ children }) {
     localStorage.removeItem("role");
     localStorage.removeItem("username");
     localStorage.removeItem("refresh_token");
+    localStorage.removeItem("token");
   }, [handleTokenUpdate]);
 
   // Attempt silent refresh on mount using HttpOnly cookie
@@ -54,6 +52,10 @@ export function AuthProvider({ children }) {
       const { access, user: userData } = res.data;
       if (access) {
         handleTokenUpdate(access);
+    if (access) {
+      window.dispatchEvent(new CustomEvent("token-refreshed", { detail: { access } }));
+    }
+        window.dispatchEvent(new CustomEvent("token-refreshed", { detail: { access } }));
       }
       if (userData) {
         setUser(userData);
@@ -106,6 +108,9 @@ export function AuthProvider({ children }) {
     const { access, user: userData } = res.data;
 
     handleTokenUpdate(access);
+    if (access) {
+      window.dispatchEvent(new CustomEvent("token-refreshed", { detail: { access } }));
+    }
 
     if (userData) {
       setUser(userData);
@@ -130,7 +135,7 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const isAuthenticated = Boolean((accessToken || getInMemoryToken() || localStorage.getItem("token")) && user);
+  const isAuthenticated = Boolean((accessToken || getInMemoryToken()) && user);
 
   return (
     <AuthContext.Provider

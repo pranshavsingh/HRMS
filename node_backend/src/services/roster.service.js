@@ -133,10 +133,10 @@ export const rosterService = {
       LEFT JOIN accounts_employeeprofile ep ON ep.user_id = re.user_id
       JOIN workforce_shift s ON s.id = re.shift_id AND s.tenant_id = re.tenant_id
       JOIN workforce_shift_version sv ON sv.id = re.shift_version_id AND sv.tenant_id = re.tenant_id
-      WHERE re.roster_header_id = ? AND re.tenant_id = ? ${managerId ? "AND ep.manager_id = ?" : ""}
+      WHERE re.roster_header_id = ? AND re.tenant_id = ? ${managerId ? "AND (ep.manager_id = ? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))" : ""}
       ORDER BY re.work_date ASC, re.user_id ASC
     `;
-    const entries = await db.all(entriesSql, managerId ? [headerId, tenantId, managerId] : [headerId, tenantId]);
+    const entries = await db.all(entriesSql, managerId ? [headerId, tenantId, managerId, managerId] : [headerId, tenantId]);
 
     return {
       ...header,
@@ -246,6 +246,7 @@ export const rosterService = {
 
       let entriesCreated = 0;
       const restViolations = [];
+      const conflicts = [];
 
       // 4. Resolve shift for each employee and date
       for (const emp of employees) {
@@ -357,25 +358,37 @@ export const rosterService = {
               }
             }
 
-            // Insert roster entry (ignore if duplicate)
-            await tx.run(
-              `INSERT IGNORE INTO workforce_roster_entry
-                 (tenant_id, roster_header_id, user_id, site_id, work_date, shift_id, shift_version_id, status, source_type, source_id)
-               VALUES
-                 (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)`,
-              [
-                tenantId,
-                headerId,
-                emp.id,
-                Number(site_id),
-                dateStr,
-                resolvedShift.shift_id,
-                resolvedShift.shift_version_id,
-                sourceType,
-                sourceId,
-              ]
-            );
-            entriesCreated++;
+            // Insert roster entry and surface duplicate conflicts instead of silently ignoring
+            try {
+              await tx.run(
+                `INSERT INTO workforce_roster_entry
+                   (tenant_id, roster_header_id, user_id, site_id, work_date, shift_id, shift_version_id, status, source_type, source_id)
+                 VALUES
+                   (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)`,
+                [
+                  tenantId,
+                  headerId,
+                  emp.id,
+                  Number(site_id),
+                  dateStr,
+                  resolvedShift.shift_id,
+                  resolvedShift.shift_version_id,
+                  sourceType,
+                  sourceId,
+                ]
+              );
+              entriesCreated++;
+            } catch (insertErr) {
+              if (insertErr.code === "ER_DUP_ENTRY" || String(insertErr.message).includes("Duplicate entry")) {
+                conflicts.push({
+                  user_id: emp.id,
+                  work_date: dateStr,
+                  reason: "Duplicate roster entry conflict for employee and date",
+                });
+              } else {
+                throw insertErr;
+              }
+            }
             prevShiftInfo = {
               work_date: dateStr,
               end_time: resolvedShift.end_time,
@@ -425,6 +438,8 @@ export const rosterService = {
         entries_count: entriesCreated,
         rest_violations_count: restViolations.length,
         rest_violations: restViolations,
+        conflicts_count: conflicts.length,
+        conflicts,
       };
     });
     if (!existingTx) realtimeService.emitToTenant(tenantId, "schedule_update", { type: "roster_draft_generated", rosterId: result.id });
@@ -471,8 +486,8 @@ export const rosterService = {
       params.push(status);
     }
     if (manager_id) {
-      whereConditions.push("ep.manager_id = ?");
-      params.push(manager_id);
+      whereConditions.push("(ep.manager_id = ? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))");
+      params.push(manager_id, manager_id);
     }
 
     const sql = `

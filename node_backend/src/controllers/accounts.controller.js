@@ -8,6 +8,8 @@ import cloudinaryService from "../services/cloudinary.service.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { resolveTenantId } from "../utils/tenant.js";
+import logger from "../utils/logger.js";
+import { db } from "../db/index.js";
 
 function isWebClient(req) {
   const platformHeader = (req.headers["x-platform"] || "").toLowerCase();
@@ -210,6 +212,10 @@ export const changePassword = asyncHandler(async (req, res) => {
  * Create a new employee (admin/hr only).
  */
 export const createEmployee = asyncHandler(async (req, res) => {
+  const platform = (req.headers["x-platform"] || req.body?.platform || req.query?.platform || "").toLowerCase();
+  if (["mobile", "android", "ios"].includes(platform)) {
+    throw new AppError("Employee account creation is restricted on mobile devices in accordance with security policy", 403);
+  }
   const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
   const result = await accountsService.createEmployee(req.body, req.files, req.user, tenantId);
   const employeeId = result.employee?.id || result.id;
@@ -245,7 +251,8 @@ export const employees = asyncHandler(async (req, res) => {
  * Admin dashboard overview stats.
  */
 export const adminSummary = asyncHandler(async (req, res) => {
-  const result = await accountsService.getAdminSummary();
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.getAdminSummary(tenantId);
   res.json(result);
 });
 
@@ -263,7 +270,11 @@ export const updateEmployee = asyncHandler(async (req, res) => {
  */
 export const deleteEmployee = asyncHandler(async (req, res) => {
   const targetId = parseInt(req.params.user_id, 10);
-  const result = await accountsService.deleteEmployee(targetId, req.user);
+  if (!Number.isSafeInteger(targetId) || targetId <= 0) {
+    throw new AppError("Invalid employee ID", 400);
+  }
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await accountsService.deleteEmployee(targetId, req.user, tenantId);
   res.json({ status: "success", message: "Employee deleted successfully", data: result });
 });
 
@@ -298,9 +309,22 @@ export const employeeDocuments = asyncHandler(async (req, res) => {
  */
 export const getCloudinarySignature = asyncHandler(async (req, res) => {
   const params = {};
-  if (req.query.folder) params.folder = req.query.folder;
-  if (req.query.public_id) params.public_id = req.query.public_id;
-  if (req.query.upload_preset) params.upload_preset = req.query.upload_preset;
+  if (req.query.folder) {
+    const folder = String(req.query.folder).trim();
+    if (folder.includes("..")) {
+      throw new AppError("Invalid upload folder", 400);
+    }
+    const isPrivileged = ["admin", "hr", "superadmin"].includes(req.user?.role);
+    const ownDocPrefix = `employee-documents/${req.user.id}`;
+    const isOwnDocFolder = folder === ownDocPrefix || folder.startsWith(`${ownDocPrefix}/`);
+    const isAttendanceFolder = folder.startsWith("attendance/");
+    if (!isPrivileged && !isOwnDocFolder && !isAttendanceFolder) {
+      throw new AppError("Forbidden: You are not authorized to upload to this folder", 403);
+    }
+    params.folder = folder;
+  }
+  if (req.query.public_id) params.public_id = String(req.query.public_id).trim();
+  if (req.query.upload_preset) params.upload_preset = String(req.query.upload_preset).trim();
 
   const result = cloudinaryService.generateUploadSignature(params);
   res.json(result);
@@ -320,8 +344,12 @@ export const registerDirectDocument = asyncHandler(async (req, res) => {
  */
 export const getDocumentDetailRedirect = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
   const isDownload = req.query.download === "true" || req.query.download === "1";
+  const platform = (req.headers["x-platform"] || req.query?.platform || "").toLowerCase();
+  if (isDownload && ["mobile", "android", "ios"].includes(platform)) {
+    throw new AppError("Document and data exports are restricted on mobile devices in accordance with security policy", 403);
+  }
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
   const fileUrl = await accountsService.getDocumentDetail(id, req.user, req.ip, tenantId, {
     attachment: isDownload,
     download: isDownload,
@@ -333,6 +361,10 @@ export const getDocumentDetailRedirect = asyncHandler(async (req, res) => {
  * Access a secure document and redirect to its signed attachment download URL.
  */
 export const downloadDocument = asyncHandler(async (req, res) => {
+  const platform = (req.headers["x-platform"] || req.query?.platform || "").toLowerCase();
+  if (["mobile", "android", "ios"].includes(platform)) {
+    throw new AppError("Document and data exports are restricted on mobile devices in accordance with security policy", 403);
+  }
   const { id } = req.params;
   const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
   const fileUrl = await accountsService.getDocumentDetail(id, req.user, req.ip, tenantId, {
@@ -355,6 +387,13 @@ export const deleteDocument = asyncHandler(async (req, res) => {
  * Get audit logs (superadmin only).
  */
 export const getAuditLogs = asyncHandler(async (req, res) => {
+  const isExport = req.query.export === "true" || req.query.format === "csv" || req.query.download === "true";
+  if (isExport) {
+    const platform = (req.headers["x-platform"] || req.query?.platform || "").toLowerCase();
+    if (["mobile", "android", "ios"].includes(platform)) {
+      throw new AppError("Data and document exports are restricted on mobile devices in accordance with security policy", 403);
+    }
+  }
   const result = await accountsService.getAuditLogs(req.user, req.query);
   res.json(result);
 });
@@ -411,7 +450,18 @@ export const realtimeUpdatesStream = asyncHandler(async (req, res) => {
           return res.status(401).json({ error: "Invalid token type" });
         }
         if (payload.jti) {
-          const isBlacklisted = await redisService.get(`token:blacklist:${payload.jti}`);
+          let isBlacklisted = await redisService.get(`token:blacklist:${payload.jti}`);
+          if (!isBlacklisted) {
+            try {
+              const revokedRow = await db.get(
+                "SELECT id FROM accounts_revoked_token WHERE jti = ? AND expires_at > NOW() LIMIT 1",
+                [payload.jti]
+              );
+              if (revokedRow) isBlacklisted = true;
+            } catch {
+              // Suppress fallback error
+            }
+          }
           if (isBlacklisted) {
             return res.status(401).json({ error: "Token has been revoked" });
           }
@@ -457,5 +507,67 @@ export const realtimeUpdatesStream = asyncHandler(async (req, res) => {
 
   res.on("close", () => {
     clearInterval(heartbeat);
+  });
+});
+
+/**
+ * Authoritative Realtime State Synchronization Endpoint
+ * Reconciles missed events and counters when clients reconnect or foreground.
+ */
+export const realtimeSync = asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const role = (req.user.role || "").toLowerCase();
+  const tenantId = req.tenantId || 1;
+  const since = req.query.since || null;
+
+  const { realtimeService } = await import("../services/realtime.service.js");
+  const events = realtimeService.getEventsSince(since, {
+    tenantId,
+    userId,
+    role,
+  });
+
+  let pendingAttendanceApprovals = 0;
+  let pendingLeaveApprovals = 0;
+  let degraded = false;
+
+  if (["manager", "hr", "admin", "superadmin"].includes(role)) {
+    try {
+      const attRow = await db.get(
+        `SELECT COUNT(*) AS count
+         FROM attendance_attendanceapproval aa
+         JOIN attendance_attendance a ON a.id = aa.attendance_id
+         WHERE aa.status = 'pending' AND a.tenant_id = ?`,
+        [tenantId]
+      );
+      pendingAttendanceApprovals = attRow ? Number(attRow.count) : 0;
+    } catch (err) {
+      degraded = true;
+      logger.error("[realtimeSync] Failed to query pending attendance approvals: %s", err.message);
+    }
+
+    try {
+      const leaveRow = await db.get(
+        "SELECT COUNT(*) AS count FROM leave_leave WHERE status = 'pending' AND tenant_id = ?",
+        [tenantId]
+      );
+      pendingLeaveApprovals = leaveRow ? Number(leaveRow.count) : 0;
+    } catch (err) {
+      degraded = true;
+      logger.error("[realtimeSync] Failed to query pending leave approvals: %s", err.message);
+    }
+  }
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    userId,
+    tenantId,
+    role,
+    degraded,
+    metrics: {
+      pendingAttendanceApprovals,
+      pendingLeaveApprovals,
+    },
+    events,
   });
 });

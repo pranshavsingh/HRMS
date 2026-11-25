@@ -28,6 +28,7 @@ import {
   AlertTriangle
 } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { formatCompanyDate, formatCompanyDateRange } from "../../utils/date";
 
 interface LeaveRecord {
   id: number;
@@ -41,7 +42,8 @@ interface LeaveRecord {
 
 export default function LeaveScreen() {
   const { user, isAuthenticated } = useAuth();
-  const todayStr = new Date().toISOString().split("T")[0];
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -64,6 +66,12 @@ export default function LeaveScreen() {
     reason: "",
   });
 
+  const [availableLeaveTypes, setAvailableLeaveTypes] = useState<Array<{ leave_code: string; leave_name: string }>>([
+    { leave_code: "casual", leave_name: "CASUAL" },
+    { leave_code: "sick", leave_name: "SICK" },
+    { leave_code: "paid", leave_name: "PAID" },
+  ]);
+
   // Calendar picker modal state
   const [calendarTarget, setCalendarTarget] = useState<"from" | "to" | null>(null);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
@@ -73,7 +81,23 @@ export default function LeaveScreen() {
     if (!user || !isAuthenticated) return;
     if (showLoader) setLoading(true);
     try {
-      const res = await api.get("/leave/my/");
+      const [res, typesRes] = await Promise.all([
+        api.get("/leave/my/"),
+        api.get("/leave/policy/available-types/").catch(() => ({ data: { leave_types: [] } })),
+      ]);
+      const policyTypes = Array.isArray(typesRes.data?.leave_types) ? typesRes.data.leave_types : [];
+      if (policyTypes.length > 0) {
+        const mapped = policyTypes.map((t: any) => ({
+          leave_code: String(t.leave_code),
+          leave_name: String(t.leave_name || t.leave_code).toUpperCase(),
+        }));
+        setAvailableLeaveTypes(mapped);
+        setForm((prev) =>
+          mapped.some((t: any) => t.leave_code === prev.leave_type)
+            ? prev
+            : { ...prev, leave_type: mapped[0].leave_code }
+        );
+      }
       const records = Array.isArray(res.data) 
         ? res.data 
         : Array.isArray(res.data?.records) 
@@ -104,6 +128,7 @@ export default function LeaveScreen() {
   }, [user, isAuthenticated]);
 
   useRealtime("leave_update", () => fetchLeaveData(false));
+  useRealtime("realtime:connected", () => fetchLeaveData(false));
   useRealtime("leave_notice", (notice: any) => {
     fetchLeaveData(false);
     if (notice?.status === "concession_granted") {
@@ -116,7 +141,8 @@ export default function LeaveScreen() {
   });
 
   useEffect(() => {
-    fetchLeaveData(true);
+    const t = setTimeout(() => { void fetchLeaveData(true); }, 0);
+    return () => clearTimeout(t);
   }, [fetchLeaveData]);
 
   const onRefresh = () => {
@@ -139,15 +165,20 @@ export default function LeaveScreen() {
   // Frontend leave overlap guard check
   const hasOverlap = useMemo(() => {
     if (!form.from_date || !form.to_date) return false;
-    return leaves.some((r) => {
-      if (r.status !== "approved") return false;
-      return r.from <= form.to_date && r.to >= form.from_date;
+    const reqFrom = form.from_date.slice(0, 10);
+    const reqTo = form.to_date.slice(0, 10);
+    return leaves.some((r: any) => {
+      if (r.status !== "approved" && r.status !== "pending") return false;
+      const existFrom = String(r.from || r.from_date || "").slice(0, 10);
+      const existTo = String(r.to || r.to_date || "").slice(0, 10);
+      if (!existFrom || !existTo) return false;
+      return existFrom <= reqTo && existTo >= reqFrom;
     });
   }, [form.from_date, form.to_date, leaves]);
 
   const handleSubmit = async (confirmedBalance?: { available: number; projected: number; snapshot: string }) => {
     if (hasOverlap) {
-      Alert.alert("Date Overlap", "Selected dates overlap with an already approved leave request.");
+      Alert.alert("Date Overlap", "Selected dates overlap with an existing approved or pending leave request.");
       return;
     }
 
@@ -255,8 +286,10 @@ export default function LeaveScreen() {
 
   const selectDate = (day: number | null) => {
     if (day === null) return;
-    const dateObj = new Date(currentYear, currentMonth, day);
-    const dateStr = dateObj.toISOString().split("T")[0];
+    const yyyy = currentYear;
+    const mm = String(currentMonth + 1).padStart(2, "0");
+    const dd = String(day).padStart(2, "0");
+    const dateStr = `${yyyy}-${mm}-${dd}`;
 
     if (calendarTarget === "from") {
       setForm(prev => ({
@@ -337,14 +370,14 @@ export default function LeaveScreen() {
           {/* Leave Type Dropdown */}
           <Text style={styles.inputLabel}>Leave Type</Text>
           <View style={styles.selectorRow}>
-            {["casual", "sick", "paid"].map(type => (
+            {availableLeaveTypes.map((typeObj) => (
               <TouchableOpacity
-                key={type}
-                style={[styles.selectorBtn, form.leave_type === type && styles.selectorBtnActive]}
-                onPress={() => setForm(prev => ({ ...prev, leave_type: type }))}
+                key={typeObj.leave_code}
+                style={[styles.selectorBtn, form.leave_type === typeObj.leave_code && styles.selectorBtnActive]}
+                onPress={() => setForm(prev => ({ ...prev, leave_type: typeObj.leave_code }))}
               >
-                <Text style={[styles.selectorText, form.leave_type === type && styles.selectorTextActive]}>
-                  {type.toUpperCase()}
+                <Text style={[styles.selectorText, form.leave_type === typeObj.leave_code && styles.selectorTextActive]}>
+                  {typeObj.leave_name}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -360,7 +393,7 @@ export default function LeaveScreen() {
                   setCalendarTarget("from");
                 }}
               >
-                <Text style={styles.dateTriggerText}>{form.from_date}</Text>
+                <Text style={styles.dateTriggerText}>{formatCompanyDate(form.from_date)}</Text>
               </TouchableOpacity>
             </View>
 
@@ -372,7 +405,7 @@ export default function LeaveScreen() {
                   setCalendarTarget("to");
                 }}
               >
-                <Text style={styles.dateTriggerText}>{form.to_date}</Text>
+                <Text style={styles.dateTriggerText}>{formatCompanyDate(form.to_date)}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -439,7 +472,7 @@ export default function LeaveScreen() {
                       {item.leave_type ? item.leave_type.toUpperCase() : "LEAVE"} - {days} Day{days === 1 ? "" : "s"}
                     </Text>
                     <Text style={styles.historyDates}>
-                      {item.from} to {item.to}
+                      {formatCompanyDateRange(item.from || (item as any).from_date, item.to || (item as any).to_date)}
                     </Text>
                     <Text style={styles.historyReason} numberOfLines={2}>
                       Reason: {item.reason}

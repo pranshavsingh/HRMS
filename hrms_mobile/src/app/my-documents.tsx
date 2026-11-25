@@ -14,8 +14,10 @@ import * as DocumentPicker from "expo-document-picker";
 import * as WebBrowser from "expo-web-browser";
 import api from "../services/api";
 import { useAuth } from "../context/AuthContext";
-import { FileUp, Upload, CheckCircle2, FileText, ExternalLink, Calendar } from "lucide-react-native";
+import { useRealtime } from "../context/RealtimeContext";
+import { FileUp, Upload, CheckCircle2, FileText, ExternalLink, Calendar, ChevronDown } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { formatCompanyDate } from "../utils/date";
 
 interface Document {
   id: number;
@@ -66,8 +68,12 @@ export default function MyDocumentsScreen() {
   };
 
   useEffect(() => {
-    fetchMyDocuments();
+    const t = setTimeout(() => { void fetchMyDocuments(); }, 0);
+    return () => clearTimeout(t);
   }, []);
+
+  useRealtime("document_update", () => fetchMyDocuments(false));
+  useRealtime("realtime:connected", () => fetchMyDocuments(false));
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -131,18 +137,35 @@ export default function MyDocumentsScreen() {
   };
 
   const handleViewDocument = async (url: string) => {
+    if (!url) {
+      Alert.alert("Invalid Document", "The document path is missing or unavailable.");
+      return;
+    }
+
+    let targetUrl = url;
+    // Resolve relative local storage paths (e.g. /media/documents/... or media/...)
+    if (targetUrl.startsWith("/media/") || targetUrl.startsWith("media/")) {
+      const base = (api.defaults.baseURL || "").replace(/\/api\/?$/, "");
+      targetUrl = `${base}${targetUrl.startsWith("/") ? "" : "/"}${targetUrl}`;
+    }
+
+    if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
+      Alert.alert("Unsupported Format", "Unable to open document: invalid URL protocol.");
+      return;
+    }
+
     try {
-      await WebBrowser.openBrowserAsync(url);
-    } catch (err) {
+      await WebBrowser.openBrowserAsync(targetUrl);
+    } catch (err: any) {
       console.error("Failed to open document browser:", err);
-      Alert.alert("Error", "Unable to open document");
+      Alert.alert("Error", "Unable to open document: " + (err.message || "Unknown error"));
     }
   };
 
   if (loading) {
     return (
       <View style={styles.centerContainer}>
-        <ActivityIndicator size="large" color="#10b981" />
+        <ActivityIndicator size="large" color="#2457D6" />
       </View>
     );
   }
@@ -153,14 +176,14 @@ export default function MyDocumentsScreen() {
         style={styles.container}
         contentContainerStyle={styles.scrollContent}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#10b981" />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
         }
       >
         {/* Upload Form Card */}
         <View style={styles.formCard}>
           <Text style={styles.formTitle}>Upload New Document</Text>
 
-          {/* Document Type Dropdown */}
+          {/* Document Type Selector */}
           <View style={styles.inputGroup}>
             <Text style={styles.label}>Document Type</Text>
             <TouchableOpacity
@@ -168,6 +191,7 @@ export default function MyDocumentsScreen() {
               onPress={() => setShowDocSelector(!showDocSelector)}
             >
               <Text style={styles.selectorBtnText}>{selectedDocType}</Text>
+              <ChevronDown size={16} color="#68758A" />
             </TouchableOpacity>
 
             {showDocSelector && (
@@ -175,13 +199,23 @@ export default function MyDocumentsScreen() {
                 {documentOptions.map((opt) => (
                   <TouchableOpacity
                     key={opt}
-                    style={[styles.dropdownItem, selectedDocType === opt && styles.dropdownItemActive]}
+                    style={[
+                      styles.dropdownItem,
+                      selectedDocType === opt && styles.dropdownItemActive,
+                    ]}
                     onPress={() => {
                       setSelectedDocType(opt);
                       setShowDocSelector(false);
                     }}
                   >
-                    <Text style={styles.dropdownItemText}>{opt}</Text>
+                    <Text
+                      style={[
+                        styles.dropdownItemText,
+                        selectedDocType === opt && styles.dropdownItemTextActive,
+                      ]}
+                    >
+                      {opt}
+                    </Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -195,7 +229,7 @@ export default function MyDocumentsScreen() {
               style={styles.filePickerBtn}
               onPress={handlePickDocument}
             >
-              <FileText size={18} color="#94a3b8" style={{ marginRight: 8 }} />
+              <FileText size={18} color="#68758A" style={{ marginRight: 8 }} />
               <Text style={styles.filePickerText} numberOfLines={1}>
                 {selectedFile ? selectedFile.name : "Choose File..."}
               </Text>
@@ -225,7 +259,7 @@ export default function MyDocumentsScreen() {
 
           {documents.length === 0 ? (
             <View style={styles.emptyContainer}>
-              <FileText size={36} color="#64748b" style={{ marginBottom: 8 }} />
+              <FileText size={36} color="#8995A7" style={{ marginBottom: 8 }} />
               <Text style={styles.emptyText}>No documents uploaded yet.</Text>
             </View>
           ) : (
@@ -234,9 +268,9 @@ export default function MyDocumentsScreen() {
                 <View style={styles.docInfo}>
                   <Text style={styles.docTitle}>{doc.title}</Text>
                   <View style={styles.docMetaRow}>
-                    <Calendar size={12} color="#64748b" style={{ marginRight: 4 }} />
+                    <Calendar size={12} color="#68758A" style={{ marginRight: 4 }} />
                     <Text style={styles.docMetaText}>
-                      Uploaded: {new Date(doc.uploaded_at).toLocaleDateString()}
+                      Uploaded: {formatCompanyDate(doc.uploaded_at)}
                     </Text>
                   </View>
                 </View>
@@ -244,7 +278,7 @@ export default function MyDocumentsScreen() {
                   style={styles.viewBtn}
                   onPress={() => handleViewDocument(doc.file)}
                 >
-                  <ExternalLink size={14} color="#10b981" style={{ marginRight: 4 }} />
+                  <ExternalLink size={14} color="#2457D6" style={{ marginRight: 4 }} />
                   <Text style={styles.viewBtnText}>View</Text>
                 </TouchableOpacity>
               </View>
@@ -259,7 +293,7 @@ export default function MyDocumentsScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
   },
   container: {
     flex: 1,
@@ -270,20 +304,25 @@ const styles = StyleSheet.create({
   },
   centerContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     justifyContent: "center",
     alignItems: "center",
   },
   formCard: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
     padding: 20,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
     marginBottom: 20,
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   formTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 16,
     fontWeight: "700",
     marginBottom: 16,
@@ -292,63 +331,77 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   label: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "700",
     marginBottom: 8,
+    textTransform: "uppercase",
   },
   selectorBtn: {
-    backgroundColor: "#0f172a",
-    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#F8FAFC",
+    borderRadius: 12,
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   selectorBtnText: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
+    fontWeight: "600",
   },
   dropdownList: {
-    backgroundColor: "#0f172a",
-    borderRadius: 14,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#334155",
-    marginTop: 4,
+    borderColor: "#E2E8F0",
+    marginTop: 6,
     overflow: "hidden",
+    elevation: 3,
+    shadowColor: "#000000",
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
   },
   dropdownItem: {
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#33415550",
+    borderBottomColor: "#EDF1F6",
   },
   dropdownItemActive: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#EAF0FF",
   },
   dropdownItemText: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
+  },
+  dropdownItemTextActive: {
+    color: "#2457D6",
+    fontWeight: "700",
   },
   filePickerBtn: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#0f172a",
-    borderRadius: 14,
+    backgroundColor: "#F8FAFC",
+    borderRadius: 12,
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   filePickerText: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 14,
     flex: 1,
   },
   uploadBtn: {
     flexDirection: "row",
-    backgroundColor: "#10b981",
-    borderRadius: 14,
+    backgroundColor: "#2457D6",
+    borderRadius: 12,
     paddingVertical: 14,
     alignItems: "center",
     justifyContent: "center",
@@ -363,14 +416,19 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   listContainer: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
     padding: 20,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   listTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 16,
     fontWeight: "700",
     marginBottom: 16,
@@ -381,7 +439,7 @@ const styles = StyleSheet.create({
     paddingVertical: 32,
   },
   emptyText: {
-    color: "#64748b",
+    color: "#8995A7",
     fontSize: 13,
   },
   documentRow: {
@@ -390,16 +448,16 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#33415580",
+    borderBottomColor: "#EDF1F6",
   },
   docInfo: {
     flex: 1,
     paddingRight: 12,
   },
   docTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
-    fontWeight: "600",
+    fontWeight: "700",
   },
   docMetaRow: {
     flexDirection: "row",
@@ -407,21 +465,21 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   docMetaText: {
-    color: "#64748b",
-    fontSize: 11,
+    color: "#68758A",
+    fontSize: 12,
   },
   viewBtn: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#10b98120",
+    backgroundColor: "#EAF0FF",
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: "#10b98140",
+    borderColor: "#C9D8FF",
   },
   viewBtnText: {
-    color: "#10b981",
+    color: "#2457D6",
     fontSize: 12,
     fontWeight: "700",
   },

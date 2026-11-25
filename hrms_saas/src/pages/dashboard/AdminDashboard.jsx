@@ -21,6 +21,7 @@ import { usePagination } from "../../hooks/usePagination";
 import API from "../../api/axios";
 import { useRealtime } from "../../context/RealtimeContext";
 import { useAuth } from "../../context/AuthContext";
+import { formatCompanyDate } from "../../utils/date";
 
 const emptySummary = {
   staff: 0,
@@ -34,17 +35,7 @@ const emptySummary = {
   today_present_employees: [],
 };
 
-const formatTimelineDate = (value) => {
-  if (!value) return "--";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(date);
-};
+const formatTimelineDate = (value) => formatCompanyDate(value);
 
 export default function AdminDashboard() {
   const [summary, setSummary] = useState(emptySummary);
@@ -55,7 +46,7 @@ export default function AdminDashboard() {
   const [warning, setWarning] = useState("");
 
   const { role: authRole } = useAuth();
-  const role = authRole || localStorage.getItem("role");
+  const role = authRole || "admin";
 
   const location = useLocation();
   const searchParams = new URLSearchParams(location.search);
@@ -154,7 +145,7 @@ export default function AdminDashboard() {
           </div>
 
           {/* Premium Segmented Switcher */}
-          <div className="flex bg-slate-100 p-1.5 rounded-xl border border-slate-200 self-start">
+          <div className="flex flex-wrap bg-slate-100 p-1.5 rounded-xl border border-slate-200 self-start max-w-full">
             <button
               onClick={() => setActiveTab("system")}
               className={`px-4 py-2 text-xs font-semibold rounded-lg transition ${

@@ -101,7 +101,10 @@ export const auditService = {
             created_at: fullLog.created_at
           };
 
-          realtimeManager.broadcast("new_audit_log", serializedLog, { targetRoles: ["superadmin"] });
+          realtimeManager.broadcast("new_audit_log", serializedLog, {
+            targetRoles: ["superadmin"],
+            ...(user?.tenant_id ? { tenantId: Number(user.tenant_id) } : {}),
+          });
         }
       }
     } catch (err) {

@@ -1,11 +1,60 @@
-import { LogOut, Bell, User, CalendarDays } from "lucide-react";
-import { Link } from "react-router-dom";
+import { LogOut, User, CalendarDays, Menu } from "lucide-react";
+import { Link, useLocation } from "react-router-dom";
 import { useSite } from "../../context/SiteContext";
 import { useAuth } from "../../context/AuthContext";
 
-export default function Navbar() {
+const ROUTE_TITLES = {
+  "/attendance": "Attendance",
+  "/history": "Attendance History",
+  "/attendance-history": "Attendance History",
+  "/monthly-register": "Monthly Attendance Register",
+  "/leave": "Leave Management",
+  "/documents": "My Documents",
+  "/employees": "Employee Directory",
+  "/employee-documents": "Employee Documents",
+  "/attendance-approvals": "Attendance Approvals",
+  "/team-attendance-approvals": "Attendance Approvals",
+  "/leave-approvals": "Leave Approvals",
+  "/team-leave-approvals": "Leave Approvals",
+  "/team-dashboard": "Team Dashboard",
+  "/team-attendance": "Team Attendance",
+  "/team-analytics": "Team Analytics",
+  "/hr-dashboard": "HR Dashboard",
+  "/reports": "Reports & Analytics",
+  "/audit-logs": "Audit Logs",
+  "/shifts": "Shift Management",
+  "/roster": "Roster Management",
+  "/holidays": "Company Holidays",
+  "/site-management": "Site Management",
+  "/sites": "Site Management",
+};
+
+export default function Navbar({ onToggleSidebar }) {
   const { user, role: authRole, logout } = useAuth();
-  const role = authRole || localStorage.getItem("role");
+  const role = authRole || "";
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search);
+  const viewParam = searchParams.get("view");
+
+  const getPageTitle = () => {
+    const pathname = location.pathname.replace(/\/$/, "");
+
+    if (pathname === "/dashboard" || pathname === "") {
+      if (viewParam === "personal") return "Personal Dashboard";
+      if (role === "employee") return "Employee Dashboard";
+      if (role === "manager") return "Manager Dashboard";
+      if (role === "hr") return "HR Dashboard";
+      if (role === "admin") return "Admin Dashboard";
+      if (role === "superadmin") return "Superadmin Dashboard";
+      return "Dashboard";
+    }
+
+    if (ROUTE_TITLES[pathname]) {
+      return ROUTE_TITLES[pathname];
+    }
+
+    return role ? `${role.charAt(0).toUpperCase() + role.slice(1)} Portal` : "HRMS Portal";
+  };
   const storedUser = (() => {
     try {
       return JSON.parse(localStorage.getItem("user") || "{}");
@@ -27,30 +76,38 @@ export default function Navbar() {
   };
 
   return (
-    <div className="fixed top-0 left-64 right-0 h-16 bg-white shadow-sm border-b flex items-center justify-between px-6 z-50">
+    <div className="fixed top-0 left-0 lg:left-64 right-0 h-16 bg-white shadow-sm border-b flex items-center justify-between gap-2 px-3 sm:px-6 z-40">
 
-      {/* 🔥 LEFT: PAGE TITLE */}
-      <div>
-        <h1 className="text-lg font-semibold capitalize">
-          {role === "employee" && "Employee Dashboard"}
-          {role === "manager" && "Manager Dashboard"}
-          {role === "hr" && "HR Dashboard"}
-          {role === "admin" && "Admin Dashboard"}
-          {role === "superadmin" && "Superadmin Dashboard"}
-        </h1>
+      {/* 🔥 LEFT: MENU BUTTON + PAGE TITLE */}
+      <div className="flex items-center gap-2 min-w-0 flex-1">
+        {onToggleSidebar && (
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            aria-label="Open navigation menu"
+            className="lg:hidden rounded-lg p-2 text-slate-700 hover:bg-slate-100 shrink-0"
+          >
+            <Menu size={20} />
+          </button>
+        )}
+        <div className="min-w-0">
+          <h1 className="text-base sm:text-lg font-semibold truncate">
+            {getPageTitle()}
+          </h1>
 
-        <p className="text-xs text-gray-500">
-          Welcome back 👋
-        </p>
+          <p className="text-xs text-gray-500 hidden sm:block">
+            Welcome back 👋
+          </p>
+        </div>
       </div>
 
       {/* 🔥 RIGHT: USER SECTION */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
 
         {["admin", "superadmin", "hr", "manager"].includes(role) && sites.length > 0 && (
-          <label className="flex items-center gap-2 text-sm text-slate-600">
-            <span>Work site</span>
-            <select aria-label="Filter by work site" value={siteId} onChange={(event) => setSiteId(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+          <label className="flex items-center gap-1.5 text-sm text-slate-600">
+            <span className="hidden md:inline">Work site</span>
+            <select aria-label="Filter by work site" value={siteId} onChange={(event) => setSiteId(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm max-w-[115px] sm:max-w-[180px]">
               <option value="all">{role === "admin" || role === "superadmin" ? "All sites" : "All my sites"}</option>
               {(role === "admin" || role === "superadmin") && <option value="unassigned">Unassigned</option>}
               {sites.filter((site) => site.is_active).map((site) => <option key={site.id} value={String(site.id)}>{site.name}</option>)}
@@ -67,25 +124,14 @@ export default function Navbar() {
           <CalendarDays size={19} aria-hidden="true" />
         </Link>
 
-        {/* 🔔 Notification (future use) */}
-        <button
-          type="button"
-          disabled
-          title="Notifications (coming soon)"
-          aria-label="Notifications (coming soon)"
-          className="p-2 rounded-full text-slate-400 cursor-not-allowed opacity-50"
-        >
-          <Bell size={18} />
-        </button>
-
         {/* 👤 User Info */}
-        <div className="flex items-center gap-2 bg-gray-100 px-3 py-1 rounded-lg">
+        <div className="flex items-center gap-2 bg-gray-100 px-2 sm:px-3 py-1 rounded-lg">
           {profilePic ? (
             <img src={profilePic} alt="" className="h-5 w-5 rounded-full object-cover border border-slate-200" />
           ) : (
             <User size={16} />
           )}
-          <span className="text-sm capitalize">
+          <span className="text-sm capitalize hidden sm:inline">
             {username || role}
           </span>
         </div>
@@ -93,10 +139,11 @@ export default function Navbar() {
         {/* 🚪 Logout */}
         <button
           onClick={handleLogout}
-          className="flex items-center gap-2 bg-red-500 text-white px-3 py-1.5 rounded-lg hover:bg-red-600 transition"
+          aria-label="Logout"
+          className="flex items-center gap-2 bg-red-500 text-white px-2.5 sm:px-3 py-1.5 rounded-lg hover:bg-red-600 transition"
         >
           <LogOut size={16} />
-          Logout
+          <span className="hidden sm:inline">Logout</span>
         </button>
 
       </div>

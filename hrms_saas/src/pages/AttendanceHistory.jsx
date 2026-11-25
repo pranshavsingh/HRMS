@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   CalendarDays,
   CheckCircle2,
@@ -8,6 +9,7 @@ import {
   RefreshCw,
   Timer,
   XCircle,
+  X,
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
@@ -16,6 +18,7 @@ import { usePagination } from "../hooks/usePagination";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
+import { getCompanyLocalDate } from "../utils/date";
 
 const statusClasses = {
   approved: "bg-emerald-50 text-emerald-700 ring-emerald-200",
@@ -108,19 +111,33 @@ const getReviewLabel = (item) => {
     return "Punch Out Rejected";
   }
 
+  // Fallback checks if punch_in/punch_out string is Pending or record status is pending
+  if (item.status === "pending" || item.punch_in === "Pending" || item.punch_out === "Pending") {
+    if (item.punch_in === "Pending" && item.punch_out === "Pending") return "Punch In & Out Pending";
+    if (item.punch_in === "Pending") return "Punch In Pending";
+    if (item.punch_out === "Pending") return "Punch Out Pending";
+    return "Pending Review";
+  }
+
+  if (item.status === "rejected") {
+    return "Rejected";
+  }
+
   return "All Clear";
 };
 
 export default function AttendanceHistory() {
   const { showPopup } = usePopup();
 
-  const today = useMemo(() => new Date().toISOString().split("T")[0], []);
-  const monthAgo = useMemo(
-    () => new Date(Date.now() - 29 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-    []
-  );
+  const today = useMemo(() => getCompanyLocalDate(new Date(), 0), []);
+  const monthAgo = useMemo(() => getCompanyLocalDate(new Date(), 29), []);
 
-  const [filters, setFilters] = useState(() => ({
+  const [draftFilters, setDraftFilters] = useState(() => ({
+    startDate: monthAgo,
+    endDate: today,
+  }));
+
+  const [appliedFilters, setAppliedFilters] = useState(() => ({
     startDate: monthAgo,
     endDate: today,
   }));
@@ -129,6 +146,44 @@ export default function AttendanceHistory() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const pagination = usePagination(records);
+
+  // BUG-A09: Attendance Regularization Modal State
+  const [regularizeModalOpen, setRegularizeModalOpen] = useState(false);
+  const [selectedRecord, setSelectedRecord] = useState(null);
+  const [regularizeForm, setRegularizeForm] = useState({ punch_out_time: "", reason: "" });
+  const [regularizing, setRegularizing] = useState(false);
+  const [regularizeError, setRegularizeError] = useState("");
+
+  const openRegularizeModal = (item) => {
+    setSelectedRecord(item);
+    setRegularizeForm({ punch_out_time: "", reason: "" });
+    setRegularizeError("");
+    setRegularizeModalOpen(true);
+  };
+
+  const handleRegularizeSubmit = async (e) => {
+    e.preventDefault();
+    if (!regularizeForm.punch_out_time || !regularizeForm.reason.trim()) {
+      setRegularizeError("Punch-out time and reason are required.");
+      return;
+    }
+    setRegularizing(true);
+    setRegularizeError("");
+    try {
+      await API.post("/attendance/regularize/", {
+        attendance_id: selectedRecord.id,
+        punch_out_time: regularizeForm.punch_out_time,
+        reason: regularizeForm.reason.trim(),
+      });
+      showPopup("Regularization request submitted successfully!", "success");
+      setRegularizeModalOpen(false);
+      fetchHistory(appliedFilters, false);
+    } catch (err) {
+      setRegularizeError(err.response?.data?.error || err.response?.data?.message || "Failed to submit regularization request.");
+    } finally {
+      setRegularizing(false);
+    }
+  };
 
   const fetchHistory = useCallback(async (activeFilters, showLoader = true) => {
     if (showLoader) {
@@ -148,7 +203,11 @@ export default function AttendanceHistory() {
       }
 
       const res = await API.get("/attendance/history/", { params });
-      setRecords(Array.isArray(res.data) ? res.data : (res.data?.data || res.data?.records || []));
+      const rawRecords = Array.isArray(res.data) ? res.data : (res.data?.data || res.data?.records || []);
+      const attendanceOnlyRecords = rawRecords.filter(
+        (item) => item.status !== "leave" && item.punch_in_status !== "leave" && item.punch_out_status !== "leave"
+      );
+      setRecords(attendanceOnlyRecords);
     } catch (err) {
       console.error("Attendance history error:", err.response?.data || err.message);
       showPopup("Unable to load attendance history", "error");
@@ -159,11 +218,11 @@ export default function AttendanceHistory() {
   }, [showPopup]);
 
   useEffect(() => {
-    fetchHistory(filters, true);
-  }, [fetchHistory, filters]);
+    fetchHistory(appliedFilters, true);
+  }, [fetchHistory, appliedFilters]);
 
-  useRealtime("attendance_update", () => fetchHistory(filters, false));
-  useRealtime("leave_update", () => fetchHistory(filters, false));
+  useRealtime("attendance_update", () => fetchHistory(appliedFilters, false));
+  useRealtime("leave_update", () => fetchHistory(appliedFilters, false));
 
   const summary = useMemo(() => {
     const approved = records.filter((item) => item.status === "approved").length;
@@ -184,14 +243,19 @@ export default function AttendanceHistory() {
   }, [records]);
 
   const handleFilterChange = (key, value) => {
-    setFilters((current) => ({
+    setDraftFilters((current) => ({
       ...current,
       [key]: value,
     }));
   };
 
   const handleApplyFilters = () => {
-    fetchHistory(filters, false);
+    if (draftFilters.startDate && draftFilters.endDate && draftFilters.startDate > draftFilters.endDate) {
+      showPopup("Start date cannot be after end date", "warning");
+      return;
+    }
+    pagination.setPage(1);
+    setAppliedFilters(draftFilters);
   };
 
   const handleResetFilters = () => {
@@ -200,8 +264,9 @@ export default function AttendanceHistory() {
       endDate: today,
     };
 
-    setFilters(nextFilters);
-    fetchHistory(nextFilters, false);
+    pagination.setPage(1);
+    setDraftFilters(nextFilters);
+    setAppliedFilters(nextFilters);
   };
 
   if (loading) {
@@ -235,7 +300,7 @@ export default function AttendanceHistory() {
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <SummaryCard
                 icon={<Clock3 size={18} />}
-                label="Working Days"
+                label="Logged Days"
                 value={summary?.totalDays || 0}
               />
               <SummaryCard
@@ -267,6 +332,13 @@ export default function AttendanceHistory() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
+              <Link
+                to="/monthly-register"
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
+              >
+                <CalendarDays size={16} />
+                Monthly Register
+              </Link>
               <button
                 onClick={handleResetFilters}
                 className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
@@ -291,7 +363,7 @@ export default function AttendanceHistory() {
               </span>
               <input
                 type="date"
-                value={filters.startDate}
+                value={draftFilters.startDate}
                 onChange={(e) => handleFilterChange("startDate", e.target.value)}
                 className="mt-2 w-full bg-transparent text-sm font-medium text-slate-900 outline-none"
               />
@@ -303,7 +375,7 @@ export default function AttendanceHistory() {
               </span>
               <input
                 type="date"
-                value={filters.endDate}
+                value={draftFilters.endDate}
                 max={today}
                 onChange={(e) => handleFilterChange("endDate", e.target.value)}
                 className="mt-2 w-full bg-transparent text-sm font-medium text-slate-900 outline-none"
@@ -324,7 +396,7 @@ export default function AttendanceHistory() {
                 Current Range
               </p>
               <p className="mt-2 text-sm font-semibold text-slate-900">
-                {formatDate(filters.startDate)} to {formatDate(filters.endDate)}
+                {formatDate(appliedFilters.startDate)} to {formatDate(appliedFilters.endDate)}
               </p>
             </div>
           </div>
@@ -377,6 +449,7 @@ export default function AttendanceHistory() {
                     <th className="px-6 py-4 font-semibold">Work Hours</th>
                     <th className="px-6 py-4 font-semibold">Review</th>
                     <th className="px-6 py-4 font-semibold">Status</th>
+                    <th className="px-6 py-4 font-semibold text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -408,15 +481,27 @@ export default function AttendanceHistory() {
                       </td>
                       <td className="px-6 py-4">
                         <span
-                          className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold capitalize ring-1 ${
-                            statusClasses[item.status] || "bg-slate-100 text-slate-700 ring-slate-200"
-                          }`}
+                          className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold capitalize ring-1 ${statusClasses[item.status] || "bg-slate-100 text-slate-700 ring-slate-200"
+                            }`}
                         >
                           {item.status === "approved" && <CheckCircle2 size={14} />}
                           {item.status === "pending" && <Clock3 size={14} />}
                           {item.status === "rejected" && <XCircle size={14} />}
                           {item.status}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        {(!item.punch_out || item.punch_out === "Pending" || item.status === "pending") ? (
+                          <button
+                            type="button"
+                            onClick={() => openRegularizeModal(item)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-sky-300 bg-sky-50 px-3 py-1 text-xs font-medium text-sky-700 transition hover:bg-sky-100 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
+                          >
+                            Regularize Now
+                          </button>
+                        ) : (
+                          <span className="text-xs text-slate-400">--</span>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -427,6 +512,85 @@ export default function AttendanceHistory() {
           <Pagination {...pagination} itemLabel="records" />
         </section>
       </div>
+
+      {regularizeModalOpen && selectedRecord && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl ring-1 ring-slate-950/5">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Regularize Attendance</h3>
+                <p className="text-xs text-slate-500">
+                  {formatDate(selectedRecord.date)} • In: {formatTime(selectedRecord.punch_in)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRegularizeModalOpen(false)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleRegularizeSubmit} className="mt-4 space-y-4">
+              {regularizeError && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+                  {regularizeError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700">
+                  Proposed Punch-Out Time *
+                </label>
+                <input
+                  type="time"
+                  required
+                  value={regularizeForm.punch_out_time}
+                  onChange={(e) =>
+                    setRegularizeForm((prev) => ({ ...prev, punch_out_time: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 shadow-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700">
+                  Reason for Regularization *
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  placeholder="Explain why punch-out was missed or requires correction..."
+                  value={regularizeForm.reason}
+                  onChange={(e) =>
+                    setRegularizeForm((prev) => ({ ...prev, reason: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 shadow-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setRegularizeModalOpen(false)}
+                  disabled={regularizing}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={regularizing}
+                  className="rounded-xl bg-sky-600 px-4 py-2 text-xs font-semibold text-white shadow hover:bg-sky-700 transition disabled:opacity-50"
+                >
+                  {regularizing ? "Submitting..." : "Submit Request"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </Layout>
   );
 }

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import API from "../api/axios";
 import { useAuth } from "./AuthContext";
+import { useRealtime } from "./RealtimeContext";
 
 const SiteContext = createContext(null);
 
@@ -20,6 +21,9 @@ export function SiteProvider({ children }) {
   }, [isAuthenticated, role]);
 
   useEffect(() => { refreshSites(); }, [refreshSites, user?.id]);
+
+  useRealtime("site:updated", () => { refreshSites(); });
+  useRealtime("realtime:connected", () => { refreshSites(); });
   useEffect(() => {
     if (siteId !== "all" && siteId !== "unassigned" && sites.length && !sites.some((site) => site.is_active && String(site.id) === String(siteId))) {
       const inactiveSite = sites.find((s) => String(s.id) === String(siteId));

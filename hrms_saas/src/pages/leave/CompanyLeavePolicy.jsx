@@ -73,12 +73,30 @@ export default function CompanyLeavePolicy() {
     }
   }, []);
 
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    API.get("/leave/policy/balances/", { params: { page: balancePage, limit: 25, search } })
+    const controller = new AbortController();
+    API.get("/leave/policy/balances/", {
+      params: { page: balancePage, limit: 25, search: debouncedSearch },
+      signal: controller.signal
+    })
       .then((res) => setBalances(res.data || { records: [], total: 0, page: 1, limit: 25 }))
-      .catch((error) => showPopupRef.current(error.response?.data?.error || "Unable to load employee balances", "error"));
-  }, [balancePage, balanceRefresh, search]);
+      .catch((error) => {
+        if (error.name === "CanceledError" || error.code === "ERR_CANCELED") return;
+        showPopupRef.current(error.response?.data?.error || "Unable to load employee balances", "error");
+      });
+
+    return () => controller.abort();
+  }, [balancePage, balanceRefresh, debouncedSearch]);
 
   const change = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
   const updateType = (index, key, value) => setDraft((current) => ({ ...current, leave_types: current.leave_types.map((type, position) => position === index ? { ...type, [key]: value } : type) }));

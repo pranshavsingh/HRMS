@@ -38,11 +38,6 @@ export const validate = (schema) => async (req, res, next) => {
       formattedErrors[field].push(message);
     }
 
-    // Document upload generic format requirement check
-    if (req.originalUrl.includes("/documents/upload/")) {
-      return next(new AppError("user, title, file are required", 400));
-    }
-
     // Return field-specific arrays if required by the frontend client
     if (
       formattedErrors.photo ||
@@ -85,7 +80,7 @@ async function validateFileBuffer(file, maxSize = 2 * 1024 * 1024) {
     const ext = typeInfo.ext.toLowerCase();
 
     if (!ALLOWED_MIMES.includes(mime) || !ALLOWED_EXTS.includes(ext)) {
-      return { valid: false, error: "Only PDF, JPEG, JPG, and WEBP formats are accepted" };
+      return { valid: false, error: "Only PDF, JPEG, JPG, PNG, and WEBP formats are accepted" };
     }
   } catch (err) {
     logger.error("File MIME validation failed: %s", err.message);
@@ -126,8 +121,8 @@ async function validatePhotoBuffer(file) {
 // 1. Authentication
 export const loginSchema = z.object({
   body: z.object({
-    username: z.string({ required_error: "username and password are required" }).min(1, "username and password are required"),
-    password: z.string({ required_error: "username and password are required" }).min(1, "username and password are required")
+    username: z.string({ error: "username and password are required" }).min(1, "username and password are required"),
+    password: z.string({ error: "username and password are required" }).min(1, "username and password are required")
   })
 });
 
@@ -270,6 +265,7 @@ export const punchSchema = z.object({
     longitude: z.coerce.number({ required_error: "latitude and longitude are required" })
       .min(-180, "Longitude must be between -180 and 180")
       .max(180, "Longitude must be between -180 and 180"),
+    accuracy: z.coerce.number().min(0).max(10000).optional(),
     photo_public_id: z.string().optional(),
     photo_url: z.string().optional(),
   }),
@@ -293,17 +289,27 @@ export const punchSchema = z.object({
   }
 });
 
+function isValidYmdDate(val) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) return false;
+  const [y, m, d] = val.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
 // 7. Apply Leave
 export const applyLeaveSchema = z.object({
   body: z.object({
-    leave_type: z.string({ required_error: "leave_type, from_date, to_date, reason are required" }).min(1, "leave_type, from_date, to_date, reason are required"),
-    from_date: z.string({ required_error: "leave_type, from_date, to_date, reason are required" }).min(1, "leave_type, from_date, to_date, reason are required"),
-    to_date: z.string({ required_error: "leave_type, from_date, to_date, reason are required" }).min(1, "leave_type, from_date, to_date, reason are required"),
-    reason: z.string({ required_error: "leave_type, from_date, to_date, reason are required" }).min(1, "leave_type, from_date, to_date, reason are required"),
+    leave_type: z.string({ error: "leave_type, from_date, to_date, reason are required" }).min(1, "leave_type, from_date, to_date, reason are required"),
+    from_date: z.string({ error: "leave_type, from_date, to_date, reason are required" }).refine(isValidYmdDate, "from_date must be a valid YYYY-MM-DD date"),
+    to_date: z.string({ error: "leave_type, from_date, to_date, reason are required" }).refine(isValidYmdDate, "to_date must be a valid YYYY-MM-DD date"),
+    reason: z.string({ error: "leave_type, from_date, to_date, reason are required" }).trim().min(1, "leave_type, from_date, to_date, reason are required"),
     confirm_insufficient_balance: z.boolean().optional().default(false),
     confirmed_available_balance: z.number().finite().optional(),
     confirmed_projected_balance: z.number().finite().optional(),
     confirmed_balance_snapshot: z.string().max(5000).optional()
+  }).refine((data) => data.from_date <= data.to_date, {
+    message: "from_date must be on or before to_date",
+    path: ["to_date"],
   })
 });
 
@@ -384,21 +390,66 @@ export const attendanceApprovalActionSchema = z.object({
 // 9. Document Upload
 export const uploadDocumentSchema = z.object({
   body: z.object({
-    user: z.string({ required_error: "user, title, file are required" }).min(1, "user, title, file are required"),
-    title: z.string({ required_error: "user, title, file are required" }).min(1, "user, title, file are required")
+    user: z.string({ error: "user, title, file are required" }).min(1, "user, title, file are required"),
+    title: z.string({ error: "user, title, file are required" }).trim().min(1, "user, title, file are required")
   }),
-  file: z.any({ required_error: "user, title, file are required" })
+  file: z.any().optional()
 }).superRefine(async (data, ctx) => {
-  if (data.file) {
-    const check = await validateFileBuffer(data.file);
-    if (!check.valid) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: check.error,
-        path: ["file"],
-      });
-    }
+  if (!data.file || !data.file.buffer) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "File upload is required",
+      path: ["file"],
+    });
+    return;
   }
+  const check = await validateFileBuffer(data.file);
+  if (!check.valid) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: check.error,
+      path: ["file"],
+    });
+  }
+});
+
+// 11. Attendance Regularization
+export const regularizeAttendanceSchema = z.object({
+  body: z.object({
+    attendance_id: z.coerce.number().int().positive("Valid attendance_id is required"),
+    punch_out_time: z.string({ error: "punch_out_time is required" }).regex(/^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/, "Invalid time format or bounds (expected HH:mm or HH:mm:ss)"),
+    reason: z.string({ error: "Reason is required" }).trim().min(1, "Reason is required").max(1000, "Reason cannot exceed 1000 characters"),
+  }),
+});
+
+// 12. Direct Document Registration
+export const registerDocumentSchema = z.object({
+  body: z.object({
+    user: z.union([z.string().min(1), z.number().int().positive()]).optional(),
+    title: z.string({ error: "Document title is required" }).trim().min(1, "Document title is required").max(200),
+    public_id: z.string({ error: "public_id is required" }).trim().min(1, "public_id is required").max(500),
+  }),
+});
+
+// 13. Audit Logs Query Validation
+export const auditLogsQuerySchema = z.object({
+  query: z.object({
+    page: z.coerce.number().int().positive().max(100000).optional(),
+    limit: z.coerce.number().int().positive().max(5000).optional(),
+    sort: z.enum(["asc", "desc", "ASC", "DESC"]).optional(),
+    search: z.string().max(200).optional(),
+    action: z.string().max(100).optional(),
+    severity: z.enum(["INFO", "WARNING", "CRITICAL", ""]).optional(),
+    start_date: z.string().refine((v) => !v || isValidYmdDate(v), "Invalid start_date (YYYY-MM-DD)").optional(),
+    end_date: z.string().refine((v) => !v || isValidYmdDate(v), "Invalid end_date (YYYY-MM-DD)").optional(),
+  }).passthrough(),
+});
+
+// 14. Generic Numeric Param Validator Factory
+export const paramIdSchema = (paramName = "id") => z.object({
+  params: z.object({
+    [paramName]: z.string().regex(/^\d+$/, `Invalid ${paramName}`),
+  }),
 });
 
 // 10. Refresh Token

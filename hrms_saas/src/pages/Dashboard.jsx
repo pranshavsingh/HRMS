@@ -8,17 +8,16 @@ import HRDashboard from "./dashboard/HRDashboard";
 import AdminDashboard from "./dashboard/AdminDashboard";
 
 export default function Dashboard() {
-  const { role: authRole } = useAuth();
-  const role = authRole || localStorage.getItem("role");
+  const { role } = useAuth();
   const location = useLocation();
   const searchParams = new URLSearchParams(location.search);
   const view = searchParams.get("view");
 
-  if (view === "personal" && role !== "admin" && role !== "superadmin") return <EmployeeDashboard />;
+  if (view === "personal") return <EmployeeDashboard />;
 
   if (role === "employee") return <EmployeeDashboard />;
   if (role === "manager") return <ManagerDashboard />;
-  if (role === "hr") return <EmployeeDashboard />;
+  if (role === "hr") return <HRDashboard />;
   if (role === "admin") return <AdminDashboard />;
   if (role === "superadmin") return <AdminDashboard />;
 

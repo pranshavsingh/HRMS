@@ -48,27 +48,29 @@ async function runWithLock(jobName, ttlSeconds, fn) {
 export function initCron() {
   logger.info("Initializing scheduled background cron jobs with distributed locking...");
 
-  // Job 1: Auto-close open attendance cards daily at 11:59 PM (Safe 16-hour threshold)
+  // Job 1: Auto-flag open attendance cards older than 16 hours for review daily at 11:59 PM
   cron.schedule("59 23 * * *", async () => {
     await runWithLock("attendance_cleanup", 600, async () => {
       logger.info("CRON: Executing unclosed attendance cleanup (16-hour threshold)...");
-      // Only auto-close sessions open for > 16 hours to protect legitimate overnight shifts
+      // Flag abandoned sessions open for > 16 hours as pending review without auto-approving or fabricating NOW() timestamps
       const result = await db.run(
         `UPDATE attendance_attendance 
-         SET punch_out_time = NOW(), punch_out_status = 'approved', status = 'approved' 
+         SET punch_out_status = 'pending', status = 'pending', is_outside_location = 1 
          WHERE punch_out_time IS NULL 
-           AND punch_in_time < DATE_SUB(NOW(), INTERVAL 16 HOUR)`
+           AND punch_in_time < DATE_SUB(NOW(), INTERVAL 16 HOUR)
+           AND punch_out_status != 'pending'`
       );
-      logger.info("CRON: Auto-closed %d abandoned attendance records", result.changes);
+      logger.info("CRON: Flagged %d abandoned attendance records for manager review", result.changes);
     });
   });
 
   // Job 2: Expired OTP cleanup hourly
   cron.schedule("0 * * * *", async () => {
     await runWithLock("otp_cleanup", 300, async () => {
-      logger.info("CRON: Cleaning up expired password reset OTPs...");
+      logger.info("CRON: Cleaning up expired password reset OTPs and revoked tokens...");
       const result = await db.run("DELETE FROM password_reset_otp WHERE expires_at < NOW()");
-      logger.info("CRON: Purged %d expired OTP tokens", result.changes);
+      const revokedResult = await db.run("DELETE FROM accounts_revoked_token WHERE expires_at < NOW()");
+      logger.info("CRON: Purged %d expired OTP tokens and %d revoked tokens", result.changes, revokedResult.changes);
     });
   });
 

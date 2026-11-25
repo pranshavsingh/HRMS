@@ -521,10 +521,22 @@ export const rotationService = {
    * Preview rotation schedule for a date range.
    */
   async previewRotationSchedule(tenantId, rotationId, startDate, endDate) {
-    const rot = await this.getRotationById(tenantId, rotationId);
+    if (!startDate || !endDate) {
+      throw new AppError("startDate and endDate are required", 400);
+    }
     const startStr = formatDateToYMD(startDate);
     const endStr = formatDateToYMD(endDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startStr) || !/^\d{4}-\d{2}-\d{2}$/.test(endStr)) {
+      throw new AppError("startDate and endDate must be valid YYYY-MM-DD dates", 400);
+    }
+    if (startStr > endStr) {
+      throw new AppError("startDate must be on or before endDate", 400);
+    }
     const totalDays = getDateDifferenceInDays(startStr, endStr) + 1;
+    if (totalDays > 366) {
+      throw new AppError("Rotation preview range cannot exceed 366 days", 400);
+    }
+    const rot = await this.getRotationById(tenantId, rotationId);
 
     const schedule = [];
     const cycleLength = rot.cycle_length_days || 7;

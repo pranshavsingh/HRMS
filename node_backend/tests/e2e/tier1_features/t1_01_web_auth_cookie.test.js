@@ -103,7 +103,7 @@ describe("T1.01 — Web Cookie Authentication", () => {
 
     assert.equal(res.status, 400, "Inactive account must receive HTTP 400");
     const errorMsg = res.body?.error || res.body?.message || "";
-    assert.match(errorMsg, /inactive/i, "Error message should mention inactive account");
+    assert.match(errorMsg, /invalid credentials|inactive/i, "Error message should reject inactive account");
     assert.equal(client.cookieJar.getCookie("refreshToken")?.value, undefined, "Inactive user must not receive cookie");
   });
 

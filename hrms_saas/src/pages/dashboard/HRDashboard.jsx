@@ -51,7 +51,13 @@ export default function HRDashboard() {
   useRealtime("leave_update", () => loadDashboard(false));
   useRealtime("employee_update", () => loadDashboard(false));
 
-  if (loading) return <Loader />;
+  if (loading) {
+    return (
+      <Layout>
+        <Loader />
+      </Layout>
+    );
+  }
 
   const people = data?.people_summary || emptyDashboard.people_summary;
 

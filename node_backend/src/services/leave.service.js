@@ -7,6 +7,7 @@ import { db } from "../db/index.js";
 import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
 import { siteService } from "./site.service.js";
 import { financialLeaveService } from "./financial-leave.service.js";
+import logger from "../utils/logger.js";
 
 function fullName(user) {
   const name = `${user.first_name || ""} ${user.last_name || ""}`.trim();
@@ -68,12 +69,12 @@ function approvalRoute(requestor, managerName) {
   return "Not applicable";
 }
 
-function canReview(viewer, leave, requestor, managerId) {
+function canReview(viewer, leave, requestor, managerId, matchingTeam = false) {
   if (leave.status !== "pending") return false;
   if (Number(requestor.id) === Number(viewer.id)) return false;
 
   if (requestor.role === "employee") {
-    if (viewer.role === "manager" && Number(managerId) === Number(viewer.id)) return true;
+    if (viewer.role === "manager" && (Number(managerId) === Number(viewer.id) || matchingTeam)) return true;
     if (["hr", "admin", "superadmin"].includes(viewer.role)) return true;
   }
   if (requestor.role === "manager") {
@@ -182,7 +183,11 @@ export const leaveService = {
       await leaveRepository.insertLeave(userId, tenantId, leaveType, fromDate, toDate, reason, tx, siteId);
       return { current_available_balance: currentAvailable, requested_days: requestedDays, projected_balance: projected, year_balances: projectedSegments };
     });
-    realtimeManager.broadcast("leave_update", { actorId: userId });
+    realtimeManager.broadcast(
+      "leave_update",
+      { actorId: userId, userId: Number(userId), action: "applied" },
+      { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
+    );
     return { message: "Leave applied", balance: result };
   },
 
@@ -350,6 +355,9 @@ export const leaveService = {
           ? "Employee, manager, and HR leave requests"
           : "All leave requests in the system";
 
+    const managerProfile = role === "manager" ? await db.get("SELECT team_name FROM accounts_employeeprofile WHERE user_id = ?", [viewerUserId]) : null;
+    const managerTeamName = managerProfile?.team_name || null;
+
     return formatPaginationResponse(records, total, page, limit, {
       records,
       all_records: filteredApprovals,
@@ -359,7 +367,7 @@ export const leaveService = {
         pending_requests: allApprovals.filter((r) => r.status === "pending").length,
         approved_requests: allApprovals.filter((r) => r.status === "approved").length,
         rejected_requests: allApprovals.filter((r) => r.status === "rejected").length,
-        actionable_requests: allApprovals.filter((r) => r.status === "pending" && canReview({ id: viewerUserId, role }, r, { id: r.user_id_ref, role: r.role }, r.manager_id)).length,
+        actionable_requests: allApprovals.filter((r) => r.status === "pending" && canReview({ id: viewerUserId, role }, r, { id: r.user_id_ref, role: r.role }, r.manager_id, Boolean(managerTeamName && r.team_name && r.team_name === managerTeamName))).length,
       },
     });
   },
@@ -373,18 +381,24 @@ export const leaveService = {
       }
       const member = await tx.get("SELECT 1 AS present FROM workforce_user_tenant WHERE tenant_id=? AND user_id=? AND is_active=1", [tenantId, leave.user_id]);
       if (!member) throw new AppError("Leave request not found in this organization", 404);
-      if (!siteService.isGlobalRole(actor.role)) {
-        const requestSite = leave.site_id == null
-          ? await siteService.getEmployeeSiteId(tenantId, leave.user_id, dateOnly(leave.created_at), tx)
-          : Number(leave.site_id);
-        if (requestSite == null) throw new AppError("This request has no verified site assignment", 403);
-        const access = await tx.get("SELECT 1 AS allowed FROM workforce_site_access WHERE tenant_id=? AND user_id=? AND site_id=?", [tenantId, actor.id, requestSite]);
-        if (!access) throw new AppError("You do not have access to the employee's site", 403);
+
+      let matchingTeam = false;
+      if (actor.role === "manager") {
+        const teamCheck = await tx.get(
+          `SELECT 1 as allowed FROM accounts_employeeprofile ep
+           LEFT JOIN accounts_employeeprofile mgr_ep ON mgr_ep.user_id = ?
+           WHERE ep.user_id = ? AND (
+             ep.manager_id = ? 
+             OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = mgr_ep.team_name)
+           )`,
+          [actor.id, leave.user_id, actor.id]
+        );
+        matchingTeam = Boolean(teamCheck);
       }
 
       const requestor = { id: leave.requestor_id, role: leave.requestor_role };
-      const canApprove = canReview(actor, leave, requestor, leave.manager_id);
-      
+      const canApprove = canReview(actor, leave, requestor, leave.manager_id, matchingTeam);
+
       if (!canApprove) {
         if (leave.status !== "pending") {
           const actionName = leave.action_by_username
@@ -430,7 +444,7 @@ export const leaveService = {
           const mm = String(current.getMonth() + 1).padStart(2, "0");
           const dd = String(current.getDate()).padStart(2, "0");
           const dateStr = `${yyyy}-${mm}-${dd}`;
-          
+
           const attendanceSiteId = await siteService.getEmployeeSiteId(tenantId, leave.user_id, dateStr, tx);
           await attendanceRepository.insertOrUpdateLeaveAttendance(leave.user_id, dateStr, tx, attendanceSiteId, tenantId);
           current.setDate(current.getDate() + 1);
@@ -473,7 +487,11 @@ export const leaveService = {
       };
     });
 
-    realtimeManager.broadcast("leave_update", { actorId: actor.id });
+    realtimeManager.broadcast(
+      "leave_update",
+      { actorId: actor.id, userId: actionResult.employeeId, action: status },
+      { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [actionResult.employeeId] }
+    );
     realtimeManager.broadcast("leave_notice", {
       status,
       leave_id: Number(leaveId),
@@ -517,20 +535,38 @@ export const leaveService = {
       const currentBalance = await balanceFor(employeeId, tenantId, input.leave_type, new Date().toISOString().slice(0, 10), tx);
       return { id: Number(inserted.lastID), duplicate: false, balance: currentBalance.available_balance };
     });
-    realtimeManager.broadcast("leave_update", { actorId: actor.id });
-    realtimeManager.broadcast("leave_notice", { status: "concession_granted", leave_type: input.leave_type, additional_days: Number(input.additional_days), updated_balance: result.balance }, { targetUserIds: [employeeId] });
+    if (!result.duplicate) {
+      try {
+        realtimeManager.broadcast(
+          "leave_update",
+          { actorId: actor.id, userId: employeeId, action: "concession_granted" },
+          { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [employeeId] }
+        );
+        realtimeManager.broadcast(
+          "leave_notice",
+          { status: "concession_granted", leave_type: input.leave_type, additional_days: Number(input.additional_days), updated_balance: result.balance },
+          { tenantId, targetUserIds: [employeeId] }
+        );
+      } catch (rtErr) {
+        logger.warn("[grantConcession] realtime broadcast failed: %s", rtErr.message);
+      }
+    }
     return { message: result.duplicate ? "Concession was already processed" : "Leave concession granted", ...result };
   },
 
   async reverseConcession(concessionId, input, actor, tenantId = 1) {
     assertConcessionManager(actor);
+    const parsedConcessionId = Number(concessionId);
+    if (!Number.isSafeInteger(parsedConcessionId) || parsedConcessionId <= 0) {
+      throw new AppError("Invalid concession ID", 400);
+    }
     const result = await db.transaction(async (tx) => {
-      const grant = await tx.get("SELECT * FROM leave_concession_ledger WHERE id=? AND tenant_id=? FOR UPDATE", [concessionId, tenantId]);
+      const grant = await tx.get("SELECT * FROM leave_concession_ledger WHERE id=? AND tenant_id=? FOR UPDATE", [parsedConcessionId, tenantId]);
       if (!grant || grant.reverses_id) throw new AppError("Original concession not found", 404);
       if (Number(grant.user_id) === Number(actor.id)) throw new AppError("You cannot reverse your own concession", 403);
       await siteService.ensureEmployeeVisible(tenantId, actor, Number(grant.user_id));
       const duplicate = await tx.get("SELECT id FROM leave_concession_ledger WHERE tenant_id=? AND user_id=? AND idempotency_key=?", [tenantId, grant.user_id, input.idempotency_key]);
-      if (duplicate) return { id: Number(duplicate.id), duplicate: true };
+      if (duplicate) return { id: Number(duplicate.id), duplicate: true, employeeId: Number(grant.user_id) };
       const alreadyReversed = await tx.get("SELECT id FROM leave_concession_ledger WHERE reverses_id=?", [grant.id]);
       if (alreadyReversed) throw new AppError("Concession has already been reversed", 409);
       await tx.get("SELECT user_id FROM accounts_employeeprofile WHERE user_id=? FOR UPDATE", [grant.user_id]);
@@ -552,9 +588,25 @@ export const leaveService = {
       const currentBalance = await balanceFor(grant.user_id, tenantId, grant.leave_type, new Date().toISOString().slice(0, 10), tx);
       return { id: Number(inserted.lastID), duplicate: false, employeeId: Number(grant.user_id), balance: currentBalance.available_balance };
     });
-    realtimeManager.broadcast("leave_update", { actorId: actor.id });
-    if (result.employeeId) realtimeManager.broadcast("leave_notice", { status: "concession_reversed", updated_balance: result.balance }, { targetUserIds: [result.employeeId] });
-    return { message: "Concession reversal recorded", ...result };
+    if (!result.duplicate) {
+      try {
+        realtimeManager.broadcast(
+          "leave_update",
+          { actorId: actor.id, userId: result.employeeId, action: "concession_reversed" },
+          { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [result.employeeId] }
+        );
+        if (result.employeeId) {
+          realtimeManager.broadcast(
+            "leave_notice",
+            { status: "concession_reversed", updated_balance: result.balance },
+            { tenantId, targetUserIds: [result.employeeId] }
+          );
+        }
+      } catch (rtErr) {
+        logger.warn("[reverseConcession] realtime broadcast failed: %s", rtErr.message);
+      }
+    }
+    return { message: result.duplicate ? "Concession reversal was already processed" : "Concession reversal recorded", ...result };
   },
 
   async concessionsForEmployee(employeeId, actor, tenantId = 1) {

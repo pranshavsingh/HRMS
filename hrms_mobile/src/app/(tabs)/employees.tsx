@@ -53,7 +53,8 @@ export default function EmployeesScreen() {
   const isHR = role === "hr";
   const isAdmin = role === "admin" || role === "superadmin";
   const isSuperadmin = role === "superadmin";
-  const showFAB = isHR || isAdmin || isSuperadmin;
+  // Employee ID and account creation is strictly restricted on mobile for HR, Admin, Superadmin per security policy
+  const showFAB = false;
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -108,8 +109,22 @@ export default function EmployeesScreen() {
         api.get("/auth/employees/"),
         api.get("/auth/managers/").catch(() => ({ data: [] })) // Safe fallback if endpoint differs or is empty
       ]);
-      setEmployees(Array.isArray(empRes.data) ? empRes.data : []);
-      setManagers(Array.isArray(mgrRes.data) ? mgrRes.data : []);
+      const empList = Array.isArray(empRes.data)
+        ? empRes.data
+        : Array.isArray(empRes.data?.data)
+        ? empRes.data.data
+        : Array.isArray(empRes.data?.records)
+        ? empRes.data.records
+        : [];
+      const mgrList = Array.isArray(mgrRes.data)
+        ? mgrRes.data
+        : Array.isArray(mgrRes.data?.data)
+        ? mgrRes.data.data
+        : Array.isArray(mgrRes.data?.records)
+        ? mgrRes.data.records
+        : [];
+      setEmployees(empList);
+      setManagers(mgrList);
     } catch (err: any) {
       console.error("Error loading staff roster directory", err);
       Alert.alert("Sync Error", "Unable to load employees database.");
@@ -120,9 +135,11 @@ export default function EmployeesScreen() {
   }, []);
 
   useRealtime("employee_update", () => fetchEmployeesList(false));
+  useRealtime("realtime:connected", () => fetchEmployeesList(false));
 
   useEffect(() => {
-    fetchEmployeesList(true);
+    const t = setTimeout(() => { void fetchEmployeesList(true); }, 0);
+    return () => clearTimeout(t);
   }, [fetchEmployeesList]);
 
   const onRefresh = () => {
@@ -247,110 +264,11 @@ export default function EmployeesScreen() {
   };
 
   const handleCreateEmployee = async () => {
-    if (!createForm.username.trim() || !createForm.password || !createForm.first_name.trim() || !createForm.last_name.trim() || !createForm.email.trim()) {
-      Alert.alert("Validation Error", "Username, Password, First Name, Last Name, and Email are required.");
-      return;
-    }
-
-    if (createForm.role === "employee" && !createForm.manager) {
-      Alert.alert("Validation Error", "Please assign a reporting manager/team.");
-      return;
-    }
-
-    if (createForm.role === "manager" && !createForm.team_name.trim()) {
-      Alert.alert("Validation Error", "Please specify the Managed Team Name.");
-      return;
-    }
-
-    const latNum = parseFloat(createForm.latitude);
-    const lonNum = parseFloat(createForm.longitude);
-    const radNum = parseInt(createForm.allowed_radius, 10);
-
-    if (isNaN(latNum) || isNaN(lonNum)) {
-      Alert.alert("Validation Error", "Latitude and Longitude must be valid decimal coordinates.");
-      return;
-    }
-
-    if (isNaN(radNum) || radNum <= 0) {
-      Alert.alert("Validation Error", "Allowed Radius must be a positive integer in meters.");
-      return;
-    }
-
-    if (!selectedAadhar || !selectedPan || !selectedBank) {
-      Alert.alert("Validation Error", "Aadhar Card, PAN Card, and Bank Details documents are required.");
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      const formData = new FormData();
-      formData.append("username", createForm.username.trim());
-      formData.append("password", createForm.password);
-      formData.append("first_name", createForm.first_name.trim());
-      formData.append("last_name", createForm.last_name.trim());
-      formData.append("email", createForm.email.trim());
-      formData.append("role", createForm.role);
-      formData.append("designation", createForm.designation.trim());
-      formData.append("joining_date", createForm.joining_date || "");
-      formData.append("leave_allotted", createForm.leave_allotted || "0");
-      formData.append("latitude", String(latNum));
-      formData.append("longitude", String(lonNum));
-      formData.append("allowed_radius", String(radNum));
-
-      const locations = [
-        {
-          latitude: latNum,
-          longitude: lonNum,
-          allowed_radius: radNum,
-          is_primary: true
-        }
-      ];
-      formData.append("locations", JSON.stringify(locations));
-
-      if (createForm.role === "employee") {
-        formData.append("manager", createForm.manager);
-      } else if (createForm.role === "manager") {
-        formData.append("team_name", createForm.team_name.trim());
-      }
-
-      formData.append("aadhar_file", selectedAadhar as any);
-      formData.append("pan_file", selectedPan as any);
-      formData.append("bank_file", selectedBank as any);
-
-      const res = await api.post("/auth/create-employee/", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-
-      Alert.alert("Success", res.data.message || "Employee onboarding successful.");
-      setShowCreateModal(false);
-      
-      setCreateForm({
-        username: "",
-        first_name: "",
-        last_name: "",
-        email: "",
-        password: "",
-        role: "employee",
-        manager: "",
-        team_name: "",
-        joining_date: "",
-        leave_allotted: "12",
-        designation: "",
-        latitude: "",
-        longitude: "",
-        allowed_radius: "100",
-      });
-      setSelectedAadhar(null);
-      setSelectedPan(null);
-      setSelectedBank(null);
-
-      fetchEmployeesList(false);
-    } catch (err: any) {
-      console.error("Create employee failed:", err.response?.data || err.message);
-      Alert.alert("Onboarding Failed", err.response?.data?.error || "Failed to onboard employee.");
-    } finally {
-      setSubmitting(false);
-    }
+    Alert.alert(
+      "Action Restricted",
+      "Employee onboarding and account creation is restricted on mobile devices in accordance with security policy. Please use the HRMS Web Console."
+    );
+    setShowCreateModal(false);
   };
 
   const filteredEmployees = useMemo(() => {
@@ -403,10 +321,12 @@ export default function EmployeesScreen() {
             <Edit3 size={12} color="#ffffff" style={{ marginRight: 6 }} />
             <Text style={styles.editBtnText}>Modify Bounds</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.archiveBtn} onPress={() => handleArchiveClick(item)}>
-            <Trash2 size={12} color="#ef4444" style={{ marginRight: 6 }} />
-            <Text style={styles.archiveBtnText}>Archive</Text>
-          </TouchableOpacity>
+          {(isAdmin || isSuperadmin) && (
+            <TouchableOpacity style={styles.archiveBtn} onPress={() => handleArchiveClick(item)}>
+              <Trash2 size={12} color="#ef4444" style={{ marginRight: 6 }} />
+              <Text style={styles.archiveBtnText}>Archive</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
     );

@@ -8,10 +8,9 @@ import {
   View,
   ScrollView,
 } from "react-native";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { useCameraPermissions } from "expo-camera";
 import * as Location from "expo-location";
-import * as FileSystem from "expo-file-system/src/legacy";
-import { useAuth } from "../../context/AuthContext";
+import * as FileSystem from "expo-file-system/legacy";
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
 import CameraViewOverlay from "../../components/CameraViewOverlay";
@@ -51,7 +50,7 @@ const HTML_CONTENT = `
       transform: scaleX(-1); /* Mirror effect for front camera */
     }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js" onerror="this.onerror=null;this.src='https://unpkg.com/@vladmandic/face-api/dist/face-api.js';"></script>
 </head>
 <body>
   <video id="webcam" autoplay playsinline muted></video>
@@ -117,16 +116,34 @@ const HTML_CONTENT = `
     };
 
     const loadModels = async () => {
-      try {
-        const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
-        await Promise.all([
-          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        ]);
+      const modelMirrors = [
+        "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/",
+        "https://unpkg.com/@vladmandic/face-api/model/"
+      ];
+      let loaded = false;
+      let lastErr = null;
+
+      for (const mirrorUrl of modelMirrors) {
+        try {
+          await Promise.race([
+            Promise.all([
+              faceapi.nets.tinyFaceDetector.loadFromUri(mirrorUrl),
+              faceapi.nets.faceLandmark68Net.loadFromUri(mirrorUrl),
+            ]),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Network timeout loading models from ' + mirrorUrl)), 12000))
+          ]);
+          loaded = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+
+      if (loaded) {
         modelsLoaded = true;
         sendMsg({ type: 'MODELS_LOADED' });
-      } catch (err) {
-        sendMsg({ type: 'ERROR', error: 'Failed to load face detector models: ' + err.message });
+      } else {
+        sendMsg({ type: 'ERROR', error: 'Failed to load face detector models: ' + (lastErr?.message || 'Network unreachable') });
       }
     };
 
@@ -324,7 +341,6 @@ const HTML_CONTENT = `
 `;
 
 export default function PunchScreen() {
-  const { user } = useAuth();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [locationPermission, setLocationPermission] = useState<boolean | null>(null);
 
@@ -335,8 +351,6 @@ export default function PunchScreen() {
   const [activePunch, setActivePunch] = useState<any>(null);
   const [elapsedTime, setElapsedTime] = useState("");
   const [currentCoords, setCurrentCoords] = useState<{ latitude: number; longitude: number } | null>(null);
-
-  const cameraRef = useRef<any>(null);
 
   // WebView Face API References and States
   const webViewRef = useRef<any>(null);
@@ -358,13 +372,28 @@ export default function PunchScreen() {
     }
   };
 
+  const requestLocationPermission = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      setLocationPermission(status === "granted");
+    } catch (e) {
+      console.error("Error requesting location permission", e);
+      setLocationPermission(false);
+    }
+  };
+
   useEffect(() => {
-    fetchStatus();
-    requestLocationPermission();
+    const t = setTimeout(() => {
+      void fetchStatus();
+      void requestLocationPermission();
+    }, 0);
+    return () => clearTimeout(t);
   }, []);
 
-  // Hook up SSE updates
+  // Hook up live updates
   useRealtime("attendance_update", fetchStatus);
+  useRealtime("leave_update", fetchStatus);
+  useRealtime("realtime:connected", fetchStatus);
 
   // Synchronize camera state with WebView reactively to avoid race conditions
   useEffect(() => {
@@ -390,8 +419,8 @@ export default function PunchScreen() {
       !activePunch.punch_in_time ||
       activePunch.punch_in_status !== "approved"
     ) {
-      setElapsedTime("");
-      return;
+      const t = setTimeout(() => setElapsedTime(""), 0);
+      return () => clearTimeout(t);
     }
 
     const punchInDate = new Date(activePunch.punch_in_time).getTime();
@@ -414,16 +443,6 @@ export default function PunchScreen() {
 
     return () => clearInterval(interval);
   }, [activePunch]);
-
-  const requestLocationPermission = async () => {
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      setLocationPermission(status === "granted");
-    } catch (e) {
-      console.error("Error requesting location permission", e);
-      setLocationPermission(false);
-    }
-  };
 
   const startPunchWorkflow = async (type: "in" | "out") => {
     if (!cameraPermission || !cameraPermission.granted) {
@@ -485,9 +504,20 @@ export default function PunchScreen() {
       const loc = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High,
       });
+
+      if (loc.coords.accuracy != null && loc.coords.accuracy > 100) {
+        Alert.alert(
+          "Weak GPS Accuracy",
+          `Your GPS accuracy is ±${Math.round(loc.coords.accuracy)}m. Required accuracy is within 100 meters. Please move to an open area or enable precise location.`
+        );
+        setSubmitting(false);
+        return;
+      }
+
       pendingCoordsRef.current = {
         latitude: loc.coords.latitude,
         longitude: loc.coords.longitude,
+        accuracy: loc.coords.accuracy,
       };
 
       // 2. Request snapshot capture from WebView
@@ -555,9 +585,10 @@ export default function PunchScreen() {
       return;
     }
 
+    let tempUri: string | null = null;
     try {
       // Write base64 string to a local cache file using expo-file-system
-      const tempUri = `${FileSystem.cacheDirectory}selfie_${Date.now()}.jpg`;
+      tempUri = `${FileSystem.cacheDirectory}selfie_${Date.now()}.jpg`;
       await FileSystem.writeAsStringAsync(tempUri, base64Data, {
         encoding: FileSystem.EncodingType.Base64,
       });
@@ -565,6 +596,9 @@ export default function PunchScreen() {
       const formData = new FormData();
       formData.append("latitude", String(coords.latitude));
       formData.append("longitude", String(coords.longitude));
+      if (coords.accuracy != null) {
+        formData.append("accuracy", String(coords.accuracy));
+      }
       formData.append("photo", {
         uri: tempUri,
         name: `selfie_${Date.now()}.jpg`,
@@ -588,6 +622,10 @@ export default function PunchScreen() {
       setValidationStatus("error");
       setValidationMsg("Punch Rejected: " + (err.response?.data?.error || "Server error"));
     } finally {
+      // Clean up temporary selfie cache file to prevent cache storage leak
+      if (tempUri) {
+        FileSystem.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
+      }
       setSubmitting(false);
       pendingCoordsRef.current = null;
     }
@@ -608,7 +646,7 @@ export default function PunchScreen() {
       <View
         style={
           cameraOn
-            ? { ...StyleSheet.absoluteFillObject, zIndex: 1 }
+            ? [StyleSheet.absoluteFill, { zIndex: 1 }]
             : { position: "absolute", top: -9999, left: -9999, width: 1, height: 1, opacity: 0 }
         }
       >
@@ -713,7 +751,7 @@ export default function PunchScreen() {
                   Workday will close once your punch out is approved by your reviewer.
                 </Text>
               </View>
-            ) : activePunch?.is_punched_in ? (
+            ) : (activePunch?.is_punched_in && activePunch?.punch_in_status !== "leave" && Boolean(activePunch?.punch_in_time)) ? (
               activePunch.punch_in_status === "approved" ? (
                 <View style={[styles.statusBlock, styles.blockActive]}>
                   <CheckCircle2 size={32} color="#10b981" />
@@ -777,7 +815,7 @@ export default function PunchScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
   },
   container: {
     padding: 16,
@@ -785,20 +823,25 @@ const styles = StyleSheet.create({
   },
   loadingContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     alignItems: "center",
     justifyContent: "center",
   },
   heroSection: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderRadius: 24,
     padding: 20,
     marginBottom: 20,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   heroPreText: {
-    color: "#10b981",
+    color: "#2457D6",
     fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase",
@@ -806,55 +849,60 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   heroTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 22,
     fontWeight: "800",
   },
   heroDesc: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 13,
     lineHeight: 18,
     marginTop: 8,
   },
   // Status Cards
   statusBlock: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderRadius: 24,
     padding: 24,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   blockLeave: {
-    borderColor: "#f43f5e30",
+    borderColor: "#FECDD3",
   },
   blockPending: {
-    borderColor: "#f59e0b30",
+    borderColor: "#FDE68A",
   },
   blockActive: {
-    borderColor: "#10b98130",
+    borderColor: "#BBF7D0",
   },
   blockStandby: {
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
   },
   statusTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 18,
     fontWeight: "700",
     marginTop: 16,
     textAlign: "center",
   },
   textLeave: {
-    color: "#f43f5e",
+    color: "#BE123C",
   },
   textPending: {
-    color: "#f59e0b",
+    color: "#B45309",
   },
   textActive: {
-    color: "#10b981",
+    color: "#15803D",
   },
   statusDesc: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 13,
     lineHeight: 18,
     textAlign: "center",
@@ -864,16 +912,16 @@ const styles = StyleSheet.create({
   timerRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F8FAFC",
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
     marginBottom: 24,
   },
   timerText: {
-    color: "#10b981",
+    color: "#2457D6",
     fontSize: 22,
     fontWeight: "700",
     marginLeft: 10,
