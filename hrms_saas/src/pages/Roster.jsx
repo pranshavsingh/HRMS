@@ -31,9 +31,13 @@ import { useRealtime } from "../context/RealtimeContext";
 import { usePopup } from "../context/PopupContext";
 import { useSite } from "../context/SiteContext";
 import { useAuth } from "../context/AuthContext";
+import { getCompanyLocalDate } from "../utils/date";
 import "./Roster.css";
 
-const dateOnly = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const dateOnly = (date) => {
+  if (!date) return "";
+  return getCompanyLocalDate(date);
+};
 
 // Formula injection protection for CSV export (BUG-RS13)
 const sanitizeCsvValue = (val) => {
@@ -70,12 +74,12 @@ export default function Roster() {
   useEffect(() => {
     popupRef.current = popup;
   }, [popup]);
-  const { querySiteId, siteId } = useSite();
+  const { sites = [], loadingSites, querySiteId, siteId } = useSite();
   const { role: authRole } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // BUG-RS02: Reactive role from useAuth instead of stale localStorage
-  const userRole = authRole || localStorage.getItem("role") || "employee";
+  const userRole = authRole || "employee";
   const isManagerOrAdmin = ["admin", "superadmin", "hr", "manager"].includes(userRole);
   const isAdminOrHr = ["admin", "superadmin", "hr"].includes(userRole);
 
@@ -146,6 +150,7 @@ export default function Roster() {
     start_date: dateOnly(new Date()),
     end_date: dateOnly(new Date(Date.now() + 7 * 86400000)),
     team_name: "",
+    site_id: "",
     name: "",
   });
 
@@ -280,12 +285,12 @@ export default function Roster() {
         (err?.response?.status >= 500
           ? "The server encountered an error while retrieving your schedule. Please try again."
           : err?.response?.status === 401
-          ? "Your session has expired. Please refresh or log in again."
-          : err?.response?.status === 403
-          ? "You do not have permission to view this schedule."
-          : !navigator.onLine
-          ? "You are currently offline. Check your network connection and try again."
-          : "Unable to load your shift schedule. Please check your connection and try again.");
+            ? "Your session has expired. Please refresh or log in again."
+            : err?.response?.status === 403
+              ? "You do not have permission to view this schedule."
+              : !navigator.onLine
+                ? "You are currently offline. Check your network connection and try again."
+                : "Unable to load your shift schedule. Please check your connection and try again.");
       setMyRosterError(errorMsg);
       if (isRetry) {
         popupRef.current?.showPopup(errorMsg, "error");
@@ -361,8 +366,11 @@ export default function Roster() {
 
   const visibleDates = useMemo(() => {
     const dates = [];
-    const day = new Date(`${dateRange.startDate}T00:00:00Z`);
-    const finalDay = new Date(`${dateRange.endDate}T00:00:00Z`);
+    if (!dateRange.startDate || !dateRange.endDate) return dates;
+    const [sY, sM, sD] = dateRange.startDate.split("-").map(Number);
+    const [eY, eM, eD] = dateRange.endDate.split("-").map(Number);
+    const day = new Date(Date.UTC(sY, sM - 1, sD, 12, 0, 0));
+    const finalDay = new Date(Date.UTC(eY, eM - 1, eD, 12, 0, 0));
     while (day <= finalDay) {
       dates.push(day.toISOString().slice(0, 10));
       day.setUTCDate(day.getUTCDate() + 1);
@@ -488,13 +496,18 @@ export default function Roster() {
   // Handler: Generate Roster
   const handleGenerateRoster = async (e) => {
     e.preventDefault();
-    if (!siteId || siteId === "all" || siteId === "unassigned") {
-      popup?.showPopup("Select one work site in the header before generating a roster", "warning");
+    const targetSiteId = generateForm.site_id || (siteId && siteId !== "all" && siteId !== "unassigned" ? siteId : null);
+    if (!targetSiteId || targetSiteId === "all" || targetSiteId === "unassigned") {
+      popup?.showPopup("Select one work site before generating a roster", "warning");
+      return;
+    }
+    if (generateForm.end_date < generateForm.start_date) {
+      popup?.showPopup("End Date cannot be before Start Date", "warning");
       return;
     }
     try {
       setLoading(true);
-      const res = await shiftsApi.generateDraftRoster({ ...generateForm, site_id: Number(siteId) });
+      const res = await shiftsApi.generateDraftRoster({ ...generateForm, site_id: Number(targetSiteId) });
       popup?.showPopup(`Draft roster generated: ${res.entries_count} entries created`, "success");
       setGenerateModalOpen(false);
       loadCalendar();
@@ -682,7 +695,7 @@ export default function Roster() {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => {
                 if (activeTab === "calendar") loadCalendar();
@@ -697,7 +710,11 @@ export default function Roster() {
 
             {isAdminOrHr && activeTab === "calendar" && (
               <button
-                onClick={() => setGenerateModalOpen(true)}
+                onClick={() => {
+                  const defaultSiteId = (siteId && siteId !== "all" && siteId !== "unassigned") ? String(siteId) : (sites[0]?.id ? String(sites[0].id) : "");
+                  setGenerateForm((prev) => ({ ...prev, site_id: defaultSiteId }));
+                  setGenerateModalOpen(true);
+                }}
                 className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition shadow-lg shadow-emerald-900/30"
               >
                 <Plus size={16} /> Generate Roster
@@ -722,15 +739,14 @@ export default function Roster() {
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex border-b border-gray-800 gap-2">
+        <div className="flex flex-wrap border-b border-gray-800 gap-2">
           {isManagerOrAdmin && (
             <button
               onClick={() => changeTab("calendar")}
-              className={`px-4 py-3 text-sm font-medium border-b-2 flex items-center gap-2 transition ${
-                activeTab === "calendar"
-                  ? "border-emerald-500 text-emerald-400"
-                  : "border-transparent text-gray-400 hover:text-gray-200"
-              }`}
+              className={`px-4 py-3 text-sm font-medium border-b-2 flex items-center gap-2 transition ${activeTab === "calendar"
+                ? "border-emerald-500 text-emerald-400"
+                : "border-transparent text-gray-400 hover:text-gray-200"
+                }`}
             >
               <CalendarIcon size={16} /> Roster Calendar
             </button>
@@ -740,22 +756,20 @@ export default function Roster() {
             <>
               <button
                 onClick={() => changeTab("assignments")}
-                className={`px-4 py-3 text-sm font-medium border-b-2 flex items-center gap-2 transition ${
-                  activeTab === "assignments"
-                    ? "border-emerald-500 text-emerald-400"
-                    : "border-transparent text-gray-400 hover:text-gray-200"
-                }`}
+                className={`px-4 py-3 text-sm font-medium border-b-2 flex items-center gap-2 transition ${activeTab === "assignments"
+                  ? "border-emerald-500 text-emerald-400"
+                  : "border-transparent text-gray-400 hover:text-gray-200"
+                  }`}
               >
                 <Users size={16} /> Shift Assignments
               </button>
 
               <button
                 onClick={() => changeTab("rotations")}
-                className={`px-4 py-3 text-sm font-medium border-b-2 flex items-center gap-2 transition ${
-                  activeTab === "rotations"
-                    ? "border-emerald-500 text-emerald-400"
-                    : "border-transparent text-gray-400 hover:text-gray-200"
-                }`}
+                className={`px-4 py-3 text-sm font-medium border-b-2 flex items-center gap-2 transition ${activeTab === "rotations"
+                  ? "border-emerald-500 text-emerald-400"
+                  : "border-transparent text-gray-400 hover:text-gray-200"
+                  }`}
               >
                 <Repeat size={16} /> Rotation Patterns
               </button>
@@ -764,11 +778,10 @@ export default function Roster() {
 
           <button
             onClick={() => changeTab("my-schedule")}
-            className={`px-4 py-3 text-sm font-medium border-b-2 flex items-center gap-2 transition ${
-              activeTab === "my-schedule"
-                ? "border-emerald-500 text-emerald-400"
-                : "border-transparent text-gray-400 hover:text-gray-200"
-            }`}
+            className={`px-4 py-3 text-sm font-medium border-b-2 flex items-center gap-2 transition ${activeTab === "my-schedule"
+              ? "border-emerald-500 text-emerald-400"
+              : "border-transparent text-gray-400 hover:text-gray-200"
+              }`}
           >
             <Clock size={16} /> My Schedule
           </button>
@@ -797,27 +810,27 @@ export default function Roster() {
               const publishableDraft = draftRosters.find((roster) => Number(roster.entry_count) > 0);
               const latestDraft = publishableDraft || draftRosters[0];
               return (
-              <div className="bg-amber-950/40 border border-amber-800/60 p-4 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-amber-950/20">
-                <div className="flex items-start sm:items-center gap-3">
-                  <AlertCircle className="text-amber-400 shrink-0 mt-0.5 sm:mt-0" size={20} />
-                  <div>
-                    <div className="text-white font-semibold text-sm">
-                      {draftRosters.length} Draft Roster{draftRosters.length > 1 ? "s" : ""} Pending Publication
-                    </div>
-                    <div className="text-xs text-amber-300/80">
-                      {latestDraft.name || `Roster #${latestDraft.id}`} ({latestDraft.start_date} to {latestDraft.end_date} • {latestDraft.entry_count} entries). {publishableDraft ? 'Shifts will become visible to employees in "My Schedule" once published.' : "Generate a roster with scheduled shifts before publishing."}
+                <div className="bg-amber-950/40 border border-amber-800/60 p-4 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-amber-950/20">
+                  <div className="flex items-start sm:items-center gap-3">
+                    <AlertCircle className="text-amber-400 shrink-0 mt-0.5 sm:mt-0" size={20} />
+                    <div>
+                      <div className="text-white font-semibold text-sm">
+                        {draftRosters.length} Draft Roster{draftRosters.length > 1 ? "s" : ""} Pending Publication
+                      </div>
+                      <div className="text-xs text-amber-300/80">
+                        {latestDraft.name || `Roster #${latestDraft.id}`} ({latestDraft.start_date} to {latestDraft.end_date} • {latestDraft.entry_count} entries). {publishableDraft ? 'Shifts will become visible to employees in "My Schedule" once published.' : "Generate a roster with scheduled shifts before publishing."}
+                      </div>
                     </div>
                   </div>
+                  {/* BUG-RS03: Safe publish handler prevents undefined id evaluation */}
+                  <button
+                    onClick={() => publishableDraft && handlePublishRoster(publishableDraft.id)}
+                    disabled={!publishableDraft || loading}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold transition shadow-lg shadow-emerald-950 flex items-center justify-center gap-2 shrink-0"
+                  >
+                    <CheckCircle2 size={15} /> Publish Roster to Team
+                  </button>
                 </div>
-                {/* BUG-RS03: Safe publish handler prevents undefined id evaluation */}
-                <button
-                  onClick={() => publishableDraft && handlePublishRoster(publishableDraft.id)}
-                  disabled={!publishableDraft || loading}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold transition shadow-lg shadow-emerald-950 flex items-center justify-center gap-2 shrink-0"
-                >
-                  <CheckCircle2 size={15} /> Publish Roster to Team
-                </button>
-              </div>
               );
             })()}
 
@@ -911,9 +924,8 @@ export default function Roster() {
                     <button
                       key={mode}
                       onClick={() => setViewMode(mode)}
-                      className={`px-3 py-1 rounded capitalize transition ${
-                        viewMode === mode ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
-                      }`}
+                      className={`px-3 py-1 rounded capitalize transition ${viewMode === mode ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
+                        }`}
                     >
                       {mode}
                     </button>
@@ -927,67 +939,65 @@ export default function Roster() {
               <div className="p-12 flex justify-center"><Loader /></div>
             ) : calendarData && calendarData.employees?.length > 0 ? (
               filteredEmployees.length > 0 ? (
-              <div className="overflow-x-auto bg-gray-900 border border-gray-800 rounded-xl shadow-lg">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-gray-800 bg-gray-950/60 text-xs font-semibold text-gray-400">
-                      <th className="p-4 w-64 sticky left-0 bg-gray-950 z-10">Employee</th>
-                      {/* Dates columns */}
-                      {visibleDates.map((dateStr) => (
-                        <th key={dateStr} className={`p-3 text-center border-l border-gray-800 min-w-[130px] ${dateStr === todayDate ? "bg-emerald-950/50 text-emerald-300" : ""}`}>
-                          <div>{new Date(`${dateStr}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" })}</div>
-                          <div className={`text-xs ${dateStr === todayDate ? "text-emerald-300 font-bold" : "text-white"}`}>{dateStr.slice(5)}{dateStr === todayDate ? " · Today" : ""}</div>
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-800 text-xs">
-                    {filteredEmployees.map((emp) => (
-                      <tr key={emp.user_id} className="hover:bg-gray-800/40 transition">
-                        <td className="p-4 font-medium text-white sticky left-0 bg-gray-900 z-10 border-r border-gray-800">
-                          <div className="font-semibold">{emp.name}</div>
-                          <div className="text-gray-400 text-[11px]">{emp.team}</div>
-                        </td>
-                        {visibleDates.map((dateStr) => {
-                          const slot = calendarData.grid[emp.user_id]?.[dateStr];
-                          return (
-                            <td key={dateStr} className={`p-2 border-l border-gray-800 text-center ${dateStr === todayDate ? "bg-emerald-950/10" : ""}`}>
-                              {slot ? (
-                                <div
-                                  className={`p-2 rounded-lg border text-left flex flex-col justify-between h-full ${
-                                    slot.is_overnight
+                <div className="overflow-x-auto bg-gray-900 border border-gray-800 rounded-xl shadow-lg">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-gray-800 bg-gray-950/60 text-xs font-semibold text-gray-400">
+                        <th className="p-4 w-64 sticky left-0 bg-gray-950 z-10">Employee</th>
+                        {/* Dates columns */}
+                        {visibleDates.map((dateStr) => (
+                          <th key={dateStr} className={`p-3 text-center border-l border-gray-800 min-w-[130px] ${dateStr === todayDate ? "bg-emerald-950/50 text-emerald-300" : ""}`}>
+                            <div>{new Date(`${dateStr}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" })}</div>
+                            <div className={`text-xs ${dateStr === todayDate ? "text-emerald-300 font-bold" : "text-white"}`}>{dateStr.slice(5)}{dateStr === todayDate ? " · Today" : ""}</div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800 text-xs">
+                      {filteredEmployees.map((emp) => (
+                        <tr key={emp.user_id} className="hover:bg-gray-800/40 transition">
+                          <td className="p-4 font-medium text-white sticky left-0 bg-gray-900 z-10 border-r border-gray-800">
+                            <div className="font-semibold">{emp.name}</div>
+                            <div className="text-gray-400 text-[11px]">{emp.team}</div>
+                          </td>
+                          {visibleDates.map((dateStr) => {
+                            const slot = calendarData.grid[emp.user_id]?.[dateStr];
+                            return (
+                              <td key={dateStr} className={`p-2 border-l border-gray-800 text-center ${dateStr === todayDate ? "bg-emerald-950/10" : ""}`}>
+                                {slot ? (
+                                  <div
+                                    className={`p-2 rounded-lg border text-left flex flex-col justify-between h-full ${slot.is_overnight
                                       ? "bg-indigo-950/40 border-indigo-700/60 text-indigo-300"
                                       : "bg-emerald-950/40 border-emerald-700/60 text-emerald-300"
-                                  }`}
-                                >
-                                  <div className="flex items-center justify-between">
-                                    <span className="font-semibold truncate">{slot.shift_name}</span>
-                                    {slot.is_overnight ? <Moon size={12} className="text-indigo-400" /> : <Sun size={12} className="text-emerald-400" />}
+                                      }`}
+                                  >
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-semibold truncate">{slot.shift_name}</span>
+                                      {slot.is_overnight ? <Moon size={12} className="text-indigo-400" /> : <Sun size={12} className="text-emerald-400" />}
+                                    </div>
+                                    <div className="text-[10px] text-gray-400 mt-1">
+                                      {slot.start_time?.slice(0, 5)} - {slot.end_time?.slice(0, 5)}
+                                      {slot.is_overnight && <span className="ml-1 text-indigo-400 font-bold">+1d</span>}
+                                    </div>
+                                    <div className="flex items-center justify-between mt-1 text-[9px]">
+                                      <span className="capitalize text-gray-400">{slot.source_type}</span>
+                                      <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase ${slot.roster_status === "published" ? "bg-emerald-900/60 text-emerald-300" : "bg-yellow-900/60 text-yellow-300"
+                                        }`}>
+                                        {slot.roster_status}
+                                      </span>
+                                    </div>
                                   </div>
-                                  <div className="text-[10px] text-gray-400 mt-1">
-                                    {slot.start_time?.slice(0, 5)} - {slot.end_time?.slice(0, 5)}
-                                    {slot.is_overnight && <span className="ml-1 text-indigo-400 font-bold">+1d</span>}
-                                  </div>
-                                  <div className="flex items-center justify-between mt-1 text-[9px]">
-                                    <span className="capitalize text-gray-400">{slot.source_type}</span>
-                                    <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase ${
-                                      slot.roster_status === "published" ? "bg-emerald-900/60 text-emerald-300" : "bg-yellow-900/60 text-yellow-300"
-                                    }`}>
-                                      {slot.roster_status}
-                                    </span>
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="text-gray-600 text-[11px] italic">Off</div>
-                              )}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                                ) : (
+                                  <div className="text-gray-600 text-[11px] italic">Off</div>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               ) : (
                 <div className="p-12 text-center bg-gray-900 border border-gray-800 rounded-xl space-y-3">
                   <Users size={32} className="mx-auto text-gray-500" />
@@ -1016,7 +1026,7 @@ export default function Roster() {
           <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-4 bg-gray-900 border border-gray-800 p-4 rounded-xl">
               <div className="flex flex-wrap items-center gap-3">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Filter size={16} className="text-gray-400" />
                   <select
                     value={assignFilterStatus}
@@ -1101,15 +1111,14 @@ export default function Roster() {
                           <td className="p-4">{a.start_time?.slice(0, 5)} - {a.end_time?.slice(0, 5)}</td>
                           <td className="p-4">{a.effective_from} → {a.effective_to || "Indefinite"}</td>
                           <td className="p-4">
-                            <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${
-                              a.status === "published"
-                                ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                                : a.status === "draft"
+                            <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${a.status === "published"
+                              ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                              : a.status === "draft"
                                 ? "bg-yellow-950 text-yellow-400 border border-yellow-800"
                                 : a.status === "cancelled"
-                                ? "bg-red-950 text-red-400 border border-red-800"
-                                : "bg-gray-800 text-gray-400"
-                            }`}>
+                                  ? "bg-red-950 text-red-400 border border-red-800"
+                                  : "bg-gray-800 text-gray-400"
+                              }`}>
                               {a.status}
                             </span>
                           </td>
@@ -1117,9 +1126,13 @@ export default function Roster() {
                             {a.status === "draft" && (
                               <button
                                 onClick={async () => {
-                                  await shiftsApi.publishAssignment(a.id);
-                                  popup?.showPopup("Assignment published!", "success");
-                                  loadAssignments();
+                                  try {
+                                    await shiftsApi.publishAssignment(a.id);
+                                    popup?.showPopup("Assignment published!", "success");
+                                    loadAssignments();
+                                  } catch (err) {
+                                    popup?.showPopup(err?.response?.data?.error || "Failed to publish assignment", "error");
+                                  }
                                 }}
                                 className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-semibold"
                               >
@@ -1191,9 +1204,8 @@ export default function Roster() {
                         <h3 className="text-white font-bold text-base">{r.name}</h3>
                         <p className="text-xs text-gray-400">Code: {r.code}</p>
                       </div>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                        r.status === "published" ? "bg-emerald-950 text-emerald-400 border border-emerald-800" : "bg-yellow-950 text-yellow-400"
-                      }`}>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${r.status === "published" ? "bg-emerald-950 text-emerald-400 border border-emerald-800" : "bg-yellow-950 text-yellow-400"
+                        }`}>
                         {r.status}
                       </span>
                     </div>
@@ -1210,9 +1222,13 @@ export default function Roster() {
                       {r.status === "draft" && (
                         <button
                           onClick={async () => {
-                            await shiftsApi.publishRotation(r.id);
-                            popup?.showPopup("Pattern published!", "success");
-                            loadRotations();
+                            try {
+                              await shiftsApi.publishRotation(r.id);
+                              popup?.showPopup("Pattern published!", "success");
+                              loadRotations();
+                            } catch (err) {
+                              popup?.showPopup(err?.response?.data?.error || "Failed to publish pattern", "error");
+                            }
                           }}
                           className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold"
                         >
@@ -1295,13 +1311,12 @@ export default function Roster() {
                       <div className="bg-gradient-to-r from-emerald-950/60 to-gray-900 border border-emerald-800/60 p-6 rounded-2xl">
                         <div className="flex items-center justify-between mb-1">
                           <div className="text-xs uppercase tracking-wider text-emerald-400 font-bold">Today&apos;s Active Shift</div>
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                            todayItem.source === "fixed_assignment"
-                              ? "bg-blue-950 text-blue-400 border border-blue-800"
-                              : todayItem.source === "rotation"
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${todayItem.source === "fixed_assignment"
+                            ? "bg-blue-950 text-blue-400 border border-blue-800"
+                            : todayItem.source === "rotation"
                               ? "bg-indigo-950 text-indigo-400 border border-indigo-800"
                               : "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                          }`}>
+                            }`}>
                             {todayItem.source === "fixed_assignment" ? "Fixed Shift" : todayItem.source === "rotation" ? "Rotation" : "Published Roster"}
                           </span>
                         </div>
@@ -1569,6 +1584,28 @@ export default function Roster() {
               </div>
 
               <form onSubmit={handleGenerateRoster} className="space-y-4 text-xs">
+                <div>
+                  <label className="block text-gray-400 mb-1">Work Site <span className="text-emerald-400">*</span></label>
+                  {loadingSites ? (
+                    <div className="text-gray-400 text-xs py-2">Loading authorized sites...</div>
+                  ) : sites.length === 0 ? (
+                    <div className="text-amber-400 text-xs py-2">No authorized work sites found.</div>
+                  ) : (
+                    <select
+                      value={generateForm.site_id}
+                      onChange={(e) => setGenerateForm({ ...generateForm, site_id: e.target.value })}
+                      className="w-full bg-gray-800 text-white p-2.5 rounded-lg border border-gray-700"
+                      required
+                    >
+                      <option value="">-- Select Work Site --</option>
+                      {sites.filter((s) => s.is_active !== false).map((site) => (
+                        <option key={site.id} value={site.id}>
+                          {site.name} ({site.code})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
                 <div>
                   <label className="block text-gray-400 mb-1">Start Date</label>
                   <input

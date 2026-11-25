@@ -1,24 +1,31 @@
 import React from "react";
-import { Tabs } from "expo-router";
+import { Tabs, useRouter } from "expo-router";
 import { useAuth } from "../../context/AuthContext";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { 
   LayoutDashboard, 
   Fingerprint, 
   Calendar, 
+  CalendarClock,
   History, 
-  User, 
   CheckSquare, 
   Users, 
   TrendingUp, 
   Shield, 
   Contact, 
   FileSpreadsheet, 
-  Files 
+  Files,
+  CalendarDays,
+  ChevronLeft
 } from "lucide-react-native";
-import { ActivityIndicator, View, StyleSheet } from "react-native";
+import { ActivityIndicator, Image, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 export default function TabsLayout() {
   const { user, isLoading, activeTab } = useAuth();
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const tabBarBottomInset = Math.max(insets.bottom, 8);
+  const profileInitial = (user?.first_name || user?.username || "U").charAt(0).toUpperCase();
 
   if (isLoading) {
     return (
@@ -47,24 +54,60 @@ export default function TabsLayout() {
       screenOptions={{
         headerShown: true,
         headerStyle: {
-          backgroundColor: "#0f172a",
-          borderBottomWidth: 1,
-          borderBottomColor: "#1e293b",
+          backgroundColor: "#F6F8FC",
+          borderBottomWidth: 0,
+          elevation: 0,
+          shadowOpacity: 0,
         },
         headerTitleStyle: {
-          color: "#ffffff",
+          color: "#152238",
           fontWeight: "700",
           fontSize: 18,
         },
-        tabBarActiveTintColor: "#10b981", // Emerald
-        tabBarInactiveTintColor: "#94a3b8", // Slate 400
+        headerTitleAlign: "left",
+        tabBarActiveTintColor: "#2457D6",
+        tabBarInactiveTintColor: "#8995A7",
+        headerRight: () => (
+          <View style={styles.headerRightContainer} pointerEvents="box-none">
+            <TouchableOpacity
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              accessibilityRole="button"
+              accessibilityLabel="Open profile"
+              style={styles.profileButton}
+              onPress={() => router.push("/profile")}
+            >
+              {user?.profile_picture ? (
+                <Image source={{ uri: user.profile_picture }} style={styles.profileImage} />
+              ) : (
+                <View style={styles.profileInitial}><Text style={styles.profileInitialText}>{profileInitial}</Text></View>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              accessibilityRole="button"
+              accessibilityLabel="Open holiday calendar"
+              style={styles.calendarButton}
+              onPress={() => router.push("/holidays")}
+            >
+              <CalendarDays size={20} color="#2457D6" />
+            </TouchableOpacity>
+          </View>
+        ),
+        headerRightContainerStyle: { paddingRight: 16 },
         tabBarStyle: {
-          backgroundColor: "#0f172a",
-          borderTopColor: "#1e293b",
+          backgroundColor: "#FFFFFF",
+          borderTopColor: "#E8EDF4",
           borderTopWidth: 1,
-          height: 60,
-          paddingBottom: 8,
+          height: 59 + tabBarBottomInset,
+          paddingBottom: tabBarBottomInset,
           paddingTop: 8,
+          elevation: 10,
+          shadowColor: "#172B4D",
+          shadowOpacity: 0.08,
+          shadowRadius: 12,
+          shadowOffset: { width: 0, height: -3 },
         },
       }}
     >
@@ -98,22 +141,21 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="history"
         options={{
-          title: "My History",
-          tabBarLabel: "History",
-          tabBarIcon: ({ color, size }) => <History color={color} size={size} />,
+          title: "Attendance Register",
+          tabBarLabel: "Register",
+          tabBarIcon: ({ color, size }) => <CalendarDays color={color} size={size} />,
           href: isPersonal ? "/(tabs)/history" : null,
         }}
       />
       <Tabs.Screen
-        name="profile"
+        name="shifts"
         options={{
-          title: "Profile",
-          tabBarLabel: "Profile",
-          tabBarIcon: ({ color, size }) => <User color={color} size={size} />,
-          href: isPersonal ? "/(tabs)/profile" : null,
+          title: "My Shifts",
+          tabBarLabel: "Shifts",
+          tabBarIcon: ({ color, size }) => <CalendarClock color={color} size={size} />,
+          href: isPersonal ? "/(tabs)/shifts" : null,
         }}
       />
-      <Tabs.Screen name="holidays" options={{ title: "Holiday Calendar", href: null }} />
 
       {/* 2. Workspace Tabs - Visible to Managers / HR / Admin */}
       <Tabs.Screen
@@ -149,7 +191,7 @@ export default function TabsLayout() {
           title: "Staff Docs",
           tabBarLabel: "Docs Portal",
           tabBarIcon: ({ color, size }) => <Files color={color} size={size} />,
-          href: (isSystem && showWorkspace) ? "/(tabs)/employee-documents" : null,
+          href: (isSystem && showStaffDir) ? "/(tabs)/employee-documents" : null,
         }}
       />
 
@@ -169,7 +211,7 @@ export default function TabsLayout() {
           title: "Reports Desk",
           tabBarLabel: "Reports",
           tabBarIcon: ({ color, size }) => <FileSpreadsheet color={color} size={size} />,
-          href: (isSystem && showStaffDir) ? "/(tabs)/reports" : null,
+          href: null, // Restricted on mobile per Part 1 Enterprise Export Restrictions
         }}
       />
 
@@ -188,9 +230,51 @@ export default function TabsLayout() {
 }
 
 const styles = StyleSheet.create({
+  headerRightContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  profileButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    overflow: "hidden",
+    borderWidth: 2,
+    borderColor: "#D9E5FF",
+  },
+  calendarButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#EEF4FF",
+    borderWidth: 1,
+    borderColor: "#D9E5FF",
+  },
+  backButton: {
+    padding: 6,
+    marginLeft: 12,
+  },
+  profileImage: {
+    width: "100%",
+    height: "100%",
+  },
+  profileInitial: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#2457D6",
+  },
+  profileInitialText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "800",
+  },
   loadingContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     alignItems: "center",
     justifyContent: "center",
   },

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { authenticate, authorize, authenticateRealtime } from "../middleware/auth.js";
+import { authenticate, authorize, authenticateRealtime, restrictMobileEmployeeCreation, restrictMobileDataExport } from "../middleware/auth.js";
 import { upload } from "../middleware/upload.js";
 import {
   validate,
@@ -12,7 +12,10 @@ import {
   changePasswordSchema,
   createEmployeeSchema,
   updateEmployeeSchema,
-  uploadDocumentSchema
+  uploadDocumentSchema,
+  registerDocumentSchema,
+  auditLogsQuerySchema,
+  paramIdSchema
 } from "../middleware/validation.js";
 import * as c from "../controllers/accounts.controller.js";
 import { attachTenantContext } from "../utils/tenant.js";
@@ -33,6 +36,7 @@ r.post(
   "/create-employee/",
   authenticate,
   attachTenantContext,
+  restrictMobileEmployeeCreation,
   authorize(["admin", "hr", "superadmin"]),
   upload.fields([
     { name: "photo_copy", maxCount: 1 },
@@ -48,11 +52,12 @@ r.post(
   c.createEmployee
 );
 
-r.get("/admin-summary/", authenticate, authorize(["admin", "superadmin"]), c.adminSummary);
+r.get("/admin-summary/", authenticate, attachTenantContext, authorize(["admin", "superadmin"]), c.adminSummary);
 r.get("/managers/", authenticate, authorize(["admin", "hr", "superadmin"]), c.managers);
 r.get("/employees/", authenticate, attachTenantContext, authorize(["admin", "hr", "superadmin"]), c.employees);
 r.put("/employees/:user_id/", authenticate, attachTenantContext, authorize(["admin", "hr", "superadmin"]), validate(updateEmployeeSchema), c.updateEmployee);
 r.delete("/employees/:user_id/", authenticate, attachTenantContext, authorize(["admin", "superadmin"]), c.deleteEmployee);
+
 
 // Document upload & retrieval endpoints
 r.post(
@@ -64,7 +69,7 @@ r.post(
 );
 
 r.get("/documents/my/", authenticate, c.myDocuments);
-r.get("/documents/:user_id/", authenticate, attachTenantContext, authorize(["admin", "hr", "manager", "superadmin"]), c.employeeDocuments);
+r.get("/documents/:user_id/", authenticate, attachTenantContext, authorize(["admin", "hr", "manager", "superadmin"]), validate(paramIdSchema("user_id")), c.employeeDocuments);
 
 // Cloudinary signature, direct document registration, and secure detail endpoints
 import rateLimit from "express-rate-limit";
@@ -77,12 +82,13 @@ const signatureLimiter = rateLimit({
 });
 
 r.get("/cloudinary/signature/", authenticate, signatureLimiter, c.getCloudinarySignature);
-r.post("/documents/register/", authenticate, c.registerDirectDocument);
-r.get("/documents/detail/:id/", authenticate, c.getDocumentDetailRedirect);
-r.get("/documents/download/:id/", authenticate, attachTenantContext, c.downloadDocument);
-r.delete("/documents/:id/", authenticate, attachTenantContext, authorize(["superadmin"]), c.deleteDocument);
-r.get("/audit-logs/", authenticate, authorize(["superadmin"]), c.getAuditLogs);
+r.post("/documents/register/", authenticate, validate(registerDocumentSchema), c.registerDirectDocument);
+r.get("/documents/detail/:id/", authenticate, restrictMobileDataExport, validate(paramIdSchema("id")), c.getDocumentDetailRedirect);
+r.get("/documents/download/:id/", authenticate, attachTenantContext, restrictMobileDataExport, validate(paramIdSchema("id")), c.downloadDocument);
+r.delete("/documents/:id/", authenticate, attachTenantContext, authorize(["superadmin"]), validate(paramIdSchema("id")), c.deleteDocument);
+r.get("/audit-logs/", authenticate, authorize(["superadmin"]), validate(auditLogsQuerySchema), c.getAuditLogs);
 r.post("/realtime/ticket/", authenticate, c.createRealtimeTicket);
 r.get("/realtime/", authenticateRealtime, c.realtimeUpdatesStream);
+r.get("/realtime/sync/", authenticate, attachTenantContext, c.realtimeSync);
 
 export default r;

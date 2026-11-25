@@ -21,15 +21,15 @@ export function localDateInTimezone(value = new Date(), timezone = "Asia/Kolkata
 }
 
 export function financialYearStart(date, month = 4, day = 1) {
-  const text = String(date).slice(0, 10);
+  const text = dateString(date);
   const [year, currentMonth, currentDay] = text.split("-").map(Number);
   const startYear = currentMonth < month || (currentMonth === month && currentDay < day) ? year - 1 : year;
   return `${startYear}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 export function splitLeaveDaysByFinancialYear(fromDate, toDate, month = 4, day = 1) {
-  const start = new Date(`${String(fromDate).slice(0, 10)}T00:00:00Z`);
-  const end = new Date(`${String(toDate).slice(0, 10)}T00:00:00Z`);
+  const start = new Date(`${dateString(fromDate)}T00:00:00Z`);
+  const end = new Date(`${dateString(toDate)}T00:00:00Z`);
   if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end < start) return [];
   const portions = new Map();
   for (const current = new Date(start); current <= end; current.setUTCDate(current.getUTCDate() + 1)) {
@@ -54,9 +54,9 @@ async function financialSchemaReady() {
 async function legacyBalance(userId, tenantId, leaveType, asOf, tx) {
   const profile = await db.get("SELECT leave_allotted FROM accounts_employeeprofile WHERE user_id=?", [userId], tx);
   const typeFilter = leaveType ? " AND leave_type=?" : "";
-  const approved = await db.get(`SELECT COALESCE(SUM(GREATEST(0,DATEDIFF(LEAST(to_date,?),from_date)+1)),0) AS days
-    FROM leave_leave WHERE tenant_id=? AND user_id=? AND status='approved' AND from_date<=?${typeFilter}`,
-  [asOf, tenantId, userId, asOf, ...(leaveType ? [leaveType] : [])], tx);
+  const approved = await db.get(`SELECT COALESCE(SUM(GREATEST(0,DATEDIFF(to_date,from_date)+1)),0) AS days
+    FROM leave_leave WHERE tenant_id=? AND user_id=? AND status='approved'${typeFilter}`,
+  [tenantId, userId, ...(leaveType ? [leaveType] : [])], tx);
   const pending = await db.get(`SELECT COUNT(*) AS requests,COALESCE(SUM(GREATEST(0,DATEDIFF(to_date,from_date)+1)),0) AS days
     FROM leave_leave WHERE tenant_id=? AND user_id=? AND status='pending'${typeFilter}`,
   [tenantId, userId, ...(leaveType ? [leaveType] : [])], tx);
@@ -282,8 +282,8 @@ export const financialLeaveService = {
 
   async splitFinancialYearDays(tenantId, fromDate, toDate, tx = null) {
     if (!(await financialSchemaReady())) return splitLeaveDaysByFinancialYear(fromDate, toDate);
-    const start = new Date(`${String(fromDate).slice(0, 10)}T00:00:00Z`);
-    const end = new Date(`${String(toDate).slice(0, 10)}T00:00:00Z`);
+    const start = new Date(`${dateString(fromDate)}T00:00:00Z`);
+    const end = new Date(`${dateString(toDate)}T00:00:00Z`);
     if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end < start) return [];
     const policies = await db.all("SELECT effective_from_fy_start,financial_year_start_month,financial_year_start_day FROM workforce_leave_policy_version WHERE tenant_id=? AND status='published' ORDER BY effective_from_fy_start", [tenantId], tx);
     const portions = new Map();
@@ -307,7 +307,7 @@ export const financialLeaveService = {
     for (const portion of portions) {
       const policy = await getPolicyForYear(tenantId, portion.financial_year_start, tx);
       const code = policy?.legacy_shared_pool_enabled ? LEGACY_LEAVE_CODE : leaveType;
-      const requestedStart = String(fromDate).slice(0, 10);
+      const requestedStart = dateString(fromDate);
       const effectiveDate = requestedStart > portion.financial_year_start ? requestedStart : portion.financial_year_start;
       const before = await this.getBalance(userId, tenantId, leaveType, effectiveDate, tx);
       const after = before.available_balance - portion.days;
@@ -369,12 +369,15 @@ export const financialLeaveService = {
     const ledgerTotals = await db.get(`SELECT
         COALESCE(SUM(CASE WHEN transaction_type='consumption' THEN -amount ELSE 0 END),0) AS used,
         COALESCE(SUM(CASE WHEN transaction_type IN ('accrual','adjustment','reversal') THEN amount ELSE 0 END),0) AS delta
-      FROM workforce_leave_ledger_transaction WHERE tenant_id=? AND user_id=? AND leave_code=? AND financial_year_start=? AND effective_date<=?`, [tenantId, userId, code || LEGACY_LEAVE_CODE, yearStart, dateInCompanyTz], tx);
+      FROM workforce_leave_ledger_transaction WHERE tenant_id=? AND user_id=? AND leave_code=? AND financial_year_start=?`, [tenantId, userId, code || LEGACY_LEAVE_CODE, yearStart], tx);
     const includeAllTypes = !leaveType || code === LEGACY_LEAVE_CODE;
     const approvedTypeFilter = includeAllTypes ? "" : " AND leave_type=?";
     const approvedParams = [yearEnd, yearStart, tenantId, userId, ...(includeAllTypes ? [] : [leaveType])];
-    const liveApproved = entitlement ? Number(ledgerTotals?.used || 0) : Number((await db.get(`SELECT COALESCE(SUM(GREATEST(0,DATEDIFF(LEAST(to_date,?),GREATEST(from_date,?))+1)),0) AS days
-      FROM leave_leave WHERE tenant_id=? AND user_id=? AND status='approved'${approvedTypeFilter}`, approvedParams, tx))?.days || 0);
+    const directApproved = await db.get(`SELECT COALESCE(SUM(GREATEST(0,DATEDIFF(LEAST(to_date,?),GREATEST(from_date,?))+1)),0) AS days
+      FROM leave_leave WHERE tenant_id=? AND user_id=? AND status='approved'${approvedTypeFilter}`, approvedParams, tx);
+    const directApprovedDays = Number(directApproved?.days || 0);
+    const ledgerUsed = Number(ledgerTotals?.used || 0);
+    const liveApproved = Math.max(ledgerUsed, directApprovedDays);
     const concessionTypeFilter = leaveType ? " AND leave_type=?" : "";
     const concessionParams = [tenantId, userId, dateInCompanyTz, dateInCompanyTz, ...(leaveType ? [leaveType] : [])];
     const concessions = await db.get(`SELECT COALESCE(SUM(adjustment_days),0) AS days FROM leave_concession_ledger

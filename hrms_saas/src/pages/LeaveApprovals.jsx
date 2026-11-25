@@ -130,7 +130,7 @@ const capitalize = (value) =>
 export default function LeaveApprovals() {
   const { showPopup } = usePopup();
   const { role: authRole } = useAuth();
-  const role = authRole || localStorage.getItem("role") || "hr";
+  const role = authRole || "";
   const { querySiteId } = useSite();
   const hero = heroByRole[role] || heroByRole.hr;
 

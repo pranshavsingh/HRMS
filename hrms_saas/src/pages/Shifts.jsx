@@ -30,8 +30,10 @@ import Loader from "../components/common/Loader";
 import { shiftsApi } from "../api/shifts.api";
 import { usePopup } from "../context/PopupContext";
 import { useAuth } from "../context/AuthContext";
+import { useRealtime } from "../context/RealtimeContext";
 import SiteManagement from "./SiteManagement";
 import { useSite } from "../context/SiteContext";
+import { getCompanyLocalDate } from "../utils/date";
 
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -108,7 +110,7 @@ export default function Shifts() {
 
   const initialCompanyPolicy = {
     name: "Company Attendance Policy",
-    effective_from: new Date().toISOString().slice(0, 10),
+    effective_from: getCompanyLocalDate(),
     min_rest_period_minutes: 660,
     grace_period_in_minutes: 15,
     early_departure_grace_minutes: 15,
@@ -125,7 +127,7 @@ export default function Shifts() {
     code: "WEEKLY_OFF",
     name: "Company Weekly Off",
     description: "",
-    effective_from: new Date().toISOString().slice(0, 10),
+    effective_from: getCompanyLocalDate(),
     days_of_week: [0],
   };
   const [weeklyOffForm, setWeeklyOffForm] = useState(initialWeeklyOff);
@@ -150,7 +152,7 @@ export default function Shifts() {
     end_time: "17:00",
     late_grace_minutes: 15,
     early_departure_grace_minutes: 15,
-    effective_from: new Date().toISOString().slice(0, 10),
+    effective_from: getCompanyLocalDate(),
     is_active: true,
     breaks: [],
   };
@@ -218,6 +220,21 @@ export default function Shifts() {
     loadShifts(1);
   }, [loadShifts]);
 
+  useRealtime("schedule_update", () => {
+    loadShifts(pagination.page || 1);
+  });
+  useRealtime("policy:updated", () => {
+    if (activeTab === "policies" || activeTab === "weekly-off") {
+      loadPolicies(activeTab);
+    }
+  });
+  useRealtime("realtime:connected", () => {
+    loadShifts(pagination.page || 1);
+    if (activeTab === "policies" || activeTab === "weekly-off") {
+      loadPolicies(activeTab);
+    }
+  });
+
   const loadPolicies = useCallback(async (tab) => {
     if (tab !== "policies" && tab !== "weekly-off") return;
     setPolicyLoading(true);
@@ -253,7 +270,7 @@ export default function Shifts() {
       if (existing) {
         setCompanyPolicyForm({
           name: existing.name || "Company Attendance Policy",
-          effective_from: new Date().toISOString().slice(0, 10),
+          effective_from: getCompanyLocalDate(),
           min_rest_period_minutes: existing.min_rest_period_minutes ?? 660,
           grace_period_in_minutes: existing.grace_period_in_minutes ?? 15,
           early_departure_grace_minutes: existing.early_departure_grace_minutes ?? 15,
@@ -279,7 +296,7 @@ export default function Shifts() {
           code: existing.code || "WEEKLY_OFF",
           name: existing.name || "Company Weekly Off",
           description: existing.description || "",
-          effective_from: new Date().toISOString().slice(0, 10),
+          effective_from: getCompanyLocalDate(),
           days_of_week: Array.isArray(days) ? days : [0],
         });
       } else {
@@ -395,7 +412,7 @@ export default function Shifts() {
       end_time: shift.end_time?.slice(0, 5) || "17:00",
       late_grace_minutes: lateGrace,
       early_departure_grace_minutes: earlyGrace,
-      effective_from: new Date().toISOString().slice(0, 10),
+      effective_from: getCompanyLocalDate(),
       is_active: Boolean(shift.is_active),
       breaks: shiftBreaks.map((b) => ({
         break_name: b.break_name || "Break",
@@ -706,7 +723,7 @@ export default function Shifts() {
           </nav>
 
           {/* TAB 1: WORK SITES */}
-          {activeTab === "sites" && canManageSites && <SiteManagement />}
+          {activeTab === "sites" && canManageSites && <SiteManagement embedded />}
 
           {/* TAB 2: GENERAL SHIFTS LIST */}
           {activeTab === "shifts" && (
@@ -864,7 +881,7 @@ export default function Shifts() {
                                   onClick={() => handleOpenHistory(shift)}
                                   aria-label={`View version history for ${shift.name}`}
                                 >
-                                  v{shift.version_number || 1}
+                                  v{shift.current_version_number || shift.version_number || 1}
                                 </button>
                               </td>
                               <td>{shift.effective_from ? String(shift.effective_from).slice(0, 10) : "—"}</td>
@@ -1004,7 +1021,7 @@ export default function Shifts() {
                             <p className="font-semibold">{s.name}</p>
                             <span className="font-mono text-[10px] text-gray-500">{s.code}</span>
                           </div>
-                          <span className="shift-version">v{s.version_number || 1}</span>
+                          <span className="shift-version">v{s.current_version_number || s.version_number || 1}</span>
                         </button>
                       ))}
                     </div>
@@ -1048,7 +1065,7 @@ export default function Shifts() {
                           </thead>
                           <tbody>
                             {versionTabVersions.map((v) => {
-                              const isCurrent = v.effective_to === null;
+                              const isCurrent = v.status ? v.status === "published" : v.effective_to === null;
                               // BUG-SH10: Safe date formatting without UTC shifting
                               const effFrom = v.effective_from ? String(v.effective_from).slice(0, 10) : "--";
                               const effTo = v.effective_to ? String(v.effective_to).slice(0, 10) : "Present";
@@ -1728,7 +1745,7 @@ export default function Shifts() {
                   </div>
                   <div>
                     <h3 className="text-lg font-bold text-white">Edit Shift Configuration</h3>
-                    <p className="text-xs text-gray-400">Current active version: v{selectedShift.version_number || 1}</p>
+                    <p className="text-xs text-gray-400">Current active version: v{selectedShift.current_version_number || selectedShift.version_number || 1}</p>
                   </div>
                 </div>
                 <button
@@ -1747,7 +1764,7 @@ export default function Shifts() {
                       <Layers size={14} /> Immutable Versioning Will Be Triggered
                     </div>
                     <p className="text-amber-200/80 leading-relaxed">
-                      You are changing schedule timings, grace periods, or breaks. A new version <strong>v{(selectedShift.version_number || 1) + 1}</strong> will automatically be created. Version v{selectedShift.version_number || 1} will be closed on the day prior to the effective date. Past roster entries remain permanently untouched.
+                      You are changing schedule timings, grace periods, or breaks. A new version <strong>v{(selectedShift.current_version_number || selectedShift.version_number || 1) + 1}</strong> will automatically be created. Version v{selectedShift.current_version_number || selectedShift.version_number || 1} will be closed on the day prior to the effective date. Past roster entries remain permanently untouched.
                     </p>
                   </div>
                 ) : (
@@ -2081,7 +2098,7 @@ export default function Shifts() {
                         </thead>
                         <tbody className="divide-y divide-gray-800/60">
                           {shiftVersions.map((v) => {
-                            const isCurrent = v.effective_to === null;
+                            const isCurrent = v.status ? v.status === "published" : v.effective_to === null;
                             // BUG-SH10: Date string safe slice without UTC conversion rollback
                             const effFrom = v.effective_from ? String(v.effective_from).slice(0, 10) : "--";
                             const effTo = v.effective_to ? String(v.effective_to).slice(0, 10) : "Present";

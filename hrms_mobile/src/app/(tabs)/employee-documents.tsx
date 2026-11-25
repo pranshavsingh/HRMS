@@ -12,9 +12,11 @@ import {
 } from "react-native";
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
+import { useAuth } from "../../context/AuthContext";
 import * as WebBrowser from "expo-web-browser";
-import { Users, FileText, Search, Eye, ExternalLink, ShieldCheck, FolderOpen, X } from "lucide-react-native";
+import { Users, FileText, Search, Eye, ExternalLink, ShieldCheck, FolderOpen, X, ShieldAlert } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { formatCompanyDate } from "../../utils/date";
 
 interface Employee {
   id: number;
@@ -32,6 +34,9 @@ interface DocumentRecord {
 }
 
 export default function EmployeeDocumentsScreen() {
+  const { user } = useAuth();
+  const isAuthorized = user && ["hr", "admin", "superadmin"].includes(user.role?.toLowerCase());
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -42,10 +47,21 @@ export default function EmployeeDocumentsScreen() {
   const [docsLoading, setDocsLoading] = useState(false);
 
   const fetchEmployees = useCallback(async (showLoader = true) => {
+    if (!isAuthorized) {
+      setLoading(false);
+      return;
+    }
     if (showLoader) setLoading(true);
     try {
       const res = await api.get("/auth/employees/");
-      setEmployees(Array.isArray(res.data) ? res.data : []);
+      const empList = Array.isArray(res.data)
+        ? res.data
+        : Array.isArray(res.data?.data)
+        ? res.data.data
+        : Array.isArray(res.data?.records)
+        ? res.data.records
+        : [];
+      setEmployees(empList);
     } catch (err: any) {
       console.error("Error fetching employees in documents", err);
       Alert.alert("Sync Error", "Unable to load employees list.");
@@ -53,13 +69,20 @@ export default function EmployeeDocumentsScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [isAuthorized]);
 
   const fetchDocuments = async (userId: number) => {
     setDocsLoading(true);
     try {
       const res = await api.get(`/auth/documents/${userId}/`);
-      setDocuments(Array.isArray(res.data) ? res.data : []);
+      const docList = Array.isArray(res.data)
+        ? res.data
+        : Array.isArray(res.data?.data)
+        ? res.data.data
+        : Array.isArray(res.data?.records)
+        ? res.data.records
+        : [];
+      setDocuments(docList);
     } catch (err: any) {
       console.error("Error fetching employee docs", err);
       Alert.alert("Sync Error", "Unable to load files list for this employee.");
@@ -70,9 +93,22 @@ export default function EmployeeDocumentsScreen() {
   };
 
   useRealtime("employee_update", () => fetchEmployees(false));
+  useRealtime("document_update", () => {
+    fetchEmployees(false);
+    if (selectedEmp) {
+      fetchDocuments(selectedEmp.id);
+    }
+  });
+  useRealtime("realtime:connected", () => {
+    fetchEmployees(false);
+    if (selectedEmp) {
+      fetchDocuments(selectedEmp.id);
+    }
+  });
 
   useEffect(() => {
-    fetchEmployees(true);
+    const t = setTimeout(() => { void fetchEmployees(true); }, 0);
+    return () => clearTimeout(t);
   }, [fetchEmployees]);
 
   const onRefresh = () => {
@@ -96,8 +132,14 @@ export default function EmployeeDocumentsScreen() {
   const handleOpenDocument = async (url: string) => {
     if (!url) return;
     try {
-      await WebBrowser.openBrowserAsync(url);
-    } catch (err) {
+      let fullUrl = url;
+      if (url.startsWith("/")) {
+        const base = api.defaults.baseURL || "";
+        const origin = base.replace(/\/api\/?$/, "");
+        fullUrl = `${origin}${url}`;
+      }
+      await WebBrowser.openBrowserAsync(fullUrl);
+    } catch {
       Alert.alert("Error", "Could not open document viewer.");
     }
   };
@@ -112,6 +154,22 @@ export default function EmployeeDocumentsScreen() {
         emp.last_name?.toLowerCase().includes(query)
     );
   }, [employees, searchQuery]);
+
+  if (!isAuthorized) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
+        <View style={styles.emptyContainer}>
+          <ShieldAlert size={44} color="#ef4444" style={{ marginBottom: 12 }} />
+          <Text style={[styles.emptyText, { fontWeight: "700", fontSize: 16, color: "#f87171" }]}>
+            Access Restricted
+          </Text>
+          <Text style={[styles.emptyText, { marginTop: 6, textAlign: "center", paddingHorizontal: 20 }]}>
+            Only HR and Administration roles are authorized to access the staff compliance documents desk.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   // --- RENDER EMPLOYEE LIST (CHOOSE MEMBER) ---
   if (!selectedEmp) {
@@ -204,7 +262,7 @@ export default function EmployeeDocumentsScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.docTitle}>{item.title}</Text>
                   <Text style={styles.docDate}>
-                    Uploaded: {new Date(item.uploaded_at).toLocaleDateString("en-IN")}
+                    Uploaded: {formatCompanyDate(item.uploaded_at)}
                   </Text>
                 </View>
               </View>

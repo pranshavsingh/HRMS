@@ -1,6 +1,7 @@
 import Redis from "ioredis";
 import { config } from "../config/env.js";
 import logger from "./logger.js";
+import { realtimeService } from "../services/realtime.service.js";
 
 let clients = [];
 let pubClient = null;
@@ -68,6 +69,11 @@ function dispatchLocal(eventName, data, filter = {}) {
 
   clients.forEach((client) => {
     try {
+      // 0. Tenant isolation
+      if (filter.tenantId != null && client.tenantId != null && Number(client.tenantId) !== Number(filter.tenantId)) {
+        return;
+      }
+
       // 1. Role-based targeting
       if (filter.targetRoles && filter.targetRoles.length > 0) {
         if (!filter.targetRoles.includes(client.role)) {
@@ -106,6 +112,7 @@ export const realtimeManager = {
       userId: user.id,
       role: user.role,
       username: user.username,
+      tenantId: user.tenant_id || user.organization_id || null,
     };
     clients.push(client);
     logger.info(`[Realtime] SSE client connected: User [${user.username}], Role [${user.role}]. Total local: ${clients.length}`);
@@ -117,12 +124,22 @@ export const realtimeManager = {
   },
 
   /**
-   * Broadcast an event across all cluster workers via Redis Pub/Sub.
+   * Broadcast an event across all cluster workers via Redis Pub/Sub,
+   * AND simultaneously dispatch to Socket.IO clients via realtimeService!
+   * 
    * @param {string} eventName - Name of the event
    * @param {object} data - Payload data
-   * @param {object} filter - Optional { targetRoles: string[], targetUserIds: number[] }
+   * @param {object} filter - Optional { targetRoles: string[], targetUserIds: number[], tenantId: number }
    */
   broadcast(eventName, data, filter = {}) {
+    // 1. Dispatch over Socket.IO across all connected Web and Mobile clients
+    try {
+      realtimeService.broadcastMapped(eventName, data, filter);
+    } catch (err) {
+      logger.warn(`[Realtime] Error during Socket.IO broadcast of ${eventName}: ${err.message}`);
+    }
+
+    // 2. Dispatch over SSE stream for fallback consumers
     const message = JSON.stringify({ eventName, data, filter });
 
     if (pubClient && pubClient.status === "ready") {

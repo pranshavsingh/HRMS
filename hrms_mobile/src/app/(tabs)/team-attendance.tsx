@@ -14,19 +14,20 @@ import {
 } from "react-native";
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
-import { 
-  Users, 
-  Search, 
-  Calendar, 
-  Clock, 
-  X, 
-  MapPin, 
-  User, 
-  TrendingUp, 
-  CheckCircle2, 
-  AlertCircle 
+import {
+  Users,
+  Search,
+  Calendar,
+  Clock,
+  X,
+  MapPin,
+  User,
+  TrendingUp,
+  CheckCircle2,
+  AlertCircle
 } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { formatCompanyDate } from "../../utils/date";
 
 interface RegisterRow {
   employee_id: number;
@@ -41,7 +42,8 @@ interface RegisterRow {
 interface RegisterDate {
   date: string;
   day: number;
-  day_name: string;
+  weekday?: string;
+  day_name?: string;
 }
 
 export default function TeamAttendanceScreen() {
@@ -62,7 +64,7 @@ export default function TeamAttendanceScreen() {
     if (showLoader) setLoading(true);
     try {
       const res = await api.get("/attendance/team-attendance/", {
-        params: { month: monthStr },
+        params: { month: monthStr, page: "all" },
       });
       const payload = res.data || {};
       setSummary(payload.summary || null);
@@ -96,9 +98,11 @@ export default function TeamAttendanceScreen() {
 
   useRealtime("attendance_update", () => fetchTeamAttendanceList(selectedMonth, false));
   useRealtime("leave_update", () => fetchTeamAttendanceList(selectedMonth, false));
+  useRealtime("realtime:connected", () => fetchTeamAttendanceList(selectedMonth, false));
 
   useEffect(() => {
-    fetchTeamAttendanceList(selectedMonth, true);
+    const t = setTimeout(() => { void fetchTeamAttendanceList(selectedMonth, true); }, 0);
+    return () => clearTimeout(t);
   }, [selectedMonth, fetchTeamAttendanceList]);
 
   const onRefresh = () => {
@@ -143,7 +147,7 @@ export default function TeamAttendanceScreen() {
       <TouchableOpacity style={styles.card} onPress={() => setSelectedRow(item)}>
         <View style={styles.cardHeader}>
           <View style={styles.userRow}>
-            <User size={14} color="#94a3b8" />
+            <User size={14} color="#68758A" />
             <Text style={styles.employeeName}>{item.employee_name}</Text>
           </View>
           <Text style={styles.codeText}>{item.employee_code}</Text>
@@ -152,7 +156,7 @@ export default function TeamAttendanceScreen() {
         <View style={styles.cardContent}>
           <Text style={styles.usernameText}>Username: {item.username}</Text>
           <View style={styles.statusRow}>
-            <Text style={styles.statusLabel}>Today's Status:</Text>
+            <Text style={styles.statusLabel}>Today&apos;s Status:</Text>
             <View style={[styles.statusBadge, status.style]}>
               <Text style={[styles.statusBadgeText, status.textStyle]}>{status.text}</Text>
             </View>
@@ -167,11 +171,11 @@ export default function TeamAttendanceScreen() {
       {/* Top Filter and Search Bar */}
       <View style={styles.filterSection}>
         <View style={styles.searchRow}>
-          <Search size={16} color="#64748b" style={styles.searchIcon} />
+          <Search size={16} color="#68758A" style={styles.searchIcon} />
           <TextInput
             style={styles.searchInput}
             placeholder="Search team roster..."
-            placeholderTextColor="#64748b"
+            placeholderTextColor="#8995A7"
             value={searchQuery}
             onChangeText={setSearchQuery}
           />
@@ -233,17 +237,17 @@ export default function TeamAttendanceScreen() {
         renderItem={renderRosterItem}
         contentContainerStyle={styles.listContent}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#10b981" />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
         }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <Users size={32} color="#64748b" />
-            <Text style={styles.emptyText}>No matching employee records in current register.</Text>
+            <Users size={36} color="#8995A7" />
+            <Text style={styles.emptyText}>No matching members found in team register.</Text>
           </View>
         }
       />
 
-      {/* --- EMPLOYEE CALENDAR TIMELINE DETAIL MODAL --- */}
+      {/* --- EMPLOYEE MONTHLY LEDGER DETAIL MODAL --- */}
       <Modal
         visible={selectedRow !== null}
         transparent
@@ -262,7 +266,7 @@ export default function TeamAttendanceScreen() {
                   </Text>
                 </View>
                 <TouchableOpacity onPress={() => setSelectedRow(null)} style={styles.closeBtn}>
-                  <X size={20} color="#ffffff" />
+                  <X size={20} color="#152238" />
                 </TouchableOpacity>
               </View>
 
@@ -279,7 +283,7 @@ export default function TeamAttendanceScreen() {
                         <View style={styles.timelineLeft}>
                           <Text style={styles.timelineDayNum}>{dateObj.day}</Text>
                           <Text style={styles.timelineDayName}>
-                            {dateObj.day_name} ({dateObj.date.substring(5)})
+                            {dateObj.weekday || dateObj.day_name || ""} • {formatCompanyDate(dateObj.date)}
                           </Text>
                         </View>
                         <View style={[styles.timelineBadge, status.style]}>
@@ -302,37 +306,37 @@ export default function TeamAttendanceScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
   },
   loadingContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     alignItems: "center",
     justifyContent: "center",
   },
   filterSection: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderBottomWidth: 1,
-    borderBottomColor: "#33415550",
+    borderBottomColor: "#E5EAF2",
     padding: 16,
   },
   searchRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#0f172a",
-    borderRadius: 14,
+    backgroundColor: "#F8FAFC",
+    borderRadius: 12,
     paddingHorizontal: 12,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   searchIcon: {
     marginRight: 8,
   },
   searchInput: {
-    color: "#ffffff",
+    color: "#152238",
     flex: 1,
     height: 40,
-    fontSize: 14,
+    fontSize: 13,
   },
   monthSelectorRow: {
     flexDirection: "row",
@@ -340,7 +344,7 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   monthLabel: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 12,
     fontWeight: "700",
   },
@@ -350,23 +354,24 @@ const styles = StyleSheet.create({
   monthPill: {
     paddingHorizontal: 14,
     paddingVertical: 6,
-    borderRadius: 10,
-    backgroundColor: "#0f172a",
+    borderRadius: 16,
+    backgroundColor: "#F1F5F9",
     marginHorizontal: 4,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   monthPillActive: {
-    borderColor: "#10b981",
-    backgroundColor: "#10b98115",
+    borderColor: "#2457D6",
+    backgroundColor: "#EAF0FF",
   },
   monthPillText: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 11,
-    fontWeight: "700",
+    fontWeight: "600",
   },
   monthPillTextActive: {
-    color: "#10b981",
+    color: "#2457D6",
+    fontWeight: "700",
   },
   // Stats Section
   statsSection: {
@@ -379,21 +384,25 @@ const styles = StyleSheet.create({
   },
   statBox: {
     width: "23%",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
     borderRadius: 14,
     paddingVertical: 10,
     alignItems: "center",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 1,
   },
   statVal: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 18,
     fontWeight: "800",
   },
   statLbl: {
-    color: "#64748b",
-    fontSize: 8,
+    color: "#68758A",
+    fontSize: 9,
     textTransform: "uppercase",
     fontWeight: "700",
     marginTop: 4,
@@ -404,19 +413,23 @@ const styles = StyleSheet.create({
   },
   // Roster item cards
   card: {
-    backgroundColor: "#1e293b",
-    borderRadius: 20,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 18,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 1,
   },
   cardHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     borderBottomWidth: 1,
-    borderBottomColor: "#33415540",
+    borderBottomColor: "#EDF1F6",
     paddingBottom: 8,
     marginBottom: 8,
   },
@@ -425,13 +438,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   employeeName: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
     fontWeight: "700",
     marginLeft: 6,
   },
   codeText: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 11,
     fontWeight: "600",
   },
@@ -439,7 +452,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   usernameText: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 12,
   },
   statusRow: {
@@ -448,7 +461,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   statusLabel: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 12,
     marginRight: 8,
   },
@@ -462,20 +475,20 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   // Badges Status Colors matching React codeStyles
-  badgeP: { backgroundColor: "#064e3b" },
-  textP: { color: "#34d399" },
-  badgeIP: { backgroundColor: "#083344" },
-  textIP: { color: "#22d3ee" },
-  badgePR: { backgroundColor: "#78350f" },
-  textPR: { color: "#fbbf24" },
-  badgeL: { backgroundColor: "#2e1065" },
-  textL: { color: "#c084fc" },
-  badgeA: { backgroundColor: "#7f1d1d" },
-  textA: { color: "#f87171" },
-  badgeWO: { backgroundColor: "#334155" },
-  textWO: { color: "#94a3b8" },
-  badgeNone: { backgroundColor: "#0f172a" },
-  textNone: { color: "#64748b" },
+  badgeP: { backgroundColor: "#DCFCE7" },
+  textP: { color: "#15803D" },
+  badgeIP: { backgroundColor: "#E0F2FE" },
+  textIP: { color: "#0369A1" },
+  badgePR: { backgroundColor: "#FEF3C7" },
+  textPR: { color: "#B45309" },
+  badgeL: { backgroundColor: "#F3E8FF" },
+  textL: { color: "#7E22CE" },
+  badgeA: { backgroundColor: "#FFE4E6" },
+  textA: { color: "#BE123C" },
+  badgeWO: { backgroundColor: "#F1F5F9" },
+  textWO: { color: "#68758A" },
+  badgeNone: { backgroundColor: "#F8FAFC" },
+  textNone: { color: "#8995A7" },
 
   emptyContainer: {
     alignItems: "center",
@@ -483,7 +496,7 @@ const styles = StyleSheet.create({
     paddingVertical: 80,
   },
   emptyText: {
-    color: "#64748b",
+    color: "#8995A7",
     fontSize: 13,
     marginTop: 12,
     textAlign: "center",
@@ -491,41 +504,41 @@ const styles = StyleSheet.create({
   // Modal detail Styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(15, 23, 42, 0.85)",
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
     justifyContent: "flex-end",
   },
   modalContent: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     padding: 20,
     maxHeight: "85%",
     borderTopWidth: 1,
-    borderTopColor: "#334155",
+    borderTopColor: "#E5EAF2",
   },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     borderBottomWidth: 1,
-    borderBottomColor: "#334155",
+    borderBottomColor: "#EDF1F6",
     paddingBottom: 14,
     marginBottom: 16,
   },
   modalTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 18,
     fontWeight: "800",
   },
   modalSub: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 12,
     marginTop: 2,
   },
   closeBtn: {
-    backgroundColor: "rgba(15, 23, 42, 0.75)",
+    backgroundColor: "#F1F5F9",
     padding: 6,
-    borderRadius: 14,
+    borderRadius: 12,
   },
   modalScroll: {
     paddingBottom: 24,
@@ -536,20 +549,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#33415560",
+    borderBottomColor: "#EDF1F6",
   },
   timelineLeft: {
     flexDirection: "row",
     alignItems: "center",
   },
   timelineDayNum: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 16,
     fontWeight: "800",
     width: 24,
   },
   timelineDayName: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 13,
     marginLeft: 10,
   },

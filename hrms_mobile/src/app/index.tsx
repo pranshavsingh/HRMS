@@ -12,6 +12,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Eye, EyeOff } from "lucide-react-native";
 import { useAuth } from "../context/AuthContext";
 import api from "../services/api";
 
@@ -19,6 +20,7 @@ export default function LoginScreen() {
   const { login } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
@@ -29,6 +31,7 @@ export default function LoginScreen() {
   const [otp, setOtp] = useState("");
   const [resetToken, setResetToken] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [showResetPassword, setShowResetPassword] = useState(false);
   const [forgotLoading, setForgotLoading] = useState(false);
   const [forgotMsg, setForgotMsg] = useState("");
 
@@ -91,11 +94,27 @@ export default function LoginScreen() {
     }
   };
 
+  const validatePasswordComplexity = (pwd: string) => {
+    if (pwd.length < 12) return "Password must be at least 12 characters.";
+    if (!/[A-Z]/.test(pwd)) return "Password must include at least one uppercase letter (A-Z).";
+    if (!/[a-z]/.test(pwd)) return "Password must include at least one lowercase letter (a-z).";
+    if (!/[0-9]/.test(pwd)) return "Password must include at least one number (0-9).";
+    if (!/[!@#$%^&*(),.?":{}|<>_\-]/.test(pwd)) return "Password must include at least one special character (!@#$%^&*...).";
+    return null;
+  };
+
   const handleResetPassword = async () => {
     if (!newPassword) {
       setForgotMsg("Please enter your new password");
       return;
     }
+
+    const complexityError = validatePasswordComplexity(newPassword);
+    if (complexityError) {
+      setForgotMsg(complexityError);
+      return;
+    }
+
     setForgotLoading(true);
     setForgotMsg("");
     try {
@@ -112,6 +131,7 @@ export default function LoginScreen() {
       setOtp("");
       setResetToken("");
       setNewPassword("");
+      setShowResetPassword(false);
       setForgotMsg("");
     } catch (err: any) {
       setForgotMsg(err.response?.data?.error || "Password reset failed");
@@ -159,16 +179,29 @@ export default function LoginScreen() {
 
                 <View style={styles.inputGroup}>
                   <Text style={styles.label}>Password</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="Enter your password"
-                    placeholderTextColor="#64748b"
-                    value={password}
-                    onChangeText={setPassword}
-                    secureTextEntry
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                  />
+                  <View style={styles.passwordInputContainer}>
+                    <TextInput
+                      style={[styles.input, styles.passwordInput]}
+                      placeholder="Enter your password"
+                      placeholderTextColor="#64748b"
+                      value={password}
+                      onChangeText={setPassword}
+                      secureTextEntry={!showPassword}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
+                    <TouchableOpacity
+                      style={styles.eyeBtn}
+                      onPress={() => setShowPassword(!showPassword)}
+                      accessibilityLabel={showPassword ? "Hide password" : "Show password"}
+                    >
+                      {showPassword ? (
+                        <EyeOff size={18} color="#94a3b8" />
+                      ) : (
+                        <Eye size={18} color="#94a3b8" />
+                      )}
+                    </TouchableOpacity>
+                  </View>
                 </View>
 
                 <TouchableOpacity
@@ -236,16 +269,32 @@ export default function LoginScreen() {
 
                 {forgotStep === 3 && (
                   <View style={styles.inputGroup}>
-                    <Text style={styles.label}>New Password</Text>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="Enter new password"
-                      placeholderTextColor="#64748b"
-                      value={newPassword}
-                      onChangeText={setNewPassword}
-                      secureTextEntry
-                      autoCapitalize="none"
-                    />
+                    <Text style={styles.label}>New Password (min 12 chars)</Text>
+                    <View style={styles.passwordInputContainer}>
+                      <TextInput
+                        style={[styles.input, styles.passwordInput]}
+                        placeholder="Enter new password (min 12 chars)"
+                        placeholderTextColor="#64748b"
+                        value={newPassword}
+                        onChangeText={setNewPassword}
+                        secureTextEntry={!showResetPassword}
+                        autoCapitalize="none"
+                      />
+                      <TouchableOpacity
+                        style={styles.eyeBtn}
+                        onPress={() => setShowResetPassword(!showResetPassword)}
+                        accessibilityLabel={showResetPassword ? "Hide password" : "Show password"}
+                      >
+                        {showResetPassword ? (
+                          <EyeOff size={18} color="#94a3b8" />
+                        ) : (
+                          <Eye size={18} color="#94a3b8" />
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={styles.passwordRequirementsText}>
+                      Must be 12+ characters with uppercase, lowercase, number, and special character.
+                    </Text>
                   </View>
                 )}
 
@@ -399,6 +448,26 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: "#ffffff",
   },
+  passwordInputContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    position: "relative",
+  },
+  passwordInput: {
+    flex: 1,
+    paddingRight: 48,
+  },
+  eyeBtn: {
+    position: "absolute",
+    right: 14,
+    padding: 6,
+  },
+  passwordRequirementsText: {
+    color: "#94a3b8",
+    fontSize: 11,
+    marginTop: 6,
+    lineHeight: 15,
+  },
   forgotLink: {
     alignSelf: "flex-end",
     marginBottom: 22,
@@ -409,7 +478,7 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   primaryButton: {
-    backgroundColor: "#6366f1", // Default indigo theme color for buttons
+    backgroundColor: "#6366f1",
     borderRadius: 16,
     paddingVertical: 14,
     alignItems: "center",

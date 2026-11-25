@@ -8,10 +8,11 @@ import {
   Alert,
   Image,
 } from "react-native";
-import { useAuth } from "../../context/AuthContext";
+import { useAuth } from "../context/AuthContext";
 import { User, LogOut, Mail, Award, Calendar, Bookmark } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
+import { formatCompanyDate } from "../utils/date";
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -101,7 +102,7 @@ export default function ProfileScreen() {
               <Calendar size={18} color="#64748b" style={styles.rowIcon} />
               <View>
                 <Text style={styles.detailLabel}>Joining Date</Text>
-                <Text style={styles.detailValue}>{user.joining_date}</Text>
+                <Text style={styles.detailValue}>{formatCompanyDate(user.joining_date)}</Text>
               </View>
             </View>
           )}
@@ -139,33 +140,38 @@ export default function ProfileScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
   },
   container: {
     padding: 16,
     paddingBottom: 40,
   },
   profileHeaderCard: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
     padding: 24,
     alignItems: "center",
-    marginBottom: 20,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   avatarCircle: {
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#EAF0FF",
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 2,
     marginBottom: 16,
   },
   profileName: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 20,
     fontWeight: "800",
     marginBottom: 8,
@@ -174,7 +180,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 12,
-    paddingVertical: 4,
+    paddingVertical: 5,
     borderRadius: 10,
     borderWidth: 1,
   },
@@ -184,21 +190,26 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
   },
   detailsBlock: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
     padding: 20,
-    marginBottom: 20,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   blockTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 15,
     fontWeight: "700",
     marginBottom: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#334155",
-    paddingBottom: 8,
+    borderBottomColor: "#EDF1F6",
+    paddingBottom: 10,
   },
   detailRow: {
     flexDirection: "row",
@@ -209,35 +220,35 @@ const styles = StyleSheet.create({
     marginRight: 14,
   },
   detailLabel: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 11,
     fontWeight: "600",
     textTransform: "uppercase",
   },
   detailValue: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "600",
+    color: "#152238",
+    fontSize: 15,
+    fontWeight: "700",
     marginTop: 2,
   },
   supportText: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 19,
   },
   logoutButton: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#7f1d1d20",
+    backgroundColor: "#FFF1F2",
     borderWidth: 1,
-    borderColor: "#ef444450",
+    borderColor: "#FECDD3",
     paddingVertical: 14,
     borderRadius: 16,
     marginTop: 10,
   },
   logoutButtonText: {
-    color: "#f87171",
+    color: "#E11D48",
     fontSize: 15,
     fontWeight: "700",
   },

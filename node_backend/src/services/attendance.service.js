@@ -36,11 +36,24 @@ function dbTimeToIso(dbVal) {
   return new Date(dbVal).toISOString();
 }
 
-function getLocalDateString() {
-  const d = new Date();
-  const offset = d.getTimezoneOffset();
-  const local = new Date(d.getTime() - offset * 60 * 1000);
-  return local.toISOString().slice(0, 10);
+export function getCompanyLocalDateString(date = new Date(), timezone = "Asia/Kolkata") {
+  const d = date instanceof Date ? date : new Date(date);
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+
+  const values = Object.fromEntries(
+    parts.map(({ type, value }) => [type, value])
+  );
+
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function getLocalDateString(date = new Date()) {
+  return getCompanyLocalDateString(date);
 }
 
 function getYYYYMMDD(val) {
@@ -150,23 +163,94 @@ export function getExceptionCategory(comment, type) {
   return type === "in" ? "location_in" : "location_out";
 }
 
-async function approvalRouteForUser(userId, tx = null) {
+async function approvalRouteForUser(userId, tx = null, tenantId = null) {
   const user = await accountsRepository.findById(userId, tx);
   const profile = await accountsRepository.findProfileByUserId(userId, tx);
-  const routeRoles = REVIEW_ROLES_BY_REQUESTOR[user?.role] || [];
+  let effectiveTenantId = tenantId;
+  if (effectiveTenantId == null) {
+    const membership = await db.get(
+      "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 LIMIT 1",
+      [userId],
+      tx
+    );
+    effectiveTenantId = membership?.tenant_id || 1;
+  }
   const route = [];
 
-  if (routeRoles.includes("manager") && profile?.manager_id) {
-    const manager = await accountsRepository.findById(profile.manager_id, tx);
-    if (manager && manager.is_active) route.push(manager);
+  if (user?.role === "employee") {
+    if (profile?.manager_id) {
+      const manager = await db.get(
+        `SELECT u.* FROM accounts_user u
+         JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+         WHERE u.id = ? AND u.is_active = 1 AND u.deleted_at IS NULL LIMIT 1`,
+        [effectiveTenantId, profile.manager_id],
+        tx
+      );
+      if (manager && Number(manager.id) !== Number(userId)) {
+        return [manager];
+      }
+    }
+    // Check if employee belongs to a team and route to that team's manager within the same tenant
+    if (profile?.team_name) {
+      const teamManager = await db.get(
+        `SELECT u.* FROM accounts_user u 
+         JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
+         JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+         WHERE u.role = 'manager' AND ep.team_name = ? AND u.is_active = 1 AND u.deleted_at IS NULL AND u.id <> ? LIMIT 1`,
+        [effectiveTenantId, profile.team_name, userId],
+        tx
+      );
+      if (teamManager) {
+        return [teamManager];
+      }
+    }
+    // Fallback: If no manager is assigned or active, route to eligible HR / Admin / Superadmin within the same tenant
+    const fallbackReviewers = await db.all(
+      `SELECT u.* FROM accounts_user u
+       JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+       WHERE u.role IN ('hr', 'admin', 'superadmin') AND u.is_active=1 AND u.deleted_at IS NULL AND u.id <> ?`,
+      [effectiveTenantId, userId],
+      tx
+    );
+    return fallbackReviewers;
+  }
+
+  const routeRoles = REVIEW_ROLES_BY_REQUESTOR[user?.role] || [];
+  if (routeRoles.includes("manager") && (profile?.manager_id || profile?.team_name)) {
+    if (profile?.manager_id) {
+      const manager = await db.get(
+        `SELECT u.* FROM accounts_user u
+         JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+         WHERE u.id = ? AND u.is_active = 1 AND u.deleted_at IS NULL LIMIT 1`,
+        [effectiveTenantId, profile.manager_id],
+        tx
+      );
+      if (manager && Number(manager.id) !== Number(userId)) {
+        route.push(manager);
+      }
+    } else if (profile?.team_name) {
+      const teamManager = await db.get(
+        `SELECT u.* FROM accounts_user u 
+         JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
+         JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+         WHERE u.role = 'manager' AND ep.team_name = ? AND u.is_active = 1 AND u.deleted_at IS NULL AND u.id <> ? LIMIT 1`,
+        [effectiveTenantId, profile.team_name, userId],
+        tx
+      );
+      if (teamManager) {
+        route.push(teamManager);
+      }
+    }
   }
 
   const globalRoles = routeRoles.filter((role) => role !== "manager");
   if (globalRoles.length) {
     const placeholders = globalRoles.map(() => "?").join(",");
     const reviewers = await db.all(
-      `SELECT * FROM accounts_user WHERE role IN (${placeholders}) AND is_active=1 AND deleted_at IS NULL`,
-      globalRoles,
+      `SELECT u.* FROM accounts_user u
+       JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+       WHERE u.role IN (${placeholders}) AND u.is_active=1 AND u.deleted_at IS NULL AND u.id <> ?`,
+      [effectiveTenantId, ...globalRoles, userId],
       tx
     );
     route.push(...reviewers);
@@ -185,7 +269,7 @@ async function approvalRouteForUser(userId, tx = null) {
 function approvalRouteLabel(employeeRole, managerName) {
   if (employeeRole === "employee") {
     return managerName
-      ? "Team Manager / HR / Admin / Superadmin"
+      ? "Team Manager"
       : "HR / Admin / Superadmin";
   }
   if (employeeRole === "manager") return "HR / Admin / Superadmin";
@@ -196,7 +280,7 @@ function approvalRouteLabel(employeeRole, managerName) {
 
 export const attendanceService = {
   async punchStatus(userId) {
-    const todayStr = getLocalDateString();
+    const todayStr = getCompanyLocalDateString();
     const onLeave = await db.get(
       "SELECT to_date FROM leave_leave WHERE user_id=? AND status='approved' AND ? BETWEEN from_date AND to_date LIMIT 1",
       [userId, todayStr]
@@ -249,12 +333,13 @@ export const attendanceService = {
       overtime_minutes: latest.overtime_minutes || 0,
     } : {};
 
-    if (!latest) {
+    if (!latest || latest.status === "leave" || latest.punch_in_status === "leave" || !latest.punch_in_time) {
       return {
         is_punched_in: false,
         punch_in_time: null,
         punch_in_status: null,
         scheduled_shift: scheduledShift,
+        ...latestShiftInfo,
         ...onLeaveInfo
       };
     }
@@ -284,7 +369,7 @@ export const attendanceService = {
       };
     }
 
-    if (latest.punch_out_time === null) {
+    if (latest.punch_out_time === null && latest.punch_in_time !== null) {
       return {
         is_punched_in: true,
         punch_in_time: dbTimeToIso(latest.punch_in_time),
@@ -325,7 +410,7 @@ export const attendanceService = {
     };
   },
 
-  async punchIn(userId, latitude, longitude, file, actor, directPath = null) {
+  async punchIn(userId, latitude, longitude, file, actor, directPath = null, accuracy = null) {
     const relativePath = directPath || (file ? await storageService.store(file, "attendance") : null);
     if (!relativePath) {
       throw new AppError("Photo is required for attendance punch", 400);
@@ -339,8 +424,16 @@ export const attendanceService = {
           throw new AppError("Active user account required", 400);
         }
 
+        // Validate coordinates and GPS accuracy (BUG-A10: 100m maximum acceptable accuracy tolerance)
+        if (!Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) {
+          throw new AppError("Invalid GPS coordinates. Finite latitude and longitude are required.", 400);
+        }
+        if (accuracy != null && Number.isFinite(Number(accuracy)) && Number(accuracy) > 100) {
+          throw new AppError(`GPS accuracy is too low (${Math.round(Number(accuracy))}m). A fix within 100m is required.`, 400);
+        }
+
         // 2. Check approved leave under lock
-        const todayStr = getLocalDateString();
+        const todayStr = getCompanyLocalDateString();
         const onLeave = await db.get(
           "SELECT to_date FROM leave_leave WHERE user_id=? AND status='approved' AND ? BETWEEN from_date AND to_date LIMIT 1",
           [userId, todayStr],
@@ -368,14 +461,20 @@ export const attendanceService = {
         }
 
         const punchInOutside = await isOutsideAllottedArea(userId, latitude, longitude, tx);
-        const reviewers = punchInOutside ? await approvalRouteForUser(userId, tx) : [];
-        const needsApproval = punchInOutside && reviewers.length > 0;
+        let reviewers = [];
+        if (punchInOutside) {
+          reviewers = await approvalRouteForUser(userId, tx);
+          if (!reviewers || reviewers.length === 0) {
+            throw new AppError("Out-of-geofence punch requires approval, but no eligible reviewers (manager, HR, or admin) are available.", 400);
+          }
+        }
+        const needsApproval = Boolean(punchInOutside);
 
         const punchInStatus = needsApproval ? "pending" : "approved";
         const attendanceStatus = needsApproval ? "pending" : "approved";
 
         const now = new Date();
-        const dateStr = getLocalDateString();
+        const dateStr = getCompanyLocalDateString(now);
 
         // 5. Resolve Tenant ID
         const tenantRow = await db.get(
@@ -472,7 +571,7 @@ export const attendanceService = {
     }
   },
 
-  async punchOut(userId, latitude, longitude, file, actor, directPath = null) {
+  async punchOut(userId, latitude, longitude, file, actor, directPath = null, accuracy = null) {
     const relativePath = directPath || (file ? await storageService.store(file, "attendance") : null);
     if (!relativePath) {
       throw new AppError("Photo is required for attendance punch", 400);
@@ -484,6 +583,14 @@ export const attendanceService = {
         const user = await db.get("SELECT id FROM accounts_user WHERE id = ? FOR UPDATE", [userId], tx);
         if (!user) {
           throw new AppError("User not found", 404);
+        }
+
+        // Validate coordinates and GPS accuracy (BUG-A10: 100m maximum acceptable accuracy tolerance)
+        if (!Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) {
+          throw new AppError("Invalid GPS coordinates. Finite latitude and longitude are required.", 400);
+        }
+        if (accuracy != null && Number.isFinite(Number(accuracy)) && Number(accuracy) > 100) {
+          throw new AppError(`GPS accuracy is too low (${Math.round(Number(accuracy))}m). A fix within 100m is required.`, 400);
         }
 
         // 2. Locate open attendance record
@@ -500,10 +607,13 @@ export const attendanceService = {
         const policyApprovalRequired = Boolean(outEval.earlyDepartureRequiresApproval || outEval.overtimeRequiresApproval);
         if (punchOutOutside || policyApprovalRequired) {
           reviewers = await approvalRouteForUser(userId, tx);
+          if (punchOutOutside && (!reviewers || reviewers.length === 0)) {
+            throw new AppError("Out-of-geofence punch-out requires approval, but no eligible reviewers (manager, HR, or admin) are available.", 400);
+          }
         }
 
         // Geofence location approval: affects punch_out_status and overall punch approval
-        const geofenceNeedsApproval = punchOutOutside && reviewers.length > 0;
+        const geofenceNeedsApproval = Boolean(punchOutOutside);
         const punchOutStatus = geofenceNeedsApproval ? "pending" : "approved";
         const nextAttendance = {
           ...att,
@@ -776,7 +886,21 @@ export const attendanceService = {
         throw new AppError("You cannot approve your own exception request", 403);
       }
       if (actor.role !== "superadmin") {
-        if (Number(ap.approved_by_id) !== Number(actor.id)) {
+        let isAuthorized = Number(ap.approved_by_id) === Number(actor.id);
+        if (!isAuthorized && ["admin", "hr"].includes(actor.role)) {
+          isAuthorized = true;
+        }
+        if (!isAuthorized && actor.role === "manager") {
+          const employeeProfile = await accountsRepository.findProfileByUserId(ap.employee_id, tx);
+          const managerProfile = await accountsRepository.findProfileByUserId(actor.id, tx);
+          if (
+            (employeeProfile && Number(employeeProfile.manager_id) === Number(actor.id)) ||
+            (employeeProfile?.team_name && managerProfile?.team_name && employeeProfile.team_name === managerProfile.team_name)
+          ) {
+            isAuthorized = true;
+          }
+        }
+        if (!isAuthorized) {
           throw new AppError("This approval is not assigned to you", 403);
         }
       }
@@ -945,6 +1069,7 @@ export const attendanceService = {
 
       return {
         message: `${isPolicyException ? (category === "early_departure" ? "Early Departure" : "Overtime") : ("Punch " + (ap.type === "in" ? "In" : "Out"))} ${status} successfully`,
+        user_id: ap.user_id,
         attendance_status: updated.status,
         review_type: ap.type,
         review_status: ap.type === "in" ? updated.punch_in_status : updated.punch_out_status,
@@ -954,8 +1079,8 @@ export const attendanceService = {
 
     realtimeManager.broadcast(
       "attendance_update",
-      { actorId: actor.id },
-      { targetRoles: ["hr", "admin", "superadmin", "manager"] }
+      { actorId: actor.id, userId: response.user_id, status: response.attendance_status },
+      { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(response.user_id)] }
     );
     return response;
   },
@@ -980,22 +1105,43 @@ export const attendanceService = {
   },
 
   async hrDashboard(userId, role, tenantId = 1) {
-    if (role !== "hr" && role !== "superadmin") {
+    if (role !== "hr" && role !== "admin" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
-    const own = await this.dashboard(userId, tenantId);
+    const effectiveTenantId = Number(tenantId || 1);
+    const own = await this.dashboard(userId, effectiveTenantId);
 
-    const totalPeopleRow = await db.get("SELECT COUNT(*) c FROM accounts_user WHERE role IN ('employee','manager') AND is_active=1 AND deleted_at IS NULL");
-    const presentRow = await db.get("SELECT COUNT(DISTINCT user_id) c FROM attendance_attendance WHERE date=CURDATE() AND status NOT IN ('rejected', 'leave')");
-    const pendingLeaveRow = await db.get("SELECT COUNT(*) c FROM leave_leave WHERE status='pending'");
-    const pendingAttendanceRow = await db.get("SELECT COUNT(*) c FROM attendance_attendanceapproval WHERE status='pending'");
+    const totalPeopleRow = await db.get(
+      `SELECT COUNT(*) c FROM accounts_user u
+       JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+       WHERE u.role IN ('employee','manager') AND u.is_active=1 AND u.deleted_at IS NULL`,
+      [effectiveTenantId]
+    );
+    const presentRow = await db.get(
+      `SELECT COUNT(DISTINCT a.user_id) c FROM attendance_attendance a
+       JOIN workforce_user_tenant w ON w.user_id = a.user_id AND w.tenant_id = ? AND w.is_active = 1
+       WHERE a.tenant_id = ? AND a.date=CURDATE() AND a.status NOT IN ('rejected', 'leave')`,
+      [effectiveTenantId, effectiveTenantId]
+    );
+    const pendingLeaveRow = await db.get(
+      "SELECT COUNT(*) c FROM leave_leave WHERE tenant_id = ? AND status='pending'",
+      [effectiveTenantId]
+    );
+    const pendingAttendanceRow = await db.get(
+      `SELECT COUNT(*) c FROM attendance_attendanceapproval aa
+       JOIN attendance_attendance a ON a.id = aa.attendance_id
+       WHERE a.tenant_id = ? AND aa.status='pending'`,
+      [effectiveTenantId]
+    );
 
     const recentRows = await db.all(
       `SELECT a.*, u.username as employee, u.role 
        FROM attendance_attendance a 
        JOIN accounts_user u ON u.id=a.user_id 
-       WHERE u.deleted_at IS NULL AND a.status <> 'rejected'
-       ORDER BY a.date DESC, a.punch_in_time DESC LIMIT 10`
+       JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+       WHERE a.tenant_id = ? AND u.deleted_at IS NULL AND a.status <> 'rejected'
+       ORDER BY a.date DESC, a.punch_in_time DESC LIMIT 10`,
+      [effectiveTenantId, effectiveTenantId]
     );
 
     const recentPeopleAttendance = recentRows.map((r) => ({
@@ -1088,6 +1234,13 @@ export const attendanceService = {
       "EXISTS (SELECT 1 FROM workforce_user_tenant wut WHERE wut.tenant_id = ? AND wut.user_id = u.id AND wut.is_active = 1)",
     ];
     const params = [...allowedRoles, tenantId];
+
+    // BUG-A02: Scoping for managers (direct reports or matching team); HR/Admin/Superadmin retain global site scope
+    const isGlobalViewer = role === "hr" || role === "admin" || role === "superadmin";
+    if (!isGlobalViewer) {
+      whereConditions.push("(ep.manager_id = ? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))");
+      params.push(managerId, managerId);
+    }
 
     if (siteScope) {
       if (siteScope.unassigned) {
@@ -1308,6 +1461,9 @@ export const attendanceService = {
     }
 
     const month = queryMonth || new Date().toISOString().slice(0, 7);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      throw new AppError("Invalid month format. Expected YYYY-MM", 400);
+    }
     const [y, m] = month.split("-").map(Number);
     const monthStart = new Date(y, m - 1, 1);
     const monthEnd = new Date(y, m, 0);
@@ -1324,8 +1480,8 @@ export const attendanceService = {
 
     if (!isGlobalViewer) {
       whereConditions.push("ep.is_active_employee = 1");
-      whereConditions.push("ep.manager_id = ?");
-      params.push(managerId);
+      whereConditions.push("(ep.manager_id = ? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))");
+      params.push(managerId, managerId);
     } else {
       whereConditions.push("(ep.user_id IS NULL OR ep.is_active_employee = 1)");
     }
@@ -1537,13 +1693,13 @@ export const attendanceService = {
       if (queryEmployeeId) {
         const detailStart = queryDetailStart || monthStartStr;
         const detailEnd = queryDetailEnd || monthEndStr;
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(detailStart) || !/^\d{4}-\d{2}-\d{2}$/.test(detailEnd) || detailStart > detailEnd) {
+          throw new AppError("Invalid detail date range. Expected YYYY-MM-DD with start <= end", 400);
+        }
 
-        // IDOR Scope Check: Managers can only view details of their direct reportees
+        // IDOR Scope Check: Managers can view direct reportees or matching team members
         if (!isGlobalViewer) {
-          const empProfile = await accountsRepository.findProfileByUserId(queryEmployeeId);
-          if (!empProfile || Number(empProfile.manager_id) !== Number(managerId)) {
-            throw new AppError("You do not have permission to view attendance for this employee", 403);
-          }
+          await siteService.ensureEmployeeVisible(tenantId, { id: managerId, role }, queryEmployeeId);
         }
         if (!memberIds.some((memberId) => Number(memberId) === Number(queryEmployeeId))) {
           throw new AppError("You do not have permission to view attendance for this employee in the selected site", 403);
@@ -1754,10 +1910,10 @@ export const attendanceService = {
             date: att.date,
             punch_in: att.punch_in_status === "pending"
               ? "Pending"
-              : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : null),
+              : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }) : null),
             punch_out: att.punch_out_status === "pending"
               ? "Pending"
-              : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : (att.punch_in_time ? "Pending" : null)),
+              : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }) : (att.punch_in_time ? "Pending" : null)),
             work_hours: workHours,
             status: att.status,
           };
@@ -1765,6 +1921,199 @@ export const attendanceService = {
 
         return { rows, totalHours: Number(totalHours.toFixed(2)), daily };
       },
+
+  async myMonthlyRegister(userId, queryMonth, tenantId = 1) {
+    const month = queryMonth || new Date().toISOString().slice(0, 7);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      throw new AppError("Invalid month format. Expected YYYY-MM", 400);
+    }
+    const [y, m] = month.split("-").map(Number);
+    if (!y || !m || m < 1 || m > 12) {
+      throw new AppError("Invalid month format (expected YYYY-MM)", 400);
+    }
+    const lastDay = new Date(y, m, 0).getDate();
+    const monthStartStr = `${y}-${String(m).padStart(2, "0")}-01`;
+    const monthEndStr = `${y}-${String(m).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+
+    // 1. Fetch user information
+    const user = await db.get(
+      `SELECT u.id, u.username, u.first_name, u.last_name, u.email, ep.team_name, ep.designation
+       FROM accounts_user u
+       LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id
+       WHERE u.id = ?`,
+      [userId]
+    );
+    if (!user) {
+      throw new AppError("User not found", 404);
+    }
+
+    // 2. Fetch company holidays in this month
+    const holidayRows = await db.all(
+      `SELECT holiday_date, name, is_optional FROM workforce_company_holiday
+       WHERE tenant_id = ? AND holiday_date BETWEEN ? AND ?`,
+      [tenantId, monthStartStr, monthEndStr]
+    );
+    const holidayByDate = new Map(holidayRows.map((h) => [getYYYYMMDD(h.holiday_date), h]));
+
+    // 3. Fetch approved leaves for this user overlapping this month
+    const leaveRows = await db.all(
+      `SELECT leave_type, from_date, to_date, status, reason
+       FROM leave_leave
+       WHERE user_id = ? AND status = 'approved' AND to_date >= ? AND from_date <= ?`,
+      [userId, monthStartStr, monthEndStr]
+    );
+    const leaveDateMap = new Map();
+    for (const lv of leaveRows) {
+      const from = new Date(lv.from_date);
+      const to = new Date(lv.to_date);
+      for (let cur = new Date(from); cur <= to; cur.setDate(cur.getDate() + 1)) {
+        const dStr = cur.toISOString().slice(0, 10);
+        if (dStr >= monthStartStr && dStr <= monthEndStr) {
+          leaveDateMap.set(dStr, lv);
+        }
+      }
+    }
+
+    // 4. Fetch attendance records in this month
+    const attendanceRows = await db.all(
+      `SELECT * FROM attendance_attendance
+       WHERE user_id = ? AND date BETWEEN ? AND ?
+       ORDER BY date ASC, punch_in_time ASC`,
+      [userId, monthStartStr, monthEndStr]
+    );
+
+    const attendanceByDate = new Map();
+    const statusPriority = { approved: 3, pending: 2, rejected: 1 };
+    for (const a of attendanceRows) {
+      const dateKey = getYYYYMMDD(a.date);
+      const existing = attendanceByDate.get(dateKey);
+      if (!existing || (statusPriority[a.status] || 0) > (statusPriority[existing.status] || 0)) {
+        attendanceByDate.set(dateKey, a);
+      }
+    }
+
+    // 5. Build dates array
+    const registerDates = [];
+    for (let day = 1; day <= lastDay; day++) {
+      const d = new Date(y, m - 1, day);
+      registerDates.push({
+        date: `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+        day,
+        weekday: d.toLocaleDateString("en-US", { weekday: "short" }),
+        is_week_off: d.getDay() === 0,
+      });
+    }
+
+    const todayD = new Date();
+    const todayStr = `${todayD.getFullYear()}-${String(todayD.getMonth() + 1).padStart(2, "0")}-${String(todayD.getDate()).padStart(2, "0")}`;
+
+    let present = 0, leave = 0, pending = 0, absent = 0, rejected = 0, weekOff = 0, holidayCount = 0, shortfall = 0, totalHours = 0;
+
+    const cells = registerDates.map((day) => {
+      const a = attendanceByDate.get(day.date);
+      const holiday = holidayByDate.get(day.date) || null;
+      const leaveRecord = leaveDateMap.get(day.date);
+
+      let code = "A";
+      let wh = 0;
+
+      if (a) {
+        if (a.status === "approved" && !a.punch_out_time) code = "IP";
+        else if (a.status === "approved") code = "P";
+        else if (a.status === "pending") code = "PR";
+        else if (a.status === "rejected") code = "RJ";
+        else if (a.status === "leave") code = "L";
+        wh = toHours(a.punch_in_time, a.punch_out_time, a.status);
+      } else if (leaveRecord) {
+        code = "L";
+      } else if (holiday) {
+        code = "H";
+      } else if (day.is_week_off) {
+        code = "WO";
+      } else if (day.date > todayStr) {
+        code = "--";
+      }
+
+      if (code === "P") present++;
+      else if (code === "L") leave++;
+      else if (code === "PR" || code === "IP") pending++;
+      else if (code === "A") absent++;
+      else if (code === "RJ") rejected++;
+      else if (code === "WO") weekOff++;
+      else if (code === "H") holidayCount++;
+
+      if (a && a.status === "approved" && a.punch_out_time) {
+        totalHours += wh;
+        if (wh < 8) shortfall++;
+      }
+
+      return {
+        date: day.date,
+        day: day.day,
+        weekday: day.weekday,
+        is_week_off: day.is_week_off,
+        code,
+        work_hours: Number(wh.toFixed(2)),
+        punch_in: a?.punch_in_time ? new Date(a.punch_in_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "--",
+        punch_out: a?.punch_out_time ? new Date(a.punch_out_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "--",
+        status: a?.status || (leaveRecord ? "leave" : (code === "H" ? "holiday" : (code === "WO" ? "weekly_off" : (code === "A" ? "absent" : null)))),
+        holiday_name: code === "H" ? holiday?.name : null,
+        holiday_optional: code === "H" ? Boolean(holiday?.is_optional) : null,
+        leave_type: leaveRecord?.leave_type || null,
+        punch_in_photo: storageService.getUrl(a?.punch_in_photo),
+        punch_out_photo: storageService.getUrl(a?.punch_out_photo),
+        attendance_id: a?.id || null,
+      };
+    });
+
+    const monthLabel = new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+    const summary = {
+      month,
+      month_label: monthLabel,
+      total_days: lastDay,
+      present_marks: present,
+      leave_marks: leave,
+      pending_marks: pending,
+      absent_marks: absent,
+      rejected_marks: rejected,
+      week_off_marks: weekOff,
+      holiday_marks: holidayCount,
+      total_work_hours: Number(totalHours.toFixed(2)),
+      shortfall_days: shortfall,
+    };
+
+    return {
+      month,
+      month_label: monthLabel,
+      summary,
+      employee: {
+        id: user.id,
+        username: user.username,
+        name: fullName(user),
+        department: user.team_name || "General",
+        designation: user.designation || "Employee",
+        team_name: user.team_name || "General",
+      },
+      register_dates: registerDates,
+      cells,
+      register_rows: [
+        {
+          user_id: user.id,
+          username: user.username,
+          employee_name: fullName(user),
+          employee_code: user.username,
+          cells,
+          present_marks: present,
+          leave_marks: leave,
+          pending_marks: pending,
+          absent_marks: absent,
+          total_work_hours: Number(totalHours.toFixed(2)),
+          shortfall_days: shortfall,
+        },
+      ],
+    };
+  },
 
   async getHistory(userId, query = {}) {
     const defaultLimit = (query.start_date && query.end_date) ? 500 : 50;
@@ -1781,7 +2130,7 @@ export const attendanceService = {
           throw new AppError("start_date cannot be after end_date", 400);
         }
 
-        const whereConditions = ["user_id = ?"];
+        const whereConditions = ["user_id = ?", "status != 'leave'"];
         const params = [userId];
 
         if (query.start_date && query.end_date) {
@@ -1827,12 +2176,16 @@ export const attendanceService = {
             late_minutes: Number(att.late_minutes || 0),
             early_departure_minutes: Number(att.early_departure_minutes || 0),
             overtime_minutes: Number(att.overtime_minutes || 0),
+            punch_in_time: punchInIso,
+            punch_out_time: punchOutIso,
+            punch_in_status: att.punch_in_status || null,
+            punch_out_status: att.punch_out_status || null,
             punch_in: att.punch_in_status === "pending"
               ? "Pending"
-              : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : null),
+              : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }) : null),
             punch_out: att.punch_out_status === "pending"
               ? "Pending"
-              : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : (att.punch_in_time && att.status === "pending" ? "Pending" : null)),
+              : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }) : (att.punch_in_time && att.status === "pending" ? "Pending" : null)),
             work_hours: workHours,
             status: att.status,
             punch_in_outside: Boolean(att.punch_in_outside),
@@ -1842,7 +2195,134 @@ export const attendanceService = {
           };
         });
 
-return formatPaginationResponse(daily, total, page, limit, { records: daily });
+    return formatPaginationResponse(daily, total, page, limit, { records: daily });
+  },
+
+  /**
+   * Regularize an incomplete or forgotten attendance record (BUG-A09 / BUG-02).
+   */
+  async regularizeAttendance(userId, attendanceId, punchOutTime, reason, tenantId = null) {
+    const parsedId = Number(attendanceId);
+    if (!Number.isSafeInteger(parsedId) || parsedId <= 0 || !punchOutTime) {
+      throw new AppError("Valid attendance ID and punch out time are required", 400);
+    }
+    const cleanReason = String(reason || "").trim();
+    if (!cleanReason) {
+      throw new AppError("A reason for attendance regularization is required", 400);
+    }
+    const timeStr = String(punchOutTime).trim();
+    const timeMatch = timeStr.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!timeMatch) {
+      throw new AppError("Invalid time format. Please provide HH:mm or HH:mm:ss", 400);
+    }
+    const hh = Number(timeMatch[1]);
+    const mm = Number(timeMatch[2]);
+    const ss = timeMatch[3] !== undefined ? Number(timeMatch[3]) : 0;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) {
+      throw new AppError("Invalid time bounds. Hour must be 00-23 and minute/second 00-59", 400);
+    }
+    const cleanTime = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+
+    return db.transaction(async (tx) => {
+      const att = await attendanceRepository.findAttendanceById(parsedId, tx);
+      if (!att) {
+        throw new AppError("Attendance record not found", 404);
+      }
+      if (Number(att.user_id) !== Number(userId)) {
+        throw new AppError("Unauthorized: You can only regularize your own attendance", 403);
+      }
+      if (tenantId != null && att.tenant_id != null && Number(att.tenant_id) !== Number(tenantId)) {
+        throw new AppError("Attendance record not found in this organization", 404);
+      }
+      if (att.punch_out_time) {
+        throw new AppError("Attendance record already has a punch-out time", 400);
+      }
+      const currentStatus = String(att.status || "").toLowerCase();
+      if (currentStatus === "leave" || currentStatus === "rejected") {
+        throw new AppError(`Cannot regularize an attendance record with status '${currentStatus}'`, 400);
+      }
+      const existingPending = await db.get(
+        "SELECT id FROM attendance_attendanceapproval WHERE attendance_id = ? AND type = 'out' AND status = 'pending' LIMIT 1",
+        [parsedId],
+        tx
+      );
+      if (existingPending) {
+        throw new AppError("A pending regularization request already exists for this attendance record", 400);
+      }
+
+      const attDateYmd = getYYYYMMDD(att.work_date || att.date);
+      if (!attDateYmd) {
+        throw new AppError("Attendance record is missing a valid work date", 400);
+      }
+      let proposedPunchOut = new Date(`${attDateYmd}T${cleanTime}+05:30`);
+      if (Number.isNaN(proposedPunchOut.getTime())) {
+        throw new AppError("Unable to construct a valid punch-out datetime", 400);
+      }
+      if (att.punch_in_time) {
+        const punchInDate = new Date(dbTimeToIso(att.punch_in_time));
+        if (!Number.isNaN(punchInDate.getTime()) && proposedPunchOut < punchInDate) {
+          // Support overnight shift regularization if punch-out is on the next calendar day
+          const nextDayDt = new Date(proposedPunchOut.getTime() + 24 * 60 * 60 * 1000);
+          if (nextDayDt - punchInDate <= 24 * 60 * 60 * 1000) {
+            proposedPunchOut = nextDayDt;
+          } else {
+            throw new AppError("Punch-out time cannot be earlier than punch-in time", 400);
+          }
+        }
+      }
+
+      const effectiveTenantId = tenantId || att.tenant_id || 1;
+      const reviewers = await approvalRouteForUser(userId, tx, effectiveTenantId);
+      if (!reviewers || reviewers.length === 0) {
+        throw new AppError("No eligible reviewer (Manager, HR, or Admin) available to approve regularization", 400);
+      }
+
+      // Update attendance with proposed UTC DateTime and pending status
+      await attendanceRepository.updateAttendance(
+        parsedId,
+        {
+          punch_out_time: proposedPunchOut,
+          punch_out_status: "pending",
+          status: "pending",
+          is_outside_location: 1
+        },
+        tx
+      );
+
+      // Create pending approval records for assigned reviewers
+      const now = new Date();
+      for (const reviewer of reviewers) {
+        await attendanceRepository.insertApproval(
+          {
+            role: reviewer.role,
+            status: "pending",
+            comment: `[Regularization Request] ${cleanReason}`,
+            created_at: now,
+            approved_by_id: reviewer.id,
+            attendance_id: parsedId,
+            type: "out",
+          },
+          tx
+        );
+      }
+
+      try {
+        realtimeManager.broadcast(
+          "attendance_update",
+          { actorId: userId, attendanceId: parsedId },
+          { tenantId: effectiveTenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
+        );
+      } catch (rtErr) {
+        logger.warn("[regularizeAttendance] realtime broadcast failed: %s", rtErr.message);
+      }
+
+      return {
+        message: "Attendance regularization request submitted successfully and routed for review",
+        attendance_id: parsedId,
+        punch_out_time: proposedPunchOut.toISOString(),
+        status: "pending"
+      };
+    });
   }
 };
 

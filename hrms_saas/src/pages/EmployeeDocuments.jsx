@@ -28,6 +28,7 @@ import {
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
 import API from "../api/axios";
+import { useAuth } from "../context/AuthContext";
 import { usePopup } from "../context/PopupContext";
 import { useSite } from "../context/SiteContext";
 import { useRealtime } from "../context/RealtimeContext";
@@ -75,7 +76,8 @@ function getRoleBadgeStyle(role) {
 }
 
 export default function EmployeeDocuments() {
-  const userRole = localStorage.getItem("role") || "employee";
+  const { role: authRole } = useAuth();
+  const userRole = authRole || "employee";
   const { querySiteId } = useSite();
   const { showPopup } = usePopup();
 
@@ -210,9 +212,11 @@ export default function EmployeeDocuments() {
     if (found) {
       setSelectedEmployeeObj(found);
     } else {
-      API.get(`/auth/employees/${selectedUser}/`)
+      API.get("/auth/employees/", { params: { limit: 1000 } })
         .then((res) => {
-          setSelectedEmployeeObj(res.data?.data || res.data || null);
+          const list = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+          const matched = list.find((emp) => String(emp.id) === String(selectedUser)) || null;
+          setSelectedEmployeeObj(matched);
         })
         .catch(() => {});
     }
@@ -344,13 +348,13 @@ export default function EmployeeDocuments() {
 
         {/* B. Filter Toolbar */}
         <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             {/* Filter Dropdown */}
-            <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center min-w-0">
               <span className="text-xs font-semibold text-slate-600 whitespace-nowrap">
                 Choose Employee or Manager
               </span>
-              <div className="relative min-w-[210px]">
+              <div className="relative w-full sm:min-w-[210px]">
                 <select
                   value={selectedUser ? `user-${selectedUser}` : filterRole}
                   onChange={(e) => {
@@ -389,7 +393,7 @@ export default function EmployeeDocuments() {
             </div>
 
             {/* Search Input */}
-            <div className="relative min-w-[260px] flex-1">
+            <div className="relative w-full sm:min-w-[240px] flex-1 min-w-0">
               <Search
                 size={16}
                 className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"

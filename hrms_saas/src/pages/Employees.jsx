@@ -132,15 +132,8 @@ function getAvatarStyle(role, name = "") {
 
 export default function Employees() {
   const { role: authRole, user: authUser } = useAuth();
-  const userRole = authRole || localStorage.getItem("role") || "employee";
-  const currentUserId = authUser?.id || (() => {
-    try {
-      const stored = localStorage.getItem("user");
-      return stored ? JSON.parse(stored)?.id : null;
-    } catch {
-      return null;
-    }
-  })();
+  const userRole = authRole || "employee";
+  const currentUserId = authUser?.id || null;
   const { sites, querySiteId } = useSite();
 
   const [loading, setLoading] = useState(true);
@@ -1657,10 +1650,11 @@ export default function Employees() {
 }
 
 function ViewEmployeeModal({ employee, canEdit, onEdit, onClose }) {
+  const { role: authRole, user: authUser } = useAuth();
   const initials = getInitials(employee.name, employee.username);
   const avatarStyle = getAvatarStyle(employee.role, employee.name || employee.username);
   const roleBadgeStyle = getRoleBadgeStyle(employee.role);
-  const canGrantConcession = ["hr", "admin", "superadmin"].includes(localStorage.getItem("role"));
+  const canGrantConcession = ["hr", "admin", "superadmin"].includes(authRole);
   const [concessions, setConcessions] = useState([]);
   const [concessionForm, setConcessionForm] = useState({ leave_type: "casual", additional_days: "", effective_date: new Date().toISOString().slice(0, 10), expiry_date: "", reason: "" });
   const [concessionBusy, setConcessionBusy] = useState(false);
@@ -1872,7 +1866,7 @@ function ViewEmployeeModal({ employee, canEdit, onEdit, onClose }) {
               <label className="text-slate-600">Effective Date<input required type="date" value={concessionForm.effective_date} onChange={(e) => setConcessionForm({ ...concessionForm, effective_date: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-sm" /></label>
               <label className="text-slate-600">Expiry Date (optional)<input type="date" value={concessionForm.expiry_date} onChange={(e) => setConcessionForm({ ...concessionForm, expiry_date: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-sm" /></label>
               <label className="col-span-2 text-slate-600">Reason<input required maxLength="2000" value={concessionForm.reason} onChange={(e) => setConcessionForm({ ...concessionForm, reason: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-sm" /></label>
-              <p className="col-span-2 text-slate-500">Granted by: {localStorage.getItem("username") || "Signed-in manager"}</p>
+              <p className="col-span-2 text-slate-500">Granted by: {authUser?.username || authUser?.name || "Signed-in manager"}</p>
               {concessionError && <p className="col-span-2 text-rose-700">{concessionError}</p>}
               <button disabled={concessionBusy} className="col-span-2 rounded-xl bg-slate-900 px-3 py-2 font-semibold text-white disabled:opacity-60">{concessionBusy ? "Saving…" : "Grant Leave"}</button>
             </form>

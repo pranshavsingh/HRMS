@@ -39,6 +39,11 @@ const pool = mysql.createPool({
   timezone: "Z",
 });
 
+// Ensure every pooled MySQL connection uses UTC (+00:00) so NOW() matches mysql2's timezone: "Z"
+pool.on("connection", (connection) => {
+  connection.query("SET time_zone = '+00:00'");
+});
+
 export const db = {
   /**
    * Execute query and get a single row.

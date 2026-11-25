@@ -27,9 +27,20 @@ export async function authenticate(req, res, next) {
       return next(new AppError("Invalid token type", 401));
     }
 
-    // Check Redis token revocation blacklist (if JTI is present)
+    // Check Redis token revocation blacklist (if JTI is present) with DB fallback (BUG-A07)
     if (payload.jti) {
-      const isBlacklisted = await redisService.get(`token:blacklist:${payload.jti}`);
+      let isBlacklisted = await redisService.get(`token:blacklist:${payload.jti}`);
+      if (!isBlacklisted) {
+        try {
+          const revokedRow = await db.get(
+            "SELECT id FROM accounts_revoked_token WHERE jti = ? AND expires_at > NOW() LIMIT 1",
+            [payload.jti]
+          );
+          if (revokedRow) isBlacklisted = true;
+        } catch {
+          // Suppress fallback DB query errors
+        }
+      }
       if (isBlacklisted) {
         return next(new AppError("Token has been revoked", 401));
       }
@@ -96,6 +107,30 @@ export function authorize(allowedRoles) {
 }
 
 /**
+ * Mobile Security Restriction: Restrict Employee Account / ID Creation on Mobile Devices.
+ * Strictly enforces that HR, Admin, Superadmin, and any client on mobile cannot create employees.
+ */
+export function restrictMobileEmployeeCreation(req, res, next) {
+  const platform = (req.headers["x-platform"] || req.body?.platform || req.query?.platform || "").toLowerCase();
+  if (["mobile", "android", "ios"].includes(platform)) {
+    return next(new AppError("Employee account creation is restricted on mobile devices in accordance with security policy", 403));
+  }
+  next();
+}
+
+/**
+ * Mobile Security Restriction: Restrict Employee Data, Payroll, and Document Exports on Mobile Devices.
+ * Strictly enforces that HR, Admin, Superadmin, and any client on mobile cannot export or bulk download.
+ */
+export function restrictMobileDataExport(req, res, next) {
+  const platform = (req.headers["x-platform"] || req.query?.platform || "").toLowerCase();
+  if (["mobile", "android", "ios"].includes(platform)) {
+    return next(new AppError("Data and document exports are restricted on mobile devices in accordance with security policy", 403));
+  }
+  next();
+}
+
+/**
  * Realtime Stream Authentication Middleware.
  * Supports Mechanism 2 (Bearer Header) and Mechanism 3 (Single-use ephemeral ticket via GETDEL).
  * Strictly forbids raw tokens in URL query parameters (VULN-04).
@@ -118,10 +153,21 @@ export async function authenticateRealtime(req, res, next) {
     if (ticketId) {
       const ticketKey = `sse:ticket:${ticketId}`;
       const userPayload = await redisService.getdel(ticketKey);
-      if (!userPayload) {
+      if (!userPayload || !userPayload.id) {
         return next(new AppError("Invalid, expired, or already consumed ticket", 401));
       }
-      req.user = userPayload;
+      const revokedTs = await redisService.get(`user:revoked:${userPayload.id}`);
+      if (revokedTs) {
+        return next(new AppError("Session revoked", 401));
+      }
+      const freshUser = await accountsRepository.findById(userPayload.id);
+      if (!freshUser || !freshUser.is_active) {
+        return next(new AppError("Account inactive or disabled", 401));
+      }
+      req.user = {
+        ...userPayload,
+        role: freshUser.is_superuser ? "superadmin" : freshUser.role,
+      };
       return next();
     }
 

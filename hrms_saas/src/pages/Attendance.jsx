@@ -16,7 +16,7 @@ import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
 import * as faceapi from "@vladmandic/face-api";
 
-let faceModelsPromise;
+let faceModelsPromise = null;
 
 const loadFaceModels = () => {
   if (!faceModelsPromise) {
@@ -108,19 +108,75 @@ const checkBlurriness = (ctx, x, y, width, height) => {
   }
 };
 
+/**
+ * Robust Geolocation acquisition with explicit timeout, high accuracy, and typed Error normalization
+ */
+const getLocation = (customOptions = {}) => {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      const err = new Error("Geolocation is not supported by your browser.");
+      err.code = 2; // POSITION_UNAVAILABLE
+      return reject(err);
+    }
+
+    const options = {
+      enableHighAccuracy: true,
+      timeout: 10000, // 10 second timeout
+      maximumAge: 0,
+      ...customOptions,
+    };
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        resolve({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          altitude: pos.coords.altitude,
+          accuracy: pos.coords.accuracy,
+          timestamp: pos.timestamp || Date.now(),
+        });
+      },
+      (geoError) => {
+        let message = "Unable to retrieve location.";
+        if (geoError.code === 1) {
+          message = "Location permission denied. Please allow location access in your browser settings to punch attendance.";
+        } else if (geoError.code === 2) {
+          message = "Location unavailable. Please ensure GPS or device location services are turned on.";
+        } else if (geoError.code === 3) {
+          message = "Location request timed out. Please check your signal and try again.";
+        }
+        const err = new Error(message);
+        err.code = geoError.code;
+        err.originalError = geoError;
+        reject(err);
+      },
+      options
+    );
+  });
+};
+
 export default function Attendance() {
   const { showPopup } = usePopup();
+
+  // Element and lifecycle references
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const loopRef = useRef(null);
+  const isDetectingRef = useRef(false);
+  const activeSessionIdRef = useRef(0);
+  const modelsLoadedRef = useRef(false);
 
+  // Camera state lifecycle: "idle" | "requesting" | "starting" | "ready" | "capturing" | "error"
+  const [cameraState, setCameraState] = useState("idle");
   const [stream, setStream] = useState(null);
-  const [cameraOn, setCameraOn] = useState(false);
+  const [videoReady, setVideoReady] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [type, setType] = useState(null);
+  const [type, setType] = useState(null); // "in" | "out"
   const [punchDetails, setPunchDetails] = useState(null);
+  const [errorMessage, setErrorMessage] = useState("");
 
+  // Face recognition model states
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelError, setModelError] = useState(false);
   const [modelErrorMessage, setModelErrorMessage] = useState("");
@@ -129,16 +185,12 @@ export default function Attendance() {
     message: "Initializing face detector...",
   });
 
+  // Attendance status & duration timer
   const [activePunch, setActivePunch] = useState(null);
   const [activeLoading, setActiveLoading] = useState(true);
   const [elapsedTime, setElapsedTime] = useState("");
 
-  const formatPunchTime = (date) =>
-    new Intl.DateTimeFormat("en-IN", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    }).format(date);
+  const cameraOn = cameraState === "starting" || cameraState === "ready" || cameraState === "capturing";
 
   const fetchStatus = async () => {
     try {
@@ -157,11 +209,17 @@ export default function Attendance() {
 
   useRealtime("attendance_update", fetchStatus);
 
+  // Sync ref with state to prevent stale closure in detection interval
+  useEffect(() => {
+    modelsLoadedRef.current = modelsLoaded;
+  }, [modelsLoaded]);
+
   useEffect(() => {
     const loadModels = async () => {
       try {
         await loadFaceModels();
         setModelsLoaded(true);
+        modelsLoadedRef.current = true;
       } catch (err) {
         console.error("Error loading face-api models:", err);
         setModelErrorMessage(err?.message || "The local verification models could not be loaded.");
@@ -177,6 +235,7 @@ export default function Attendance() {
     try {
       await loadFaceModels();
       setModelsLoaded(true);
+      modelsLoadedRef.current = true;
     } catch (err) {
       console.error("Error retrying face-api models:", err);
       setModelErrorMessage(err?.message || "The local verification models could not be loaded.");
@@ -184,20 +243,109 @@ export default function Attendance() {
     }
   };
 
+  // Video ready checks
+  const checkAndMarkVideoReady = useCallback(() => {
+    const video = videoRef.current;
+    if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+      setVideoReady(true);
+      setCameraState((prev) => (prev === "starting" ? "ready" : prev));
+    }
+  }, []);
+
+  const handleVideoMetadataLoaded = useCallback(() => {
+    checkAndMarkVideoReady();
+  }, [checkAndMarkVideoReady]);
+
+  const handleVideoCanPlay = useCallback(() => {
+    checkAndMarkVideoReady();
+  }, [checkAndMarkVideoReady]);
+
+  // Robust callback ref for video element mounting and stream binding
+  const handleVideoRef = useCallback((node) => {
+    videoRef.current = node;
+    if (!node) return;
+
+    const currentStream = streamRef.current;
+    if (currentStream && node.srcObject !== currentStream) {
+      node.srcObject = currentStream;
+    }
+
+    if (node.srcObject) {
+      const playPromise = node.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          if (err.name !== "AbortError") {
+            console.warn("Video play() was prevented or interrupted:", err);
+          }
+        });
+      }
+    }
+  }, []);
+
+  // Secondary stream attachment effect for asynchronous render reconciliation
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !stream) return;
+
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+
+    const playPromise = video.play();
+    if (playPromise !== undefined) {
+      playPromise.catch((err) => {
+        if (err.name !== "AbortError") {
+          console.warn("Video play() interrupted in stream effect:", err);
+        }
+      });
+    }
+
+    if (video.readyState >= 2 && video.videoWidth > 0) {
+      setVideoReady(true);
+      setCameraState((prev) => (prev === "starting" ? "ready" : prev));
+    }
+  }, [stream, cameraState]);
+
+  // Face detection loop management
+  const stopDetectionLoop = useCallback(() => {
+    if (loopRef.current) {
+      clearInterval(loopRef.current);
+      loopRef.current = null;
+    }
+    isDetectingRef.current = false;
+  }, []);
+
   const startDetectionLoop = useCallback(() => {
-    if (loopRef.current) clearInterval(loopRef.current);
+    if (loopRef.current) {
+      clearInterval(loopRef.current);
+      loopRef.current = null;
+    }
 
     loopRef.current = setInterval(async () => {
+      // Guard against overlapping concurrent executions
+      if (isDetectingRef.current) return;
+
       const video = videoRef.current;
       const canvas = canvasRef.current;
 
-      if (!video || video.paused || video.ended || !modelsLoaded) {
+      if (
+        !video ||
+        video.paused ||
+        video.ended ||
+        video.videoWidth === 0 ||
+        video.videoHeight === 0 ||
+        !modelsLoadedRef.current
+      ) {
         return;
       }
 
+      isDetectingRef.current = true;
       try {
         const detection = await faceapi
-          .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
+          .detectSingleFace(
+            video,
+            new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 })
+          )
           .withFaceLandmarks();
 
         if (!detection) {
@@ -262,15 +410,16 @@ export default function Attendance() {
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           const ctx = canvas.getContext("2d");
-          ctx.drawImage(video, 0, 0);
-
-          const blurScore = checkBlurriness(ctx, box.x, box.y, box.width, box.height);
-          if (blurScore < 35) {
-            setValidation({
-              isValid: false,
-              message: "Image is blurry! Please hold still and ensure good lighting.",
-            });
-            return;
+          if (ctx) {
+            ctx.drawImage(video, 0, 0);
+            const blurScore = checkBlurriness(ctx, box.x, box.y, box.width, box.height);
+            if (blurScore < 35) {
+              setValidation({
+                isValid: false,
+                message: "Image is blurry! Please hold still and ensure good lighting.",
+              });
+              return;
+            }
           }
         }
 
@@ -279,26 +428,31 @@ export default function Attendance() {
           isValid: true,
           message: "Perfect! Face verified. Ready to capture.",
         });
-
       } catch (err) {
         console.error("Face detection loop error:", err);
+      } finally {
+        isDetectingRef.current = false;
       }
     }, 400);
-  }, [modelsLoaded]);
-
-  const stopDetectionLoop = useCallback(() => {
-    if (loopRef.current) {
-      clearInterval(loopRef.current);
-      loopRef.current = null;
-    }
-    setValidation({ isValid: false, message: "Camera off" });
   }, []);
 
+  // Manage detection loop based on camera readiness
   useEffect(() => {
-    if (cameraOn && modelsLoaded && videoRef.current) {
+    if (cameraState === "ready" && videoReady) {
+      if (!modelsLoaded) {
+        setValidation({
+          isValid: false,
+          message: "Initializing face detector...",
+        });
+      } else {
+        setValidation({
+          isValid: false,
+          message: "Position your face inside the frame.",
+        });
+      }
       const timer = setTimeout(() => {
         startDetectionLoop();
-      }, 500);
+      }, 300);
       return () => {
         clearTimeout(timer);
         stopDetectionLoop();
@@ -306,8 +460,9 @@ export default function Attendance() {
     } else {
       stopDetectionLoop();
     }
-  }, [cameraOn, modelsLoaded, startDetectionLoop, stopDetectionLoop]);
+  }, [cameraState, videoReady, modelsLoaded, startDetectionLoop, stopDetectionLoop]);
 
+  // Elapsed time counter for approved active shifts
   useEffect(() => {
     if (
       !activePunch?.is_punched_in ||
@@ -339,125 +494,277 @@ export default function Attendance() {
     return () => clearInterval(interval);
   }, [activePunch]);
 
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
-    }
-  }, [stream]);
+  // Centralized, idempotent camera cleanup
+  const stopCamera = useCallback(() => {
+    // Invalidate active session so any in-flight asynchronous operations are ignored
+    activeSessionIdRef.current++;
 
-  useEffect(() => {
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
-      if (loopRef.current) {
-        clearInterval(loopRef.current);
-      }
-    };
-  }, []);
+    stopDetectionLoop();
 
-  const openCamera = async (punchType) => {
-    let mediaStream = null;
-    try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: false,
-      });
-      streamRef.current = mediaStream;
-      setStream(mediaStream);
-
-      const coords = await getLocation();
-
-      setCameraOn(true);
-      setType(punchType);
-      setPunchDetails({
-        latitude: coords.latitude,
-        longitude: coords.longitude,
-        altitude: coords.altitude,
-        time: formatPunchTime(new Date()),
-      });
-    } catch (err) {
-      console.error("Camera error:", err);
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((track) => track.stop());
-      }
-      stopCamera();
-
-      if (err.name === "NotAllowedError") {
-        showPopup("Camera permission denied", "error");
-      } else if (err.name === "NotReadableError") {
-        showPopup("Camera already in use", "warning");
-      } else if (err.code === 1) {
-        showPopup("Location permission denied. Please allow location access to punch.", "error");
-      } else if (err.code === 3) {
-        showPopup("Location request timed out. Please try again.", "error");
-      } else {
-        showPopup(err.message || "Camera or location error", "error");
-      }
-    }
-  };
-
-  const stopCamera = () => {
     const activeStream = streamRef.current || videoRef.current?.srcObject || stream;
-
     if (activeStream) {
-      activeStream.getTracks().forEach((track) => track.stop());
+      try {
+        activeStream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (e) {
+            console.warn("Track stop error:", e);
+          }
+        });
+      } catch (e) {
+        console.warn("Stream tracks stop error:", e);
+      }
     }
 
     streamRef.current = null;
 
     if (videoRef.current) {
-      videoRef.current.srcObject = null;
+      try {
+        videoRef.current.srcObject = null;
+      } catch {
+        // Ignore
+      }
     }
 
-    setCameraOn(false);
     setStream(null);
+    setCameraState("idle");
+    setVideoReady(false);
     setType(null);
     setPunchDetails(null);
+    setErrorMessage("");
+    setValidation({ isValid: false, message: "Camera off" });
+  }, [stopDetectionLoop, stream]);
+
+  // Cleanup on component unmount
+  useEffect(() => {
+    return () => {
+      if (loopRef.current) {
+        clearInterval(loopRef.current);
+        loopRef.current = null;
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (e) {
+            console.warn("Unmount track stop error:", e);
+          }
+        });
+        streamRef.current = null;
+      }
+    };
+  }, []);
+
+  // Open camera with cancellation token & geolocation timeout protection
+  const openCamera = async (punchType) => {
+    if (cameraState === "requesting" || cameraState === "starting" || cameraState === "capturing") {
+      return;
+    }
+
+    const sessionId = ++activeSessionIdRef.current;
+    setType(punchType);
+    setCameraState("requesting");
+    setErrorMessage("");
+    setVideoReady(false);
+    setValidation({
+      isValid: false,
+      message: modelsLoadedRef.current
+        ? "Position your face inside the frame."
+        : "Initializing face detector...",
+    });
+
+    let mediaStream = null;
+
+    try {
+      // 1. Acquire camera stream (prefer front-facing camera on mobile devices)
+      const constraints = {
+        video: {
+          facingMode: { ideal: "user" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      };
+
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (camErr) {
+        if (camErr.name === "OverconstrainedError") {
+          mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        } else {
+          throw camErr;
+        }
+      }
+
+      // Check if session was cancelled during getUserMedia
+      if (activeSessionIdRef.current !== sessionId) {
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+        }
+        return;
+      }
+
+      streamRef.current = mediaStream;
+      setStream(mediaStream);
+      setCameraState("starting");
+
+      // 2. Acquire Geolocation with timeout protection
+      const coords = await getLocation();
+
+      // Check if session was cancelled during getLocation
+      if (activeSessionIdRef.current !== sessionId) {
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+        }
+        return;
+      }
+
+      setPunchDetails({
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        altitude: coords.altitude,
+        accuracy: coords.accuracy,
+        timestamp: coords.timestamp,
+      });
+    } catch (err) {
+      if (activeSessionIdRef.current !== sessionId) {
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+        }
+        return;
+      }
+
+      console.error("Camera or location activation error:", err);
+
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+      }
+      stopCamera();
+
+      let userMsg = "Failed to initialize camera or location.";
+      if (err.name === "NotAllowedError") {
+        userMsg = "Camera permission denied. Please allow camera access in your browser settings to punch attendance.";
+        showPopup(userMsg, "error");
+      } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+        userMsg = "Camera is already in use by another application or tab.";
+        showPopup(userMsg, "warning");
+      } else if (err.code === 1) {
+        userMsg = err.message || "Location permission denied. Please allow location access in your browser settings to punch attendance.";
+        showPopup(userMsg, "error");
+      } else if (err.code === 2) {
+        userMsg = err.message || "Location unavailable. Please ensure GPS / device location is turned on.";
+        showPopup(userMsg, "error");
+      } else if (err.code === 3) {
+        userMsg = err.message || "Location request timed out. Please check your signal and try again.";
+        showPopup(userMsg, "error");
+      } else {
+        userMsg = err.message || "Camera or location error occurred.";
+        showPopup(userMsg, "error");
+      }
+
+      setCameraState("error");
+      setErrorMessage(userMsg);
+    }
   };
 
+  // Image capture with typed Error validation
   const captureImage = () => {
     return new Promise((resolve, reject) => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
 
-      if (!video || video.videoWidth === 0) {
-        reject("Camera not ready");
+      if (!video) {
+        return reject(new Error("Video element is not available."));
+      }
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        return reject(new Error("Camera preview is not ready (zero dimensions)."));
+      }
+      if (video.paused || video.ended) {
+        return reject(new Error("Camera video stream is not active."));
+      }
+      if (!canvas) {
+        return reject(new Error("Canvas element is not available for capture."));
+      }
+
+      try {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          return reject(new Error("Unable to obtain canvas 2D rendering context."));
+        }
+
+        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              reject(new Error("Failed to encode image frame into JPEG blob."));
+            } else {
+              resolve(blob);
+            }
+          },
+          "image/jpeg",
+          0.9
+        );
+      } catch (err) {
+        reject(new Error(`Failed to capture camera frame: ${err.message}`));
+      }
+    });
+  };
+
+  // Submission handler reusing validated location with freshness check
+  const handleSubmit = async () => {
+    if (loading || !validation.isValid) return;
+
+    if (!punchDetails?.latitude || !punchDetails?.longitude) {
+      showPopup("Location coordinates are missing. Please retry camera initialization.", "error");
+      return;
+    }
+
+    const MAX_LOCATION_AGE_MS = 5 * 60 * 1000; // 5 minutes max age
+    let coords = {
+      latitude: punchDetails.latitude,
+      longitude: punchDetails.longitude,
+      accuracy: punchDetails.accuracy ?? null,
+    };
+
+    setLoading(true);
+    setCameraState("capturing");
+
+    try {
+      // Re-validate location freshness if session was held open for over 5 minutes
+      if (punchDetails.timestamp && Date.now() - punchDetails.timestamp > MAX_LOCATION_AGE_MS) {
+        try {
+          const freshCoords = await getLocation({ timeout: 5000 });
+          coords = {
+            latitude: freshCoords.latitude,
+            longitude: freshCoords.longitude,
+            accuracy: freshCoords.accuracy,
+          };
+          setPunchDetails((prev) => ({
+            ...prev,
+            latitude: freshCoords.latitude,
+            longitude: freshCoords.longitude,
+            accuracy: freshCoords.accuracy,
+            timestamp: freshCoords.timestamp,
+          }));
+        } catch (locErr) {
+          console.warn("Unable to refresh stale location, proceeding with validated coordinates:", locErr);
+        }
+      }
+
+      if (coords.accuracy != null && coords.accuracy > 100) {
+        showPopup(
+          `GPS accuracy is too weak (±${Math.round(coords.accuracy)}m). Enterprise attendance requires accuracy within 100 meters. Please move to an open area or enable high accuracy.`,
+          "warning"
+        );
+        setCameraState("ready");
+        setLoading(false);
         return;
       }
 
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0);
-
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) reject("Image capture failed");
-          else resolve(blob);
-        },
-        "image/jpeg",
-        0.9
-      );
-    });
-  };
-
-  const getLocation = () => {
-    return new Promise((resolve, reject) => {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => resolve(pos.coords),
-        () => reject("Location denied")
-      );
-    });
-  };
-
-  const handleSubmit = async () => {
-    setLoading(true);
-
-    try {
       const image = await captureImage();
-      const coords = await getLocation();
 
       const url =
         type === "in"
@@ -484,6 +791,7 @@ export default function Attendance() {
             directSuccess = {
               latitude: coords.latitude,
               longitude: coords.longitude,
+              accuracy: coords.accuracy != null ? Number(coords.accuracy) : undefined,
               photo_public_id: cloudRes.data.public_id,
               photo_url: cloudRes.data.secure_url,
             };
@@ -502,6 +810,9 @@ export default function Attendance() {
         formData.append("photo", image, `attendance_${Date.now()}.jpg`);
         formData.append("latitude", coords.latitude);
         formData.append("longitude", coords.longitude);
+        if (coords.accuracy != null) {
+          formData.append("accuracy", coords.accuracy);
+        }
 
         const res = await API.post(url, formData);
         showPopup(res.data.message || "Success", "success");
@@ -510,12 +821,12 @@ export default function Attendance() {
       stopCamera();
       fetchStatus();
     } catch (err) {
-      console.error(err.response?.data || err.message);
-
+      console.error("Attendance submission error:", err.response?.data || err.message);
+      setCameraState("ready");
       showPopup(
         err.response?.data?.error ||
         err.message ||
-        "Something went wrong",
+        "Something went wrong while submitting attendance.",
         "error"
       );
     } finally {
@@ -547,12 +858,20 @@ export default function Attendance() {
               <HeroMetric
                 icon={<Camera size={18} />}
                 label="Camera"
-                value={cameraOn ? "Active" : "Standby"}
+                value={
+                  cameraState === "ready"
+                    ? "Active"
+                    : cameraState === "starting" || cameraState === "requesting"
+                    ? "Starting"
+                    : cameraState === "capturing"
+                    ? "Capturing"
+                    : "Standby"
+                }
               />
               <HeroMetric
                 icon={<MapPinned size={18} />}
                 label="Location"
-                value={cameraOn ? "Captured" : "Waiting"}
+                value={punchDetails?.latitude ? "Captured" : cameraState !== "idle" ? "Acquiring" : "Waiting"}
               />
               <HeroMetric
                 icon={<Clock3 size={18} />}
@@ -581,32 +900,66 @@ export default function Attendance() {
 
             <div className="p-6">
               <div className={`relative flex min-h-[420px] items-center justify-center overflow-hidden rounded-3xl bg-[linear-gradient(180deg,#0f172a_0%,#111827_100%)] border-4 transition-all duration-300 ${
-                !cameraOn
+                cameraState === "idle" || cameraState === "error"
                   ? "border-transparent"
                   : validation.isValid
                   ? "border-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.35)]"
                   : "border-amber-500 shadow-[0_0_20px_rgba(245,158,11,0.35)]"
               }`}>
-                {cameraOn ? (
+                {cameraState === "requesting" ? (
+                  <div className="flex flex-col items-center justify-center text-center p-6 text-slate-300">
+                    <div className="h-12 w-12 animate-spin rounded-full border-4 border-emerald-500 border-t-transparent" />
+                    <p className="mt-4 text-base font-medium text-white">Connecting to camera & GPS...</p>
+                    <p className="mt-1 text-xs text-slate-400">Please allow browser permissions if prompted.</p>
+                  </div>
+                ) : cameraState === "error" ? (
+                  <div className="flex max-w-md flex-col items-center p-6 text-center text-rose-300">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-full bg-rose-500/20 text-rose-400">
+                      <XCircle size={36} />
+                    </div>
+                    <h3 className="mt-4 text-xl font-semibold text-white">Camera or Location Error</h3>
+                    <p className="mt-2 text-xs leading-5 text-rose-200">{errorMessage || "Unable to activate camera or location."}</p>
+                    <div className="mt-6 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => openCamera(type || "in")}
+                        className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-emerald-700"
+                      >
+                        Retry
+                      </button>
+                      <button
+                        type="button"
+                        onClick={stopCamera}
+                        className="rounded-xl bg-slate-700 px-4 py-2 text-xs font-semibold text-white transition hover:bg-slate-600"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                ) : cameraOn ? (
                   <>
                     <video
-                      ref={videoRef}
+                      ref={handleVideoRef}
                       autoPlay
                       playsInline
+                      muted
+                      onLoadedMetadata={handleVideoMetadataLoaded}
+                      onCanPlay={handleVideoCanPlay}
                       className="h-full max-h-[480px] w-full rounded-2xl object-cover"
                     />
                     <canvas ref={canvasRef} className="hidden" />
                     <div className="pointer-events-none absolute inset-x-6 top-6 flex items-center justify-between">
-                      <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white">
+                      <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white shadow">
+                        <span className="h-2 w-2 animate-ping rounded-full bg-white" />
                         Live Camera
                       </span>
-                      <span className="rounded-full bg-slate-900/70 px-3 py-1 text-xs font-semibold text-white">
+                      <span className="rounded-full bg-slate-900/80 px-3 py-1 text-xs font-semibold text-white shadow backdrop-blur-sm">
                         {type === "in" ? "Punch In Session" : "Punch Out Session"}
                       </span>
                     </div>
 
                     {/* Live validation message overlay */}
-                    <div className="absolute inset-x-6 bottom-6 flex justify-center">
+                    <div className="pointer-events-none absolute inset-x-6 bottom-6 flex justify-center">
                       <span className={`rounded-2xl px-4 py-2.5 text-xs font-semibold shadow-lg text-center backdrop-blur-md transition-all duration-300 border ${
                         validation.isValid
                           ? "bg-emerald-500/95 text-white border-emerald-400"
@@ -669,7 +1022,7 @@ export default function Attendance() {
                     Retry verification setup
                   </button>
                 </div>
-              ) : !cameraOn ? (
+              ) : cameraState === "idle" || cameraState === "error" ? (
                 <div className="mt-6 space-y-4">
                   {activePunch?.on_leave ? (
                     <div className="mb-6 rounded-2xl border border-rose-100 bg-rose-50/50 p-5 text-center shadow-inner">
@@ -695,7 +1048,7 @@ export default function Attendance() {
                         Workday will close once your punch out is approved.
                       </p>
                     </div>
-                  ) : activePunch?.is_punched_in && (
+                  ) : (activePunch?.is_punched_in && activePunch?.punch_in_status !== "leave" && Boolean(activePunch?.punch_in_time)) && (
                     activePunch.punch_in_status === "approved" ? (
                       elapsedTime && (
                         <div className="mb-6 rounded-2xl border border-emerald-100 bg-emerald-50/50 p-5 text-center shadow-inner">
@@ -742,7 +1095,7 @@ export default function Attendance() {
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-center text-sm font-medium text-slate-500">
                       Awaiting approval for punch out exception.
                     </div>
-                  ) : activePunch?.is_punched_in ? (
+                  ) : (activePunch?.is_punched_in && activePunch?.punch_in_status !== "leave" && Boolean(activePunch?.punch_in_time)) ? (
                     <button
                       onClick={() => openCamera("out")}
                       className="flex w-full items-center justify-between rounded-2xl bg-rose-600 px-5 py-4 text-left text-white transition hover:bg-rose-700"
@@ -778,13 +1131,20 @@ export default function Attendance() {
                       Face verification is starting. Keep your face in view; submission will be ready as soon as checks pass.
                     </div>
                   )}
-                  <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                    Camera and location are ready. Review the details below and submit the current {type === "in" ? "punch in" : "punch out"}.
-                  </div>
+                  {!punchDetails?.latitude ? (
+                    <div className="flex items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800" role="status">
+                      <div className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
+                      Acquiring high-accuracy GPS coordinates...
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                      Camera and location are ready. Review the details below and submit the current {type === "in" ? "punch in" : "punch out"}.
+                    </div>
+                  )}
 
                   <button
                     onClick={handleSubmit}
-                    disabled={loading || !validation.isValid}
+                    disabled={loading || !validation.isValid || !punchDetails?.latitude || !videoReady}
                     className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 px-5 py-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Camera size={18} />
@@ -793,7 +1153,8 @@ export default function Attendance() {
 
                   <button
                     onClick={stopCamera}
-                    className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 px-5 py-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                    disabled={loading}
+                    className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 px-5 py-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
                   >
                     <XCircle size={18} />
                     Cancel
@@ -818,12 +1179,22 @@ export default function Attendance() {
                       ? (activePunch.punch_in_status === "approved"
                           ? new Date(activePunch.punch_in_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
                           : "Pending Approval")
-                      : (type === "in" ? punchDetails?.time : "--")
+                      : (cameraState !== "idle" && type === "in"
+                          ? "Recorded on submission"
+                          : "--")
                   }
                 />
                 <InfoCard
                   label="Current Action"
-                  value={type === "in" ? "Punch In" : type === "out" ? "Punch Out" : "--"}
+                  value={
+                    type === "in"
+                      ? "Punch In"
+                      : type === "out"
+                      ? "Punch Out"
+                      : activePunch?.is_punched_in
+                      ? "Active Shift"
+                      : "Standby"
+                  }
                 />
                 <InfoCard
                   label="Latitude"
@@ -843,7 +1214,19 @@ export default function Attendance() {
                 />
                 <InfoCard
                   label="Camera Status"
-                  value={cameraOn ? "Open" : "Closed"}
+                  value={
+                    cameraState === "ready"
+                      ? "Live & Active"
+                      : cameraState === "starting"
+                      ? "Starting Preview..."
+                      : cameraState === "requesting"
+                      ? "Connecting..."
+                      : cameraState === "capturing"
+                      ? "Capturing Frame..."
+                      : cameraState === "error"
+                      ? "Error"
+                      : "Closed"
+                  }
                 />
               </div>
             </div>

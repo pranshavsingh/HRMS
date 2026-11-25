@@ -133,7 +133,7 @@ function downloadCsv(filename, rows) {
 export default function TeamAttendance() {
   const { showPopup } = usePopup();
   const { role: authRole } = useAuth();
-  const role = authRole || localStorage.getItem("role") || "manager";
+  const role = authRole || "manager";
   const roleContext = contextByRole[role] || contextByRole.manager;
 
   const { querySiteId } = useSite();

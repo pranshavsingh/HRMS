@@ -28,8 +28,7 @@ export async function listRosters(req, res, next) {
 export async function getRosterById(req, res, next) {
   try {
     const roster = await rosterService.getRosterHeaderById(req.tenantId, req.params.id, req.user.role === "manager" ? req.user.id : null);
-    if (roster.site_id == null && !siteService.isGlobalRole(req.user.role)) throw new AppError("Roster does not belong to an assigned site", 403);
-    await siteService.getSiteScope(req.tenantId, req.user, roster.site_id || null);
+    if (!roster) throw new AppError("Roster not found", 404);
     return res.status(200).json(roster);
   } catch (err) {
     next(err);
@@ -68,8 +67,7 @@ export async function getRosterCalendar(req, res, next) {
 export async function publishRoster(req, res, next) {
   try {
     const roster = await rosterService.getRosterHeaderById(req.tenantId, req.params.id);
-    if (roster.site_id == null && !siteService.isGlobalRole(req.user.role)) throw new AppError("Roster does not belong to an assigned site", 403);
-    await siteService.getSiteScope(req.tenantId, req.user, roster.site_id || null);
+    if (!roster) throw new AppError("Roster not found", 404);
     const result = await rosterService.publishRoster(req.tenantId, req.params.id, req.user.id);
     return res.status(200).json(result);
   } catch (err) {

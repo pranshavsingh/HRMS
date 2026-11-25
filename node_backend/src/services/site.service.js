@@ -1,5 +1,6 @@
 import { db } from "../db/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { realtimeService } from "./realtime.service.js";
 
 const GLOBAL_ROLES = new Set(["admin", "superadmin", "hr"]);
 
@@ -58,7 +59,9 @@ export const siteService = {
          VALUES (?, ?, ?, ?, ?, ?)`,
         [tenantId, code, name, data.address?.trim() || null, actor.id, actor.id]
       );
-      return db.get("SELECT id, tenant_id, code, name, address, is_active FROM workforce_site WHERE id = ? AND tenant_id = ?", [result.lastID || result.insertId, tenantId]);
+      const created = await db.get("SELECT id, tenant_id, code, name, address, is_active FROM workforce_site WHERE id = ? AND tenant_id = ?", [result.lastID || result.insertId, tenantId]);
+      realtimeService.emitToTenant(tenantId, "site:updated", { siteId: created.id, action: "created" });
+      return created;
     } catch (error) {
       if (error.code === "ER_DUP_ENTRY") throw new AppError("A site with this code already exists", 409);
       throw error;
@@ -90,7 +93,9 @@ export const siteService = {
       if (error.code === "ER_DUP_ENTRY") throw new AppError("A site with this code already exists", 409);
       throw error;
     }
-    return db.get("SELECT id, tenant_id, code, name, address, is_active FROM workforce_site WHERE id = ? AND tenant_id = ?", [siteId, tenantId]);
+    const updated = await db.get("SELECT id, tenant_id, code, name, address, is_active FROM workforce_site WHERE id = ? AND tenant_id = ?", [siteId, tenantId]);
+    realtimeService.emitToTenant(tenantId, "site:updated", { siteId, action: "updated" });
+    return updated;
   },
 
   async deleteSite(tenantId, siteId, actor) {
@@ -102,7 +107,7 @@ export const siteService = {
 
     const [attCount, leaveCount, rosterCount, rosterEntryCount] = await Promise.all([
       db.get("SELECT COUNT(*) AS total FROM attendance_attendance WHERE tenant_id = ? AND site_id = ?", [tenantId, siteId]),
-      db.get("SELECT COUNT(*) AS total FROM leave_leave WHERE site_id = ?", [siteId]),
+      db.get("SELECT COUNT(*) AS total FROM leave_leave WHERE tenant_id = ? AND site_id = ?", [tenantId, siteId]),
       db.get("SELECT COUNT(*) AS total FROM workforce_roster_header WHERE tenant_id = ? AND site_id = ?", [tenantId, siteId]),
       db.get("SELECT COUNT(*) AS total FROM workforce_roster_entry WHERE tenant_id = ? AND site_id = ?", [tenantId, siteId]),
     ]);
@@ -226,28 +231,33 @@ export const siteService = {
   },
 
   async getSiteScope(tenantId, actor, requestedSiteId = null) {
-    if (GLOBAL_ROLES.has(actor.role)) {
-      if (!requestedSiteId || requestedSiteId === "all") return { siteIds: null, unassigned: false };
-      if (requestedSiteId === "unassigned") return { siteIds: [], unassigned: true };
-      const siteId = Number(requestedSiteId);
-      if (!Number.isInteger(siteId) || siteId < 1) throw new AppError("Invalid site", 400);
-      const site = await db.get("SELECT id FROM workforce_site WHERE tenant_id = ? AND id = ?", [tenantId, siteId]);
-      if (!site) throw new AppError("Site not found", 404);
-      return { siteIds: [siteId], unassigned: false };
+    let allowedSiteIds = null;
+    if (actor && actor.role === "manager") {
+      const grants = await db.all(
+        "SELECT site_id FROM workforce_site_access WHERE tenant_id = ? AND user_id = ?",
+        [tenantId, actor.id]
+      );
+      if (grants.length > 0) {
+        allowedSiteIds = grants.map((g) => Number(g.site_id));
+      }
     }
 
-    if (!(["hr", "manager"].includes(actor.role))) throw new AppError("No site access", 403);
-    const rows = await db.all(
-      `SELECT s.id FROM workforce_site_access sa JOIN workforce_site s
-         ON s.id = sa.site_id AND s.tenant_id = sa.tenant_id
-       WHERE sa.tenant_id = ? AND sa.user_id = ? AND s.is_active = 1 ORDER BY s.id`,
-      [tenantId, actor.id]
-    );
-    const allowed = rows.map((row) => Number(row.id));
-    if (!requestedSiteId || requestedSiteId === "all") return { siteIds: allowed, unassigned: false };
-    if (requestedSiteId === "unassigned") throw new AppError("You do not have access to unassigned employee records", 403);
+    if (!requestedSiteId || requestedSiteId === "all") {
+      return { siteIds: allowedSiteIds, unassigned: false };
+    }
+    if (requestedSiteId === "unassigned") {
+      if (allowedSiteIds !== null) {
+        throw new AppError("You do not have permission to view unassigned site records", 403);
+      }
+      return { siteIds: [], unassigned: true };
+    }
     const siteId = Number(requestedSiteId);
-    if (!Number.isInteger(siteId) || !allowed.includes(siteId)) throw new AppError("You do not have access to this site", 403);
+    if (!Number.isInteger(siteId) || siteId < 1) throw new AppError("Invalid site", 400);
+    const site = await db.get("SELECT id FROM workforce_site WHERE tenant_id = ? AND id = ?", [tenantId, siteId]);
+    if (!site) throw new AppError("Site not found", 404);
+    if (allowedSiteIds !== null && !allowedSiteIds.includes(siteId)) {
+      throw new AppError("You do not have access to this work site", 403);
+    }
     return { siteIds: [siteId], unassigned: false };
   },
 
@@ -255,26 +265,37 @@ export const siteService = {
     const member = await db.get("SELECT 1 AS present FROM workforce_user_tenant WHERE tenant_id=? AND user_id=?", [tenantId, employeeId]);
     if (!member) throw new AppError("Employee not found in this organization", 404);
     if (Number(actor.id) === Number(employeeId)) return true;
-    if (GLOBAL_ROLES.has(actor.role)) return true;
-    if (!["hr", "manager"].includes(actor.role)) throw new AppError("You do not have permission to view this employee", 403);
-    const resolvedWorkDate = workDate instanceof Date
-      ? ymd(workDate)
-      : (/^\d{4}-\d{2}-\d{2}/.test(String(workDate)) ? String(workDate).slice(0, 10) : ymd());
-    const siteId = await this.getEmployeeSiteId(tenantId, employeeId, resolvedWorkDate);
-    if (!siteId) {
-      if (actor.role === "hr") return true;
-      throw new AppError("Employee has no site assignment for this date", 403);
-    }
-    const accessible = await db.get(
-      `SELECT 1 AS allowed FROM workforce_site_access sa
-       JOIN workforce_site s ON s.id=sa.site_id AND s.tenant_id=sa.tenant_id AND s.is_active=1
-       WHERE sa.tenant_id = ? AND sa.user_id = ? AND sa.site_id = ?`,
-      [tenantId, actor.id, siteId]
-    );
-    if (!accessible) throw new AppError("You do not have access to this employee's site", 403);
-    if (requireDirectReport || actor.role === "manager") {
-      const report = await db.get("SELECT 1 AS allowed FROM accounts_employeeprofile WHERE user_id = ? AND manager_id = ?", [employeeId, actor.id]);
-      if (!report) throw new AppError("You do not have permission to view this employee", 403);
+    if (GLOBAL_ROLES.has(actor.role) || actor.role === "hr") return true;
+    if (actor.role !== "manager") throw new AppError("You do not have permission to view this employee", 403);
+
+    // For managers: verify direct reporting (or matching team assignment when requireDirectReport is false)
+    const report = requireDirectReport
+      ? await db.get(
+          "SELECT 1 AS allowed FROM accounts_employeeprofile WHERE user_id = ? AND manager_id = ?",
+          [employeeId, actor.id]
+        )
+      : await db.get(
+          `SELECT 1 AS allowed FROM accounts_employeeprofile ep
+           LEFT JOIN accounts_employeeprofile mgr_ep ON mgr_ep.user_id = ?
+           WHERE ep.user_id = ? AND (
+             ep.manager_id = ? 
+             OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = mgr_ep.team_name)
+           )`,
+          [actor.id, employeeId, actor.id]
+        );
+    if (!report) throw new AppError("You do not have permission to view this employee", 403);
+
+    if (workDate) {
+      const grants = await db.all(
+        "SELECT site_id FROM workforce_site_access WHERE tenant_id = ? AND user_id = ?",
+        [tenantId, actor.id]
+      );
+      if (grants.length > 0) {
+        const empSiteId = await this.getEmployeeSiteId(tenantId, employeeId, workDate);
+        if (empSiteId && !grants.some((g) => Number(g.site_id) === Number(empSiteId))) {
+          throw new AppError("You do not have site access to view this employee", 403);
+        }
+      }
     }
     return true;
   },

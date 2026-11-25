@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback } from "react";
-import { Link } from "expo-router";
+import { useRouter } from "expo-router";
 import {
   ActivityIndicator,
   Alert,
@@ -16,6 +16,7 @@ import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
 import Card from "../../components/Card";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { formatCompanyDate } from "../../utils/date";
 import { 
   Users, 
   CheckCircle2, 
@@ -25,10 +26,12 @@ import {
   Timer, 
   CalendarDays,
   ShieldCheck,
-  Briefcase
+  Briefcase,
+  ChevronRight
 } from "lucide-react-native";
 
 export default function DashboardScreen() {
+  const router = useRouter();
   const { user, isAuthenticated, activeTab, setActiveTab } = useAuth();
   const role = user?.role || "employee";
 
@@ -37,7 +40,6 @@ export default function DashboardScreen() {
 
   // State data for different views
   const [personalData, setPersonalData] = useState<any>(null);
-  const [myRosterData, setMyRosterData] = useState<any>(null);
   const [managerData, setManagerData] = useState<any>(null);
   const [hrData, setHrData] = useState<any>(null);
   const [adminSummary, setAdminSummary] = useState<any>(null);
@@ -55,13 +57,7 @@ export default function DashboardScreen() {
       const personalRes = await api.get("/attendance/dashboard/");
       setPersonalData(personalRes.data);
 
-      // 1b. Fetch Personal Roster & Assigned Shift (Stage 3)
-      try {
-        const rosterRes = await api.get("/v1/workforce/rosters/my-roster");
-        setMyRosterData(rosterRes.data);
-      } catch (rosterErr) {
-        // Non-blocking: continue if roster endpoint is temporarily offline
-      }
+
 
       // 2. Fetch specific role-based data
       if (role === "manager" || role === "superadmin") {
@@ -73,7 +69,7 @@ export default function DashboardScreen() {
         }
       }
 
-      if (role === "hr" || role === "superadmin") {
+      if (role === "hr" || role === "admin" || role === "superadmin") {
         try {
           const hrRes = await api.get("/attendance/hr-dashboard/");
           setHrData(hrRes.data);
@@ -103,9 +99,12 @@ export default function DashboardScreen() {
   useRealtime("attendance_update", () => loadDashboardData(false));
   useRealtime("leave_update", () => loadDashboardData(false));
   useRealtime("employee_update", () => loadDashboardData(false));
+  useRealtime("schedule_update", () => loadDashboardData(false));
+  useRealtime("realtime:connected", () => loadDashboardData(false));
 
   useEffect(() => {
-    loadDashboardData(true);
+    const t = setTimeout(() => { void loadDashboardData(true); }, 0);
+    return () => clearTimeout(t);
   }, [loadDashboardData]);
 
   const onRefresh = () => {
@@ -148,12 +147,6 @@ export default function DashboardScreen() {
         <Text style={styles.heroDesc}>
           Review logged shift metrics, leave balances, and pending supervisor reviews.
         </Text>
-        <Link href={"/(tabs)/holidays" as any} asChild>
-          <TouchableOpacity accessibilityRole="button" style={styles.holidayLink}>
-            <CalendarDays size={17} color="#a7f3d0" />
-            <Text style={styles.holidayLinkText}>View Company Holiday Calendar</Text>
-          </TouchableOpacity>
-        </Link>
 
         <View style={styles.heroGrid}>
           <View style={styles.heroTile}>
@@ -194,7 +187,7 @@ export default function DashboardScreen() {
         <Card title="Leave Balance" value={String(balance)} info="Days Available" icon="FileText" tone="emerald" />
         <Card title="Leaves Taken" value={String(taken)} info="Approved Applications" icon="CheckCircle2" tone="amber" />
         <Card title="Leaves Allotted" value={String(allotted)} info="Total Allocation" icon="CalendarDays" tone="violet" />
-        <Card title="Pending Review" value={String(pending)} info="Action Required" icon="AlertCircle" tone="rose" />
+        <Card title="Pending Review" value={String(pending)} info="Action Required" icon="AlertCircle" tone="rose" fullWidth={true} />
       </View>
     );
   };
@@ -204,7 +197,16 @@ export default function DashboardScreen() {
 
     return (
       <View style={styles.listContainer}>
-        <Text style={styles.listTitle}>Work Timeline</Text>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          <Text style={styles.listTitle}>Work Timeline</Text>
+          <TouchableOpacity
+            onPress={() => router.push("/(tabs)/history")}
+            style={styles.timelineRegisterLink}
+          >
+            <Text style={styles.timelineRegisterLinkText}>Monthly Register</Text>
+            <ChevronRight size={14} color="#2457D6" />
+          </TouchableOpacity>
+        </View>
         <Text style={styles.listSubtitle}>Your recent punch records</Text>
 
         {dailyWork.length === 0 ? (
@@ -213,7 +215,7 @@ export default function DashboardScreen() {
           dailyWork.map((item: any, idx: number) => (
             <View key={`${item.date}-${idx}`} style={styles.timelineRow}>
               <View style={styles.timelineMain}>
-                <Text style={styles.timelineDate}>{item.date}</Text>
+                <Text style={styles.timelineDate}>{formatCompanyDate(item.date)}</Text>
                 <Text style={styles.timelinePunches}>
                   In: {item.punch_in || "--"} | Out: {item.punch_out || "--"}
                 </Text>
@@ -233,75 +235,20 @@ export default function DashboardScreen() {
     );
   };
 
-  const renderPersonalRosterSchedule = () => {
-    const curShift = myRosterData?.current_shift;
-    const schedule = myRosterData?.schedule || [];
-
-    return (
-      <View style={styles.listContainer}>
-        <View style={styles.rosterHeaderRow}>
-          <View>
-            <Text style={styles.listTitle}>Assigned Shift & Schedule</Text>
-            <Text style={styles.listSubtitle}>Today's roster & upcoming shifts</Text>
-          </View>
-          {curShift && (
-            <View style={[styles.rosterBadge, curShift.is_overnight ? styles.rosterBadgeOvernight : styles.rosterBadgeDay]}>
-              <Text style={curShift.is_overnight ? styles.rosterBadgeTextOvernight : styles.rosterBadgeTextDay}>
-                {curShift.is_overnight ? "Overnight" : "Day Shift"}
-              </Text>
-            </View>
-          )}
-        </View>
-
-        {curShift ? (
-          <View style={styles.activeShiftCard}>
-            <View style={styles.activeShiftInfo}>
-              <Text style={styles.activeShiftName}>{curShift.shift_name}</Text>
-              <Text style={styles.activeShiftTimes}>
-                {curShift.start_time?.slice(0, 5)} - {curShift.end_time?.slice(0, 5)}
-                {curShift.is_overnight && " (+1 day)"}
-              </Text>
-            </View>
-            <View style={styles.activeShiftHours}>
-              <Text style={styles.activeShiftHoursText}>{curShift.total_work_hours}h</Text>
-              <Text style={styles.activeShiftHoursLabel}>Scheduled</Text>
-            </View>
-          </View>
-        ) : (
-          <Text style={styles.emptyText}>No active shift scheduled for today.</Text>
-        )}
-
-        {schedule.length > 0 && (
-          <View style={styles.rosterList}>
-            <Text style={styles.rosterSubheading}>Upcoming Schedule</Text>
-            {schedule.slice(0, 7).map((item: any, idx: number) => (
-              <View key={`${item.work_date}-${idx}`} style={styles.timelineRow}>
-                <View style={styles.timelineMain}>
-                  <Text style={styles.timelineDate}>{item.work_date}</Text>
-                  <Text style={styles.timelinePunches}>
-                    {item.shift_name} ({item.start_time?.slice(0, 5)} - {item.end_time?.slice(0, 5)})
-                    {item.is_overnight && " (+1d)"}
-                  </Text>
-                </View>
-                <View style={styles.timelineBadgeContainer}>
-                  <Text style={styles.timelineHours}>{Number(item.total_work_hours || 0).toFixed(1)}h</Text>
-                  <View style={styles.badgeApproved}>
-                    <Text style={styles.badgeTextApproved}>Assigned</Text>
-                  </View>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-      </View>
-    );
-  };
-
   const renderSystemHeader = () => {
-    const totalStaff = adminSummary?.staff || hrData?.people_summary?.total_people || 0;
-    const presentToday = adminSummary?.present_today || hrData?.people_summary?.present_today || 0;
-    const pendingLeave = adminSummary?.pending_leave_requests || hrData?.people_summary?.pending_leave_requests || 0;
-    const pendingPunch = adminSummary?.pending_attendance_approvals || hrData?.people_summary?.pending_attendance_approvals || 0;
+    const isMgrRole = role === "manager";
+    const totalStaff = isMgrRole
+      ? (managerData?.team_summary?.team_members ?? 0)
+      : (adminSummary?.staff ?? hrData?.people_summary?.total_people ?? 0);
+    const presentToday = isMgrRole
+      ? (managerData?.team_summary?.present_today ?? 0)
+      : (adminSummary?.present_today ?? hrData?.people_summary?.present_today ?? 0);
+    const pendingLeave = isMgrRole
+      ? (managerData?.team_summary?.pending_leave_approvals ?? 0)
+      : (adminSummary?.pending_leave_requests ?? hrData?.people_summary?.pending_leave_requests ?? 0);
+    const pendingPunch = isMgrRole
+      ? (managerData?.team_summary?.pending_attendance_approvals ?? 0)
+      : (adminSummary?.pending_attendance_approvals ?? hrData?.people_summary?.pending_attendance_approvals ?? 0);
 
     return (
       <View style={[styles.heroSection, styles.workspaceHero]}>
@@ -340,23 +287,35 @@ export default function DashboardScreen() {
   };
 
   const renderSystemMetrics = () => {
-    const present = adminSummary?.present_today || hrData?.people_summary?.present_today || 0;
-    const pendingLeaves = adminSummary?.pending_leave_requests || hrData?.people_summary?.pending_leave_requests || 0;
-    const pendingPunches = adminSummary?.pending_attendance_approvals || hrData?.people_summary?.pending_attendance_approvals || 0;
-    const totalStaff = adminSummary?.staff || hrData?.people_summary?.total_people || 0;
+    const isMgrRole = role === "manager";
+    const present = isMgrRole
+      ? (managerData?.team_summary?.present_today ?? 0)
+      : (adminSummary?.present_today ?? hrData?.people_summary?.present_today ?? 0);
+    const pendingLeaves = isMgrRole
+      ? (managerData?.team_summary?.pending_leave_approvals ?? 0)
+      : (adminSummary?.pending_leave_requests ?? hrData?.people_summary?.pending_leave_requests ?? 0);
+    const pendingPunches = isMgrRole
+      ? (managerData?.team_summary?.pending_attendance_approvals ?? 0)
+      : (adminSummary?.pending_attendance_approvals ?? hrData?.people_summary?.pending_attendance_approvals ?? 0);
+    const totalStaff = isMgrRole
+      ? (managerData?.team_summary?.team_members ?? 0)
+      : (adminSummary?.staff ?? hrData?.people_summary?.total_people ?? 0);
 
     return (
       <View style={styles.metricsContainer}>
-        <Card title="Present Today" value={String(present)} info="In-office attendance" icon="CheckCircle2" tone="emerald" />
-        <Card title="Pending Leave" value={String(pendingLeaves)} info="Leave queue requests" icon="FileText" tone="amber" />
-        <Card title="Pending Punch" value={String(pendingPunches)} info="Exception adjustments" icon="AlertCircle" tone="rose" />
-        <Card title="Total Staff" value={String(totalStaff)} info="Active payroll directory" icon="Users" tone="cyan" />
+        <Card title="Present Today" value={String(present)} info={isMgrRole ? "Team in-office" : "In-office attendance"} icon="CheckCircle2" tone="emerald" />
+        <Card title="Pending Leave" value={String(pendingLeaves)} info={isMgrRole ? "Team leave approvals" : "Leave queue requests"} icon="FileText" tone="amber" />
+        <Card title="Pending Punch" value={String(pendingPunches)} info={isMgrRole ? "Team punch approvals" : "Exception adjustments"} icon="AlertCircle" tone="rose" />
+        <Card title={isMgrRole ? "Team Members" : "Total Staff"} value={String(totalStaff)} info={isMgrRole ? "Direct reports assigned" : "Active payroll directory"} icon="Users" tone="cyan" />
       </View>
     );
   };
 
   const renderRecentAttendance = () => {
-    const recent = hrData?.people_summary?.recent_people_attendance || adminSummary?.today_present_employees || [];
+    const isMgrRole = role === "manager";
+    const recent = isMgrRole
+      ? (managerData?.team_summary?.recent_team_attendance || [])
+      : (hrData?.people_summary?.recent_people_attendance || adminSummary?.today_present_employees || []);
 
     return (
       <View style={styles.listContainer}>
@@ -371,7 +330,7 @@ export default function DashboardScreen() {
               <View style={styles.timelineMain}>
                 <Text style={styles.timelineDate}>{item.employee || item.username}</Text>
                 <Text style={styles.timelinePunches}>
-                  Role: {item.role || "Employee"} | Date: {item.date || "Today"}
+                  Role: {item.role || "Employee"} | Date: {item.date ? formatCompanyDate(item.date) : "Today"}
                 </Text>
               </View>
               <View style={styles.timelineBadgeContainer}>
@@ -397,7 +356,7 @@ export default function DashboardScreen() {
         style={styles.container}
         contentContainerStyle={styles.scrollContent}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#10b981" />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
         }
       >
         {/* Warning Indicator */}
@@ -433,8 +392,7 @@ export default function DashboardScreen() {
         {activeTab === "personal" ? (
           <>
             {renderPersonalHeader()}
-            {renderPersonalRosterSchedule()}
-            {renderPersonalMetrics()}
+            {role !== "employee" && renderPersonalMetrics()}
             {renderPersonalTimeline()}
           </>
         ) : (
@@ -452,38 +410,38 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a", // Premium Dark Slate
+    backgroundColor: "#F6F8FC",
   },
   container: {
     flex: 1,
   },
   scrollContent: {
-    padding: 16,
-    paddingBottom: 40,
+    padding: 20,
+    paddingBottom: 36,
   },
   loadingContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     alignItems: "center",
     justifyContent: "center",
   },
   warningContainer: {
-    backgroundColor: "#7f1d1d",
-    borderRadius: 16,
-    padding: 12,
+    backgroundColor: "#FFF5F5",
+    borderRadius: 14,
+    padding: 13,
     marginBottom: 16,
     borderWidth: 1,
-    borderColor: "#f87171",
+    borderColor: "#F3CACA",
   },
   warningText: {
-    color: "#fecaca",
+    color: "#A73434",
     fontSize: 13,
     textAlign: "center",
   },
   // Switcher Tab Styles
   tabContainer: {
     flexDirection: "row",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#EAF0F8",
     borderRadius: 14,
     padding: 4,
     marginBottom: 16,
@@ -495,32 +453,37 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   tabButtonActive: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#D9E3F0",
   },
   tabButtonText: {
-    color: "#94a3b8",
+    color: "#6B778C",
     fontSize: 14,
     fontWeight: "600",
   },
   tabButtonTextActive: {
-    color: "#10b981", // Active emerald text
+    color: "#2457D6",
   },
   // Hero Section
   heroSection: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#2457D6",
     borderRadius: 24,
-    padding: 20,
+    padding: 22,
     marginBottom: 20,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#2457D6",
+    shadowColor: "#2457D6",
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   workspaceHero: {
-    borderColor: "#10b98130", // Emerald glow border
+    borderColor: "#2457D6",
   },
   heroPreText: {
-    color: "#10b981",
+    color: "#C9D8FF",
     fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase",
@@ -528,19 +491,27 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   heroTitle: {
-    color: "#ffffff",
-    fontSize: 22,
+    color: "#FFFFFF",
+    fontSize: 24,
     fontWeight: "800",
   },
   heroDesc: {
-    color: "#94a3b8",
+    color: "#D8E4FF",
     fontSize: 13,
     lineHeight: 18,
     marginTop: 8,
     marginBottom: 16,
   },
-  holidayLink: { flexDirection: "row", alignItems: "center", gap: 9, alignSelf: "flex-start", paddingHorizontal: 13, paddingVertical: 10, marginBottom: 16, borderRadius: 10, backgroundColor: "#064e3b" },
-  holidayLinkText: { color: "#a7f3d0", fontSize: 13, fontWeight: "700" },
+  timelineRegisterLink: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+  },
+  timelineRegisterLinkText: {
+    fontSize: 12,
+    color: "#2457D6",
+    fontWeight: "700",
+  },
   heroGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -548,22 +519,22 @@ const styles = StyleSheet.create({
   },
   heroTile: {
     width: "48%",
-    backgroundColor: "#0f172a90",
+    backgroundColor: "#1D4FB9",
     borderRadius: 16,
     padding: 12,
     margin: "1%",
     borderWidth: 1,
-    borderColor: "#33415550",
+    borderColor: "#5B82DE",
   },
   heroTileLabel: {
-    color: "#94a3b8",
+    color: "#D4E0FF",
     fontSize: 10,
     textTransform: "uppercase",
     fontWeight: "600",
     marginTop: 4,
   },
   heroTileValue: {
-    color: "#ffffff",
+    color: "#FFFFFF",
     fontSize: 18,
     fontWeight: "700",
     marginTop: 2,
@@ -577,25 +548,30 @@ const styles = StyleSheet.create({
   },
   // Roster or Timeline rows
   listContainer: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
     padding: 20,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   listTitle: {
-    color: "#ffffff",
+    color: "#FFFFFF",
     fontSize: 18,
     fontWeight: "700",
   },
   listSubtitle: {
-    color: "#94a3b8",
+    color: "#6B778C",
     fontSize: 12,
     marginTop: 2,
     marginBottom: 16,
   },
   emptyText: {
-    color: "#64748b",
+    color: "#8793A5",
     fontSize: 14,
     textAlign: "center",
     paddingVertical: 20,
@@ -605,7 +581,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     borderTopWidth: 1,
-    borderTopColor: "#334155",
+    borderTopColor: "#EDF1F6",
     paddingVertical: 12,
   },
   timelineMain: {
@@ -613,12 +589,12 @@ const styles = StyleSheet.create({
     paddingRight: 12,
   },
   timelineDate: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
     fontWeight: "600",
   },
   timelinePunches: {
-    color: "#94a3b8",
+    color: "#6B778C",
     fontSize: 11,
     marginTop: 4,
   },
@@ -626,12 +602,12 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
   },
   timelineHours: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
     fontWeight: "700",
   },
   badgeApproved: {
-    backgroundColor: "#064e3b",
+    backgroundColor: "#174AB8",
     borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 2,
@@ -674,7 +650,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   rosterBadgeDay: {
-    backgroundColor: "#064e3b",
+    backgroundColor: "#174AB8",
     borderColor: "#065f46",
   },
   rosterBadgeOvernight: {
@@ -726,7 +702,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   activeShiftHoursText: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 15,
     fontWeight: "800",
   },
@@ -739,7 +715,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   rosterSubheading: {
-    color: "#94a3b8",
+    color: "#6B778C",
     fontSize: 12,
     fontWeight: "600",
     textTransform: "uppercase",
@@ -751,7 +727,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     borderTopWidth: 1,
-    borderTopColor: "#334155",
+    borderTopColor: "#EDF1F6",
     paddingVertical: 10,
   },
   rosterRowDate: {
@@ -772,7 +748,7 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   rosterShiftTimes: {
-    color: "#94a3b8",
+    color: "#6B778C",
     fontSize: 11,
   },
   rosterRowHours: {

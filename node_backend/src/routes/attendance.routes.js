@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { authenticate, authorize } from "../middleware/auth.js";
 import { upload } from "../middleware/upload.js";
-import { validate, punchSchema, attendanceApprovalActionSchema } from "../middleware/validation.js";
+import { validate, punchSchema, attendanceApprovalActionSchema, regularizeAttendanceSchema } from "../middleware/validation.js";
 import * as c from "../controllers/attendance.controller.js";
 
 const r = Router();
@@ -13,10 +13,13 @@ r.get("/status/", authenticate, c.status);
 r.get("/approvals/", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), c.approvals);
 r.post("/approvals/:approval_id/", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), validate(attendanceApprovalActionSchema), c.approvalAction);
 r.get("/dashboard/", authenticate, c.dashboard);
-r.get("/hr-dashboard/", authenticate, authorize(["hr", "superadmin"]), c.hrDashboard);
+r.get("/hr-dashboard/", authenticate, authorize(["hr", "admin", "superadmin"]), c.hrDashboard);
 r.get("/manager-dashboard/", authenticate, authorize(["manager", "superadmin"]), c.managerDashboard);
 r.get("/team-analytics/", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), c.teamAnalytics);
 r.get("/team-attendance/", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), c.teamAttendance);
 r.get("/history/", authenticate, c.history);
+r.get("/my-register/", authenticate, c.myMonthlyRegister);
+r.get("/monthly-register/", authenticate, c.myMonthlyRegister);
+r.post("/regularize/", authenticate, validate(regularizeAttendanceSchema), c.regularizeAttendance);
 
 export default r;

@@ -14,11 +14,12 @@ import {
 import API from "../api/axios";
 import { useSite } from "../context/SiteContext";
 import { useAuth } from "../context/AuthContext";
+import Layout from "../components/layout/Layout";
 
-export default function SiteManagement() {
+export default function SiteManagement({ embedded = false }) {
   const { sites, refreshSites, loadingSites } = useSite();
   const { role } = useAuth();
-  const userRole = role || localStorage.getItem("role") || "";
+  const userRole = role || "";
   const isSuperAdmin = userRole === "superadmin";
   const canEditSites = ["admin", "superadmin"].includes(userRole);
 
@@ -144,8 +145,8 @@ export default function SiteManagement() {
     }
   };
 
-  return (
-    <div className="shift-sites max-w-6xl mx-auto space-y-6">
+  const content = (
+      <div className="shift-sites max-w-6xl mx-auto space-y-6">
       {/* Alert banner */}
       {message && (
         <div
@@ -174,6 +175,7 @@ export default function SiteManagement() {
       )}
 
       {/* 1. SITE CREATION FORM */}
+      {canEditSites && (
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex items-center gap-2.5 mb-5 pb-3 border-b border-slate-100">
           <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold">
@@ -243,6 +245,7 @@ export default function SiteManagement() {
           </div>
         </form>
       </section>
+      )}
 
       {/* 2. CREATED SITES AS CARDS */}
       <section className="space-y-4">
@@ -528,6 +531,8 @@ export default function SiteManagement() {
           </div>
         </div>
       )}
-    </div>
+      </div>
   );
+
+  return embedded ? content : <Layout>{content}</Layout>;
 }

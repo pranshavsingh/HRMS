@@ -1,6 +1,9 @@
-import React, { createContext, useContext, useEffect, useRef, ReactNode } from "react";
+import React, { createContext, useContext, useEffect, useRef, ReactNode, useCallback } from "react";
+import { AppState, AppStateStatus } from "react-native";
+import * as SecureStore from "expo-secure-store";
+import axios from "axios";
 import { useAuth } from "./AuthContext";
-import api from "../services/api";
+import api, { setAuthToken } from "../services/api";
 import { io, Socket } from "socket.io-client";
 
 interface RealtimeContextType {
@@ -13,113 +16,19 @@ const RealtimeContext = createContext<RealtimeContextType | null>(null);
 
 export const RealtimeProvider = ({ children }: { children: ReactNode }) => {
   const { token } = useAuth();
-  const xhrRef = useRef<XMLHttpRequest | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const listenersRef = useRef<{ [event: string]: ((data: any) => void)[] }>({});
+  const processedEventsRef = useRef<Set<string>>(new Set());
+  const lastEventTimestampRef = useRef<string | null>(null);
+  const appStateRef = useRef<AppStateStatus>((AppState.currentState as AppStateStatus) || "active");
 
-  const connect = () => {
-    if (!token) return;
-
-    if (!socketRef.current) {
-      const apiBase = api.defaults.baseURL || "http://localhost:8000/api";
-      const socket = io(new URL(apiBase).origin, {
-        path: "/socket.io",
-        auth: { token },
-        transports: ["websocket", "polling"],
-        reconnection: true,
-      });
-      socket.on("connect", () => triggerEvent("realtime:connected", {}));
-      socket.onAny((event, data) => {
-        if (String(event).startsWith("holiday:")) triggerEvent(String(event), data);
-      });
-      socket.on("connect_error", (error) => console.warn("[Realtime] Socket connection failed:", error.message));
-      socketRef.current = socket;
-    }
-
-    if (xhrRef.current) {
-      xhrRef.current.abort();
-    }
-    const baseURL = api.defaults.baseURL;
-    const url = `${baseURL}/auth/realtime`;
-
-    console.log("[Realtime] Connecting to secure live updates stream:", url);
-
-    const xhr = new XMLHttpRequest();
-    xhrRef.current = xhr;
-    xhr.open("GET", url);
-    xhr.setRequestHeader("Accept", "text/event-stream");
-    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-    xhr.setRequestHeader("Bypass-Tunnel-Reminder", "true");
-
-    let lastIndex = 0;
-
-    xhr.onreadystatechange = () => {
-      if (xhr.readyState === 3 || xhr.readyState === 4) {
-        const text = xhr.responseText || "";
-        const chunk = text.slice(lastIndex);
-        lastIndex = text.length;
-        parseChunk(chunk);
-      }
-      if (xhr.readyState === 4) {
-        console.log("[Realtime] Stream closed. Attempting reconnect in 5s...");
-        setTimeout(() => {
-          if (xhrRef.current === xhr) {
-            connect();
-          }
-        }, 5000);
-      }
-    };
-
-    xhr.onerror = (err) => {
-      console.error("[Realtime] Stream error:", err);
-    };
-
-    xhr.send();
-  };
-
-  const disconnect = () => {
-    if (xhrRef.current) {
-      xhrRef.current.abort();
-      xhrRef.current = null;
-      console.log("[Realtime] Stream disconnected manually");
-    }
-    socketRef.current?.disconnect();
-    socketRef.current = null;
-  };
-
-  const parseChunk = (chunk: string) => {
-    const lines = chunk.split("\n");
-    let currentEvent = "message";
-    let currentData = "";
-
-    lines.forEach((line) => {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        if (currentData) {
-          triggerEvent(currentEvent, currentData);
-          currentData = "";
-          currentEvent = "message";
-        }
-        return;
-      }
-
-      if (trimmed.startsWith("event:")) {
-        currentEvent = trimmed.slice(6).trim();
-      } else if (trimmed.startsWith("data:")) {
-        currentData = trimmed.slice(5).trim();
-      }
-    });
-  };
-
-  const triggerEvent = (event: string, dataValue: any) => {
+  const triggerEvent = useCallback((event: string, dataValue: any) => {
     let data: any = null;
     try {
       data = typeof dataValue === "string" ? (dataValue ? JSON.parse(dataValue) : null) : dataValue;
-    } catch (err) {
+    } catch {
       data = dataValue;
     }
-
-    console.log(`[Realtime] Received event: ${event}`, data);
 
     const callbacks = listenersRef.current[event] || [];
     callbacks.forEach((cb) => {
@@ -129,9 +38,127 @@ export const RealtimeProvider = ({ children }: { children: ReactNode }) => {
         console.error(`[Realtime] Error running callback for event ${event}:`, err);
       }
     });
-  };
+  }, []);
 
-  const subscribe = (event: string, callback: (data: any) => void) => {
+  // Missed-event reconciliation via authoritative sync endpoint
+  const syncMissedEvents = useCallback(async () => {
+    if (!token) return;
+    try {
+      const response = await api.get("/auth/realtime/sync/", {
+        params: lastEventTimestampRef.current ? { since: lastEventTimestampRef.current } : {},
+      });
+      const data = response.data?.data || response.data || {};
+      if (data.timestamp) {
+        lastEventTimestampRef.current = data.timestamp;
+      }
+      if (Array.isArray(data.events) && data.events.length > 0) {
+        data.events.forEach((evt: any) => {
+          if (evt.eventId && !processedEventsRef.current.has(evt.eventId)) {
+            processedEventsRef.current.add(evt.eventId);
+            const payload = evt.payload !== undefined ? evt.payload : evt;
+            triggerEvent(evt.eventType, payload);
+          }
+        });
+      }
+    } catch (err: any) {
+      console.warn("[Realtime] Sync reconciliation note:", err?.message);
+    }
+  }, [token, triggerEvent]);
+
+  const connect = useCallback(() => {
+    if (!token) return;
+
+    if (!socketRef.current) {
+      const apiBase = api.defaults.baseURL || "http://localhost:8000/api";
+      let origin = "http://localhost:8000";
+      try {
+        origin = new URL(apiBase).origin;
+      } catch {}
+
+      const socket = io(origin, {
+        path: "/socket.io",
+        auth: { token },
+        transports: ["websocket", "polling"],
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 10000,
+        randomizationFactor: 0.5,
+      });
+
+      socket.on("connect", () => {
+        console.log("[Realtime] Mobile Socket.IO connected:", socket.id);
+        triggerEvent("realtime:connected", {});
+        syncMissedEvents();
+      });
+
+      socket.onAny((event, data) => {
+        // Event deduplication via eventId
+        const eventId = data?.eventId;
+        if (eventId) {
+          if (processedEventsRef.current.has(eventId)) return;
+          processedEventsRef.current.add(eventId);
+          if (processedEventsRef.current.size > 200) {
+            const first = processedEventsRef.current.values().next().value;
+            if (first) processedEventsRef.current.delete(first);
+          }
+        }
+        if (data?.timestamp) {
+          lastEventTimestampRef.current = data.timestamp;
+        }
+
+        const payload = data?.payload !== undefined ? data.payload : data;
+        triggerEvent(String(event), payload);
+      });
+
+      socket.on("session:revoked", (data) => {
+        console.warn("[Realtime] Mobile session revoked by server:", data);
+        triggerEvent("session:revoked", data);
+      });
+
+      socket.on("connect_error", async (error) => {
+        console.warn("[Realtime] Mobile Socket connection note:", error.message);
+        if (error.message && error.message.includes("Invalid or expired token")) {
+          try {
+            const refreshToken = await SecureStore.getItemAsync("refresh_token");
+            if (refreshToken) {
+              const res = await axios.post(`${apiBase}/auth/refresh/`, {
+                refresh_token: refreshToken,
+                platform: "mobile",
+              });
+              const newAccess = res.data?.access;
+              if (newAccess) {
+                await SecureStore.setItemAsync("token", newAccess);
+                setAuthToken(newAccess);
+                socket.auth = { token: newAccess };
+                socket.connect();
+                return;
+              }
+            }
+          } catch (refreshErr) {
+            console.warn("[Realtime] Token refresh during socket connect failed:", refreshErr);
+          }
+          socket.disconnect();
+        }
+      });
+
+      socketRef.current = socket;
+    } else {
+      socketRef.current.auth = { token };
+      if (!socketRef.current.connected) {
+        socketRef.current.connect();
+      }
+    }
+  }, [token, triggerEvent, syncMissedEvents]);
+
+  const disconnect = useCallback(() => {
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    processedEventsRef.current.clear();
+  }, []);
+
+  const subscribe = useCallback((event: string, callback: (data: any) => void) => {
     if (!listenersRef.current[event]) {
       listenersRef.current[event] = [];
     }
@@ -142,7 +169,27 @@ export const RealtimeProvider = ({ children }: { children: ReactNode }) => {
         (cb) => cb !== callback
       );
     };
-  };
+  }, []);
+
+  // React Native AppState Lifecycle Management (Foreground / Background Synchronization)
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextAppState: AppStateStatus) => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === "active") {
+        console.log("[Realtime] App returned to active foreground. Re-verifying synchronization...");
+        if (socketRef.current && !socketRef.current.connected) {
+          socketRef.current.connect();
+        } else if (socketRef.current?.connected) {
+          triggerEvent("realtime:connected", {});
+        }
+        syncMissedEvents();
+      }
+      appStateRef.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [triggerEvent, syncMissedEvents]);
 
   useEffect(() => {
     if (token) {
@@ -154,7 +201,7 @@ export const RealtimeProvider = ({ children }: { children: ReactNode }) => {
     return () => {
       disconnect();
     };
-  }, [token]);
+  }, [token, connect, disconnect]);
 
   return (
     <RealtimeContext.Provider value={{ connect, disconnect, subscribe }}>

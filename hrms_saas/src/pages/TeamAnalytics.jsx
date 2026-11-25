@@ -184,8 +184,6 @@ export default function TeamAnalytics() {
 
   useRealtime("attendance_update", handleRealtimeUpdate);
   useRealtime("leave_update", handleRealtimeUpdate);
-  useRealtime("punch_in", handleRealtimeUpdate);
-  useRealtime("punch_out", handleRealtimeUpdate);
 
   // TA-AN02: Filter members using canonical status normalization
   const filteredMembers = useMemo(() => {

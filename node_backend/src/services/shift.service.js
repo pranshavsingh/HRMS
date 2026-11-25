@@ -8,6 +8,7 @@ import { AppError } from "../middleware/errorHandler.js";
 import { calculateShiftDuration } from "./shift-validation.service.js";
 import { shiftVersionService } from "./shift-version.service.js";
 import { auditService } from "./audit.service.js";
+import { realtimeService } from "./realtime.service.js";
 
 async function runWithTx(existingTx, fn) {
   if (existingTx) {
@@ -131,7 +132,7 @@ export const shiftService = {
    * Create a new shift and its initial version.
    */
   async createShift(tenantId, data, actorUser, existingTx = null) {
-    return runWithTx(existingTx, async (tx) => {
+    const result = await runWithTx(existingTx, async (tx) => {
       const code = (data.code || "").trim().toUpperCase();
       const name = (data.name || "").trim();
       const description = data.description || null;
@@ -239,13 +240,17 @@ export const shiftService = {
         initial_version: versionResult
       };
     });
+    if (!existingTx && result?.id) {
+      realtimeService.emitToTenant(tenantId, "schedule_update", { type: "shift_created", shiftId: result.id });
+    }
+    return result;
   },
 
   /**
    * Update shift. If timings change, publishes next immutable version and closes prior.
    */
   async updateShift(tenantId, shiftId, data, actorUser, existingTx = null) {
-    return runWithTx(existingTx, async (tx) => {
+    const result = await runWithTx(existingTx, async (tx) => {
       const [shiftRows] = await tx.execute(
         `SELECT * FROM workforce_shift WHERE id = ? AND tenant_id = ? FOR UPDATE`,
         [shiftId, tenantId]
@@ -427,6 +432,10 @@ export const shiftService = {
         ...newVersionInfo
       };
     });
+    if (!existingTx) {
+      realtimeService.emitToTenant(tenantId, "schedule_update", { type: "shift_updated", shiftId });
+    }
+    return result;
   },
 
   /**
@@ -440,7 +449,7 @@ export const shiftService = {
    * Delete a shift if unreferenced in rosters or employee assignments.
    */
   async deleteShift(tenantId, shiftId, actorUser, existingTx = null) {
-    return runWithTx(existingTx, async (tx) => {
+    const result = await runWithTx(existingTx, async (tx) => {
       const [rosterRows] = await tx.execute(
         `SELECT COUNT(*) as cnt FROM workforce_roster_entry WHERE shift_id = ? AND tenant_id = ?`,
         [shiftId, tenantId]
@@ -486,5 +495,9 @@ export const shiftService = {
 
       return { success: true, message: "Shift deleted successfully." };
     });
+    if (!existingTx) {
+      realtimeService.emitToTenant(tenantId, "schedule_update", { type: "shift_deleted", shiftId });
+    }
+    return result;
   }
 };

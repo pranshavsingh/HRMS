@@ -77,6 +77,7 @@ export default function Reports() {
     if (val === "IP" || val === "PR") return "bg-amber-50 text-amber-700 border border-amber-200 font-bold";
     if (val === "RJ") return "bg-slate-200 text-slate-700 border border-slate-300 font-medium";
     if (val === "--") return "bg-slate-50 text-slate-400 border border-slate-200";
+    if (typeof val !== "string") return "bg-slate-50 text-slate-600 border border-slate-200";
     // Check if it's duration (contains a hyphen and is not "--")
     if (val.includes("-") && val !== "--") {
       return "bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold px-2 text-[9px]";

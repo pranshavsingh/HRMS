@@ -9,12 +9,13 @@ import {
   Users,
   CheckCircle,
   BarChart,
-  Settings
+  Settings,
+  MapPin,
+  X
 } from "lucide-react";
 
-export default function Sidebar() {
-  const { role: authRole } = useAuth();
-  const role = authRole || localStorage.getItem("role");
+export default function Sidebar({ isOpen = false, onClose }) {
+  const { role } = useAuth();
   const location = useLocation();
 
   const menuClass = (path) => {
@@ -44,13 +45,40 @@ export default function Sidebar() {
   };
 
   return (
-    <div className="fixed left-0 top-0 w-64 h-screen bg-gray-900 text-white flex flex-col p-4">
+    <>
+      {isOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
+      <div
+        className={`fixed left-0 top-0 w-64 h-screen bg-gray-900 text-white flex flex-col p-4 z-50 transition-transform duration-200 ${
+          isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+        }`}
+        onClick={(e) => {
+          if (e.target.closest("a") && onClose) onClose();
+        }}
+      >
 
-      {/* 🔥 LOGO */}
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold">HRMS</h2>
-        <p className="text-xs text-gray-400">Smart Workforce</p>
-      </div>
+        {/* 🔥 LOGO */}
+        <div className="mb-8 flex items-center justify-between">
+          <div>
+            <h2 className="text-2xl font-bold">HRMS</h2>
+            <p className="text-xs text-gray-400">Smart Workforce</p>
+          </div>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close navigation menu"
+              className="lg:hidden rounded-lg p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white"
+            >
+              <X size={20} />
+            </button>
+          )}
+        </div>
 
       <div className="flex-1 space-y-6 overflow-y-auto">
 
@@ -79,8 +107,16 @@ export default function Sidebar() {
               <Calendar size={18} /> My Schedule
             </Link>
 
+            <Link to="/holidays" className={menuClass("/holidays")}>
+              <Calendar size={18} /> Holidays
+            </Link>
+
             <Link to="/history" className={menuClass("/history")}>
               <History size={18} /> History
+            </Link>
+
+            <Link to="/monthly-register" className={menuClass("/monthly-register")}>
+              <Calendar size={18} /> Monthly Register
             </Link>
 
             <Link to="/leave" className={menuClass("/leave")}>
@@ -216,6 +252,10 @@ export default function Sidebar() {
               <Clock size={18} /> Shift Management
             </Link>
 
+            <Link to="/site-management" className={menuClass("/site-management")}>
+              <MapPin size={18} /> Site Management
+            </Link>
+
             {role === "superadmin" && (
               <Link to="/audit-logs" className={menuClass("/audit-logs")}>
                 <Settings size={18} /> Audit Logs
@@ -231,5 +271,6 @@ export default function Sidebar() {
         Role: <span className="capitalize">{role}</span>
       </div>
     </div>
+    </>
   );
 }

@@ -1,12 +1,15 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { Eye, EyeOff } from "lucide-react";
 import API from "../api/axios";
 import { useAuth } from "../context/AuthContext";
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, isAuthenticated, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const [form, setForm] = useState({ username: "", password: "" });
+  const [showPassword, setShowPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -18,6 +21,20 @@ export default function Login() {
   const [newPassword, setNewPassword] = useState("");
   const [forgotLoading, setForgotLoading] = useState(false);
   const [forgotMsg, setForgotMsg] = useState("");
+
+  useEffect(() => {
+    if (!authLoading && isAuthenticated) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [authLoading, isAuthenticated, navigate]);
+
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen w-full items-center justify-center bg-slate-900">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-500 border-t-transparent" />
+      </div>
+    );
+  }
 
   const handleLogin = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
@@ -84,8 +101,8 @@ export default function Login() {
 
   const resetPassword = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
-    if (!newPassword || newPassword.length < 8) {
-      setForgotMsg("Password must be at least 8 characters long.");
+    if (!newPassword || newPassword.length < 12) {
+      setForgotMsg("Password must be at least 12 characters long.");
       return;
     }
     try {
@@ -136,13 +153,23 @@ export default function Login() {
               value={form.username}
               onChange={(e) => setForm({ ...form, username: e.target.value })}
             />
-            <input
-              type="password"
-              placeholder="Password"
-              className="w-full p-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
-              value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? "text" : "password"}
+                placeholder="Password"
+                className="w-full p-3 pr-11 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+              <button
+                type="button"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                onClick={() => setShowPassword((prev) => !prev)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700"
+              >
+                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
             {error && <p className="text-sm text-red-600">{error}</p>}
             <button
               type="submit"
@@ -219,13 +246,23 @@ export default function Login() {
 
               {step === 3 && (
                 <>
-                  <input
-                    type="password"
-                    placeholder="New password"
-                    className="w-full p-3 border border-slate-300 rounded-xl"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                  />
+                  <div className="relative">
+                    <input
+                      type={showNewPassword ? "text" : "password"}
+                      placeholder="New password (min 12 characters)"
+                      className="w-full p-3 pr-11 border border-slate-300 rounded-xl"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      aria-label={showNewPassword ? "Hide new password" : "Show new password"}
+                      onClick={() => setShowNewPassword((prev) => !prev)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700"
+                    >
+                      {showNewPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                    </button>
+                  </div>
                   <button
                     onClick={resetPassword}
                     disabled={forgotLoading}

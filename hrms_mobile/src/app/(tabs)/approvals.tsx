@@ -14,6 +14,7 @@ import {
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
 import { useAuth } from "../../context/AuthContext";
+import { formatCompanyDate, formatCompanyDateRange } from "../../utils/date";
 import { Image } from "expo-image";
 import { 
   Check, 
@@ -151,9 +152,11 @@ export default function ApprovalsScreen() {
 
   useRealtime("leave_update", () => fetchQueues(false));
   useRealtime("attendance_update", () => fetchQueues(false));
+  useRealtime("realtime:connected", () => fetchQueues(false));
 
   useEffect(() => {
-    fetchQueues(true);
+    const t = setTimeout(() => { void fetchQueues(true); }, 0);
+    return () => clearTimeout(t);
   }, [fetchQueues]);
 
   const onRefresh = () => {
@@ -195,17 +198,17 @@ export default function ApprovalsScreen() {
       <View style={styles.card}>
         <View style={styles.cardHeader}>
           <View style={styles.userRow}>
-            <User size={14} color="#94a3b8" />
+            <User size={14} color="#68758A" />
             <Text style={styles.userName}>{item.employee_name}</Text>
           </View>
           <Text style={styles.punchTypeTag}>PUNCH {item.type?.toUpperCase()}</Text>
         </View>
 
         <View style={styles.cardContent}>
-          <Text style={styles.cardMeta}>Date: {item.date}</Text>
+          <Text style={styles.cardMeta}>Date: {formatCompanyDate(item.date)}</Text>
           <Text style={styles.cardMeta}>Time: {item.punch_time}</Text>
           <View style={styles.coordsRow}>
-            <MapPin size={12} color="#f59e0b" style={{ marginRight: 4 }} />
+            <MapPin size={12} color="#D97706" style={{ marginRight: 4 }} />
             <Text style={styles.coordsText}>
               Outside Zone: {item.latitude?.toFixed(5)}, {item.longitude?.toFixed(5)}
             </Text>
@@ -214,7 +217,7 @@ export default function ApprovalsScreen() {
 
         <View style={styles.cardFooter}>
           <TouchableOpacity style={styles.viewBtn} onPress={() => setSelectedPunch(item)}>
-            <Eye size={14} color="#ffffff" style={{ marginRight: 6 }} />
+            <Eye size={14} color="#2457D6" style={{ marginRight: 6 }} />
             <Text style={styles.viewBtnText}>Expand Selfie</Text>
           </TouchableOpacity>
 
@@ -244,7 +247,7 @@ export default function ApprovalsScreen() {
       <View style={styles.card}>
         <View style={styles.cardHeader}>
           <View style={styles.userRow}>
-            <User size={14} color="#94a3b8" />
+            <User size={14} color="#68758A" />
             <Text style={styles.userName}>{item.employee_name}</Text>
           </View>
           <View style={styles.leaveTypeBadge}>
@@ -255,9 +258,9 @@ export default function ApprovalsScreen() {
         <View style={styles.cardContent}>
           <Text style={styles.cardMeta}>Employee ID: {item.employee_id ?? "--"} · {item.team_name || "Team not assigned"} · {item.designation || "Designation not set"}</Text>
           <View style={styles.dateDurationRow}>
-            <Calendar size={14} color="#94a3b8" style={{ marginRight: 6 }} />
+            <Calendar size={14} color="#68758A" style={{ marginRight: 6 }} />
             <Text style={styles.cardMeta}>
-              {item.from} to {item.to}
+              {formatCompanyDateRange(item.from || (item as any).from_date, item.to || (item as any).to_date)}
             </Text>
           </View>
           <View style={styles.reasonCard}>
@@ -267,7 +270,7 @@ export default function ApprovalsScreen() {
           </View>
           {Number(item.balance?.projected_balance) < 0 && <Text style={{ color: "#be123c", fontWeight: "700", marginTop: 6 }}>Negative balance warning</Text>}
           <View style={styles.reasonCard}>
-            <FileText size={12} color="#64748b" style={{ marginRight: 6, marginTop: 2 }} />
+            <FileText size={12} color="#68758A" style={{ marginRight: 6, marginTop: 2 }} />
             <Text style={styles.reasonText}>{item.reason}</Text>
           </View>
         </View>
@@ -298,7 +301,7 @@ export default function ApprovalsScreen() {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#10b981" />
+        <ActivityIndicator size="large" color="#2457D6" />
       </View>
     );
   }
@@ -331,11 +334,11 @@ export default function ApprovalsScreen() {
         renderItem={activeQueue === "punches" ? (renderPunchItem as any) : (renderLeaveItem as any)}
         contentContainerStyle={styles.listContent}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#10b981" />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
         }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <Inbox size={40} color="#64748b" />
+            <Inbox size={40} color="#8995A7" />
             <Text style={styles.emptyText}>All caught up! No pending approvals found.</Text>
           </View>
         }
@@ -354,8 +357,8 @@ export default function ApprovalsScreen() {
               {/* Header */}
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>{selectedPunch.employee_name}</Text>
-                <TouchableOpacity onPress={() => setSelectedPunch(null)}>
-                  <X size={20} color="#ffffff" />
+                <TouchableOpacity onPress={() => setSelectedPunch(null)} style={styles.closeBtn}>
+                  <X size={20} color="#152238" />
                 </TouchableOpacity>
               </View>
 
@@ -371,7 +374,7 @@ export default function ApprovalsScreen() {
                   <Text style={styles.metaRow}>
                     Session: Punch {selectedPunch.type?.toUpperCase()}
                   </Text>
-                  <Text style={styles.metaRow}>Date: {selectedPunch.date}</Text>
+                  <Text style={styles.metaRow}>Date: {formatCompanyDate(selectedPunch.date)}</Text>
                   <Text style={styles.metaRow}>Time: {selectedPunch.punch_time}</Text>
                   <Text style={styles.metaRow}>
                     Telemetry: {selectedPunch.latitude?.toFixed(6)}, {selectedPunch.longitude?.toFixed(6)}
@@ -407,22 +410,22 @@ export default function ApprovalsScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
   },
   loadingContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     alignItems: "center",
     justifyContent: "center",
   },
   toggleContainer: {
     flexDirection: "row",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#F1F5F9",
     margin: 16,
     borderRadius: 14,
     padding: 4,
     borderWidth: 1,
-    borderColor: "#33415550",
+    borderColor: "#E2E8F0",
   },
   toggleBtn: {
     flex: 1,
@@ -431,17 +434,22 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   toggleBtnActive: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#2457D6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   toggleText: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 12,
     fontWeight: "700",
   },
   toggleTextActive: {
-    color: "#10b981",
+    color: "#2457D6",
   },
   listContent: {
     padding: 16,
@@ -449,19 +457,24 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   card: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderRadius: 20,
     padding: 16,
     marginBottom: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   cardHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     borderBottomWidth: 1,
-    borderBottomColor: "#334155",
+    borderBottomColor: "#EDF1F6",
     paddingBottom: 8,
     marginBottom: 12,
   },
@@ -470,27 +483,27 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   userName: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
     fontWeight: "700",
     marginLeft: 6,
   },
   punchTypeTag: {
     fontSize: 10,
-    color: "#a5b4fc",
+    color: "#2457D6",
     fontWeight: "700",
     textTransform: "uppercase",
   },
   leaveTypeBadge: {
-    backgroundColor: "#1e1b4b",
+    backgroundColor: "#EAF0FF",
     borderWidth: 1,
-    borderColor: "#312e81",
+    borderColor: "#C9D8FF",
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 8,
   },
   leaveTypeText: {
-    color: "#a5b4fc",
+    color: "#2457D6",
     fontSize: 9,
     fontWeight: "700",
   },
@@ -498,7 +511,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   cardMeta: {
-    color: "#94a3b8",
+    color: "#68758A",
     fontSize: 12,
     marginTop: 2,
   },
@@ -508,7 +521,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   coordsText: {
-    color: "#f59e0b",
+    color: "#D97706",
     fontSize: 11,
     fontWeight: "600",
   },
@@ -517,17 +530,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   reasonCard: {
-    backgroundColor: "#0f172a60",
+    backgroundColor: "#F8FAFC",
     borderRadius: 12,
     padding: 10,
     marginTop: 10,
     borderWidth: 1,
-    borderColor: "#33415540",
+    borderColor: "#E2E8F0",
     flexDirection: "row",
     alignItems: "flex-start",
   },
   reasonText: {
-    color: "#94a3b8",
+    color: "#152238",
     fontSize: 12,
     lineHeight: 16,
     flex: 1,
@@ -537,19 +550,21 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     borderTopWidth: 1,
-    borderTopColor: "#334155",
+    borderTopColor: "#EDF1F6",
     paddingTop: 12,
   },
   viewBtn: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#334155",
+    backgroundColor: "#EAF0FF",
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#C9D8FF",
   },
   viewBtnText: {
-    color: "#ffffff",
+    color: "#2457D6",
     fontSize: 12,
     fontWeight: "600",
   },
@@ -587,7 +602,7 @@ const styles = StyleSheet.create({
     paddingVertical: 80,
   },
   emptyText: {
-    color: "#64748b",
+    color: "#8995A7",
     fontSize: 13,
     marginTop: 12,
     textAlign: "center",
@@ -595,31 +610,36 @@ const styles = StyleSheet.create({
   // Modal Styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(15, 23, 42, 0.85)",
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
     justifyContent: "flex-end",
   },
   modalContent: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     padding: 20,
     maxHeight: "90%",
     borderTopWidth: 1,
-    borderTopColor: "#334155",
+    borderTopColor: "#E5EAF2",
   },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     borderBottomWidth: 1,
-    borderBottomColor: "#334155",
+    borderBottomColor: "#EDF1F6",
     paddingBottom: 14,
     marginBottom: 16,
   },
   modalTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 18,
     fontWeight: "800",
+  },
+  closeBtn: {
+    padding: 6,
+    backgroundColor: "#F1F5F9",
+    borderRadius: 12,
   },
   modalScroll: {
     paddingBottom: 24,
@@ -628,19 +648,19 @@ const styles = StyleSheet.create({
     width: "100%",
     aspectRatio: 0.85,
     borderRadius: 20,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F8FAFC",
     marginBottom: 16,
   },
   modalMetaCard: {
-    backgroundColor: "#0f172a60",
+    backgroundColor: "#F8FAFC",
     borderRadius: 18,
     padding: 16,
     marginBottom: 20,
     borderWidth: 1,
-    borderColor: "#33415580",
+    borderColor: "#E2E8F0",
   },
   metaRow: {
-    color: "#94a3b8",
+    color: "#152238",
     fontSize: 12,
     lineHeight: 18,
     marginBottom: 4,

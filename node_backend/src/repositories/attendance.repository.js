@@ -11,7 +11,11 @@ export const attendanceRepository = {
   },
 
   async findLatestAttendance(userId, tx = null) {
-    return db.get("SELECT * FROM attendance_attendance WHERE user_id=? ORDER BY date DESC, punch_in_time DESC LIMIT 1", [userId], tx);
+    return db.get(
+      "SELECT * FROM attendance_attendance WHERE user_id=? AND status <> 'leave' AND punch_in_status <> 'leave' AND punch_in_time IS NOT NULL ORDER BY date DESC, punch_in_time DESC LIMIT 1",
+      [userId],
+      tx
+    );
   },
 
   async insertAttendance(data, tx = null) {
@@ -83,9 +87,12 @@ export const attendanceRepository = {
   async findApprovalsForReviewer(reviewerId, role = null, tx = null) {
     let whereClause = "WHERE aa.approved_by_id=?";
     const params = [reviewerId];
-    if (role === "superadmin") {
+    if (role === "superadmin" || role === "admin" || role === "hr") {
       whereClause = "";
       params.length = 0;
+    } else if (role === "manager") {
+      whereClause = "WHERE (aa.approved_by_id=? OR ep.manager_id=? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))";
+      params.push(reviewerId, reviewerId);
     }
 
     return db.all(
@@ -234,8 +241,11 @@ export const attendanceRepository = {
 
   async findTeamActiveUsers(managerId, tx = null) {
     return db.all(
-      "SELECT u.id, u.username FROM accounts_user u JOIN accounts_employeeprofile ep ON ep.user_id=u.id WHERE ep.manager_id=? AND ep.is_active_employee=1 AND u.deleted_at IS NULL",
-      [managerId],
+      `SELECT u.id, u.username FROM accounts_user u 
+       JOIN accounts_employeeprofile ep ON ep.user_id=u.id 
+       WHERE (ep.manager_id=? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))
+         AND ep.is_active_employee=1 AND u.deleted_at IS NULL`,
+      [managerId, managerId],
       tx
     );
   },
@@ -261,8 +271,12 @@ export const attendanceRepository = {
 
   async getPendingAttendanceApprovalsCount(managerId, tx = null) {
     const row = await db.get(
-      "SELECT COUNT(*) c FROM attendance_attendanceapproval aa JOIN attendance_attendance a ON a.id=aa.attendance_id JOIN accounts_employeeprofile ep ON ep.user_id=a.user_id WHERE aa.approved_by_id=? AND aa.status='pending' AND ep.manager_id=?",
-      [managerId, managerId],
+      `SELECT COUNT(*) c FROM attendance_attendanceapproval aa 
+       JOIN attendance_attendance a ON a.id=aa.attendance_id 
+       JOIN accounts_employeeprofile ep ON ep.user_id=a.user_id 
+       WHERE (aa.approved_by_id=? OR ep.manager_id=? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))
+         AND aa.status='pending'`,
+      [managerId, managerId, managerId],
       tx
     );
     return Number(row?.c || 0);
@@ -270,8 +284,11 @@ export const attendanceRepository = {
 
   async getPendingLeaveApprovalsCount(managerId, tx = null) {
     const row = await db.get(
-      "SELECT COUNT(*) c FROM leave_leave l JOIN accounts_employeeprofile ep ON ep.user_id=l.user_id WHERE ep.manager_id=? AND l.status='pending'",
-      [managerId],
+      `SELECT COUNT(*) c FROM leave_leave l 
+       JOIN accounts_employeeprofile ep ON ep.user_id=l.user_id 
+       WHERE (ep.manager_id=? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ?)))
+         AND l.status='pending'`,
+      [managerId, managerId],
       tx
     );
     return Number(row?.c || 0);

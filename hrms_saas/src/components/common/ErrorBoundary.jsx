@@ -16,7 +16,8 @@ export class ErrorBoundary extends React.Component {
 
   handleReload = () => {
     this.setState({ hasError: false, error: null });
-    window.location.href = "/dashboard";
+    const hasSession = Boolean(localStorage.getItem("user"));
+    window.location.href = hasSession ? "/dashboard" : "/";
   };
 
   render() {

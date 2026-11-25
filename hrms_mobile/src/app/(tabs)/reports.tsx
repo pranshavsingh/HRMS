@@ -10,10 +10,15 @@ import {
   Share,
 } from "react-native";
 import api from "../../services/api";
+import { useAuth } from "../../context/AuthContext";
 import { FileSpreadsheet, Calendar, Settings, Download, ShieldAlert } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function ReportsScreen() {
+  const { user } = useAuth();
+  const role = user?.role || "employee";
+  const isExportRestricted = ["hr", "admin", "superadmin", "manager", "employee"].includes(role);
+
   const today = new Date();
   const defaultMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
 
@@ -33,6 +38,13 @@ export default function ReportsScreen() {
   };
 
   const handleExportMonthlyAttendance = async () => {
+    if (isExportRestricted) {
+      Alert.alert(
+        "Export Restricted",
+        "Employee and attendance data exports are strictly restricted on mobile devices in accordance with security policy. Please use the HRMS Web Console."
+      );
+      return;
+    }
     setExporting(true);
     try {
       const res = await api.get("/attendance/team-attendance/", {
@@ -52,7 +64,7 @@ export default function ReportsScreen() {
       const headers = [
         "Emp Code",
         "Emp Name",
-        ...registerDates.map((day: any) => `${day.day} (${day.day_name})`),
+        ...registerDates.map((day: any) => `${day.day} (${day.weekday || day.day_name || ""})`),
         "Present Days",
         "Leave Days",
         "Pending Approvals",
@@ -61,7 +73,7 @@ export default function ReportsScreen() {
         "Total Work Hours",
       ];
 
-      // 2. Build CSV rows
+      // 2. Build CSV rows with safe string conversion to prevent TypeError crashes
       const csvRows = registerRows.map((row: any) => [
         row.employee_code || "N/A",
         row.employee_name || row.username,
@@ -76,7 +88,7 @@ export default function ReportsScreen() {
 
       const csvContent = [
         headers.join(","),
-        ...csvRows.map((r: any) => r.map((cell: any) => `"${cell.replace(/"/g, '""')}"`).join(","))
+        ...csvRows.map((r: any) => r.map((cell: any) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(","))
       ].join("\n");
 
       // 3. Share the file natively
@@ -158,21 +170,31 @@ export default function ReportsScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Submit Trigger */}
-          <TouchableOpacity
-            style={[styles.exportBtn, exporting && styles.disabledBtn]}
-            onPress={handleExportMonthlyAttendance}
-            disabled={exporting}
-          >
-            {exporting ? (
-              <ActivityIndicator size="small" color="#ffffff" />
-            ) : (
-              <>
-                <Download size={18} color="#ffffff" style={{ marginRight: 8 }} />
-                <Text style={styles.exportBtnText}>Generate & Share CSV</Text>
-              </>
-            )}
-          </TouchableOpacity>
+          {/* Submit Trigger / Restriction Notice */}
+          {isExportRestricted ? (
+            <View style={[styles.infoCard, { backgroundColor: "#450a0a", borderColor: "#991b1b", marginTop: 16 }]}>
+              <ShieldAlert size={20} color="#f87171" style={{ marginBottom: 6 }} />
+              <Text style={[styles.infoTitle, { color: "#fca5a5" }]}>Export Restricted on Mobile</Text>
+              <Text style={[styles.infoText, { color: "#fecaca" }]}>
+                In accordance with enterprise data security policy, organizational and payroll data exports are restricted on mobile devices. Please use the HRMS Web Console to download reports.
+              </Text>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={[styles.exportBtn, exporting && styles.disabledBtn]}
+              onPress={handleExportMonthlyAttendance}
+              disabled={exporting}
+            >
+              {exporting ? (
+                <ActivityIndicator size="small" color="#ffffff" />
+              ) : (
+                <>
+                  <Download size={18} color="#ffffff" style={{ marginRight: 8 }} />
+                  <Text style={styles.exportBtnText}>Generate & Share CSV</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Informational Guidelines */}

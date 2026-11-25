@@ -13,18 +13,58 @@ import Pagination from "../../components/common/Pagination";
 import { usePagination } from "../../hooks/usePagination";
 import API from "../../api/axios";
 import { useRealtime } from "../../context/RealtimeContext";
+import { formatCompanyDate } from "../../utils/date";
 
-const formatTimelineDate = (value) => {
-  if (!value) return "--";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(date);
-};
+const formatTimelineDate = (value) => formatCompanyDate(value);
+
+function getTimelineStatusBadge(status) {
+  const normalized = (status || "").toLowerCase().trim();
+  switch (normalized) {
+    case "approved":
+    case "present":
+      return (
+        <span className="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
+          Approved
+        </span>
+      );
+    case "pending":
+      return (
+        <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-200">
+          Pending Review
+        </span>
+      );
+    case "rejected":
+      return (
+        <span className="inline-flex items-center rounded-full bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 ring-1 ring-rose-200">
+          Rejected
+        </span>
+      );
+    case "half_day":
+      return (
+        <span className="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-semibold text-purple-700 ring-1 ring-purple-200">
+          Half Day
+        </span>
+      );
+    case "leave":
+      return (
+        <span className="inline-flex items-center rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 ring-1 ring-blue-200">
+          Leave
+        </span>
+      );
+    case "logged":
+      return (
+        <span className="inline-flex items-center rounded-full bg-cyan-50 px-3 py-1 text-xs font-semibold text-cyan-700 ring-1 ring-cyan-200">
+          Logged
+        </span>
+      );
+    default:
+      return (
+        <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+          {normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : "Logged"}
+        </span>
+      );
+  }
+}
 
 export default function EmployeeDashboard() {
   const [data, setData] = useState(null);
@@ -80,7 +120,13 @@ export default function EmployeeDashboard() {
     );
   }
 
-  if (!data) return <Loader />;
+  if (!data) {
+    return (
+      <Layout>
+        <Loader />
+      </Layout>
+    );
+  }
 
   return (
     <Layout>
@@ -200,9 +246,7 @@ export default function EmployeeDashboard() {
                       {Number(item.work_hours || 0).toFixed(2)} hrs
                     </td>
                     <td className="px-6 py-4">
-                      <span className="inline-flex items-center rounded-full bg-cyan-50 px-3 py-1 text-xs font-semibold text-cyan-700 ring-1 ring-cyan-200">
-                        Logged
-                      </span>
+                      {getTimelineStatusBadge(item.status)}
                     </td>
                   </tr>
                 ))}

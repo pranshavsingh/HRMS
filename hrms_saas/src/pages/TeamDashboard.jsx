@@ -38,7 +38,9 @@ export default function TeamDashboard() {
         console.log("Team dashboard API failed:", err);
         setData(emptyTeamDashboard);
         setWarning(
-          "Team dashboard data could not be loaded right now. Please refresh after the backend is running."
+          err?.response?.status === 403
+            ? "You do not have permission to view the Manager Team Dashboard."
+            : (err?.response?.data?.error || "Team dashboard data could not be loaded right now. Please try again.")
         );
       } finally {
         setLoading(false);
