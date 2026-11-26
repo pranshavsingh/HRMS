@@ -405,7 +405,7 @@ export default function Employees() {
       site_id: employee.site_id ? String(employee.site_id) : "",
       manager: employee.manager_id ? String(employee.manager_id) : "",
       team_name: employee.team_name || "",
-      joining_date: employee.joining_date || "",
+      joining_date: employee.joining_date ? String(employee.joining_date).slice(0, 10) : "",
       leave_allotted: String(employee.leave_allotted ?? 0),
       designation: employee.designation || "",
       locations: rawLocs,
