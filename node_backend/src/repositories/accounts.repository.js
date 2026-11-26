@@ -245,7 +245,7 @@ export const accountsRepository = {
         managerId,
         userId,
         teamName || null,
-        joiningDate || null,
+        joiningDate ? (joiningDate instanceof Date ? joiningDate.toISOString().slice(0, 10) : String(joiningDate).trim().slice(0, 10)) : null,
         leaveAllotted || 0,
         designation || null
       ],
@@ -679,7 +679,7 @@ export const accountsRepository = {
           userId,
           data.manager ? Number(data.manager) : null,
           data.team_name && String(data.team_name).trim() ? String(data.team_name).trim() : null,
-          data.joining_date && String(data.joining_date).trim() ? String(data.joining_date).trim() : null,
+          data.joining_date && String(data.joining_date).trim() ? (data.joining_date instanceof Date ? data.joining_date.toISOString().slice(0, 10) : String(data.joining_date).trim().slice(0, 10)) : null,
           data.leave_allotted !== undefined && data.leave_allotted !== "" && data.leave_allotted !== null ? Number(data.leave_allotted) : 0,
           data.latitude !== undefined && data.latitude !== "" && data.latitude !== null ? Number(data.latitude) : null,
           data.longitude !== undefined && data.longitude !== "" && data.longitude !== null ? Number(data.longitude) : null,
@@ -710,7 +710,7 @@ export const accountsRepository = {
     }
     if ("joining_date" in data) {
       setClauses.push("joining_date = ?");
-      params.push(data.joining_date !== null && data.joining_date !== undefined && String(data.joining_date).trim() !== "" ? String(data.joining_date).trim() : null);
+      params.push(data.joining_date !== null && data.joining_date !== undefined && String(data.joining_date).trim() !== "" ? (data.joining_date instanceof Date ? data.joining_date.toISOString().slice(0, 10) : String(data.joining_date).trim().slice(0, 10)) : null);
     }
     if ("leave_allotted" in data) {
       setClauses.push("leave_allotted = ?");
