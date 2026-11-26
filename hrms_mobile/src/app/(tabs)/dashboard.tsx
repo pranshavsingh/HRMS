@@ -14,7 +14,6 @@ import {
 import { useAuth } from "../../context/AuthContext";
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
-import Card from "../../components/Card";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCompanyDate } from "../../utils/date";
 import { 
@@ -174,24 +173,6 @@ export default function DashboardScreen() {
     );
   };
 
-  const renderPersonalMetrics = () => {
-    const hours = personalData?.total_working_hours || 0;
-    const balance = personalData?.leave_balance || 0;
-    const taken = personalData?.leaves_taken || 0;
-    const allotted = personalData?.total_leaves_allocated || 0;
-    const pending = personalData?.pending_approvals || 0;
-
-    return (
-      <View style={styles.metricsContainer}>
-        <Card title="Tracked Hours" value={`${hours.toFixed(2)}h`} info="Last 7 Days" icon="Clock3" tone="cyan" />
-        <Card title="Leave Balance" value={String(balance)} info="Days Available" icon="FileText" tone="emerald" />
-        <Card title="Leaves Taken" value={String(taken)} info="Approved Applications" icon="CheckCircle2" tone="amber" />
-        <Card title="Leaves Allotted" value={String(allotted)} info="Total Allocation" icon="CalendarDays" tone="violet" />
-        <Card title="Pending Review" value={String(pending)} info="Action Required" icon="AlertCircle" tone="rose" fullWidth={true} />
-      </View>
-    );
-  };
-
   const renderPersonalTimeline = () => {
     const dailyWork = personalData?.daily_work || [];
 
@@ -286,31 +267,6 @@ export default function DashboardScreen() {
     );
   };
 
-  const renderSystemMetrics = () => {
-    const isMgrRole = role === "manager";
-    const present = isMgrRole
-      ? (managerData?.team_summary?.present_today ?? 0)
-      : (adminSummary?.present_today ?? hrData?.people_summary?.present_today ?? 0);
-    const pendingLeaves = isMgrRole
-      ? (managerData?.team_summary?.pending_leave_approvals ?? 0)
-      : (adminSummary?.pending_leave_requests ?? hrData?.people_summary?.pending_leave_requests ?? 0);
-    const pendingPunches = isMgrRole
-      ? (managerData?.team_summary?.pending_attendance_approvals ?? 0)
-      : (adminSummary?.pending_attendance_approvals ?? hrData?.people_summary?.pending_attendance_approvals ?? 0);
-    const totalStaff = isMgrRole
-      ? (managerData?.team_summary?.team_members ?? 0)
-      : (adminSummary?.staff ?? hrData?.people_summary?.total_people ?? 0);
-
-    return (
-      <View style={styles.metricsContainer}>
-        <Card title="Present Today" value={String(present)} info={isMgrRole ? "Team in-office" : "In-office attendance"} icon="CheckCircle2" tone="emerald" />
-        <Card title="Pending Leave" value={String(pendingLeaves)} info={isMgrRole ? "Team leave approvals" : "Leave queue requests"} icon="FileText" tone="amber" />
-        <Card title="Pending Punch" value={String(pendingPunches)} info={isMgrRole ? "Team punch approvals" : "Exception adjustments"} icon="AlertCircle" tone="rose" />
-        <Card title={isMgrRole ? "Team Members" : "Total Staff"} value={String(totalStaff)} info={isMgrRole ? "Direct reports assigned" : "Active payroll directory"} icon="Users" tone="cyan" />
-      </View>
-    );
-  };
-
   const renderRecentAttendance = () => {
     const isMgrRole = role === "manager";
     const recent = isMgrRole
@@ -389,16 +345,14 @@ export default function DashboardScreen() {
         )}
 
         {/* Content Render based on selected Tab */}
-        {activeTab === "personal" ? (
+        {activeTab === "personal" || role === "employee" ? (
           <>
             {renderPersonalHeader()}
-            {role !== "employee" && renderPersonalMetrics()}
             {renderPersonalTimeline()}
           </>
         ) : (
           <>
             {renderSystemHeader()}
-            {renderSystemMetrics()}
             {renderRecentAttendance()}
           </>
         )}

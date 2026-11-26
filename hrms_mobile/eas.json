@@ -13,14 +13,17 @@
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://staging-api.hrms.internal/api"
+        "EXPO_PUBLIC_API_URL": "https://api.sseone.io/api"
+      },
+      "android": {
+        "buildType": "apk"
       }
     },
     "production": {
       "distribution": "store",
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api.hrms.internal/api"
+        "EXPO_PUBLIC_API_URL": "https://api.sseone.io/api"
       },
       "android": {
         "buildType": "app-bundle"

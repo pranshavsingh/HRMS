@@ -13,6 +13,8 @@ import { parsePagination, formatPaginationResponse } from "../utils/pagination.j
 import { shiftAttendanceService } from "./shift-attendance.service.js";
 import { siteService } from "./site.service.js";
 import { financialLeaveService } from "./financial-leave.service.js";
+import notificationService from "./notification.service.js";
+import { realtimeService } from "./realtime.service.js";
 
 const APPROVAL_CLOSED_STATUS = "closed";
 const REVIEW_ROLES_BY_REQUESTOR = {
@@ -558,6 +560,32 @@ export const attendanceService = {
         { actorId: actor.id },
         { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
       );
+      if (result.status === "pending" || result.outside) {
+        void notificationService.safeNotify(async () => {
+          const tenantId = actor.tenant_id || 1;
+          const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, userId);
+          realtimeService.emitApprovalCountUpdated("attendance", {
+            tenantId,
+            targetUserIds: approverIds,
+            actorId: actor.id,
+          });
+          if (approverIds.length === 0) return;
+          await notificationService.createBulkNotifications(
+            approverIds.map((recipientId) => ({
+              tenantId,
+              recipientId,
+              actorId: actor.id,
+              type: "attendance:punch_in_review",
+              category: "ATTENDANCE",
+              title: "Punch-In Approval Needed",
+              message: "An employee punch-in exception requires supervisor review.",
+              actionUrl: "/attendance-approvals",
+              priority: "NORMAL",
+              dedupeKey: `att:in:${result.id}:${recipientId}`,
+            }))
+          );
+        });
+      }
       return result;
     } catch (err) {
       if (file && !directPath) {
@@ -723,6 +751,32 @@ export const attendanceService = {
         { actorId: actor.id },
         { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
       );
+      if (result.status === "pending" || result.outside || result.is_early_departure || result.is_overtime) {
+        void notificationService.safeNotify(async () => {
+          const tenantId = actor.tenant_id || 1;
+          const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, userId);
+          realtimeService.emitApprovalCountUpdated("attendance", {
+            tenantId,
+            targetUserIds: approverIds,
+            actorId: actor.id,
+          });
+          if (approverIds.length === 0) return;
+          await notificationService.createBulkNotifications(
+            approverIds.map((recipientId) => ({
+              tenantId,
+              recipientId,
+              actorId: actor.id,
+              type: "attendance:punch_out_review",
+              category: "ATTENDANCE",
+              title: "Punch-Out Approval Needed",
+              message: "An employee punch-out exception requires supervisor review.",
+              actionUrl: "/attendance-approvals",
+              priority: "NORMAL",
+              dedupeKey: `att:out:${result.id}:${recipientId}`,
+            }))
+          );
+        });
+      }
       return result;
     } catch (err) {
       if (file && !directPath) {
@@ -873,6 +927,21 @@ export const attendanceService = {
         actionable_items: uniqueRecords.filter((r) => r.can_approve).length,
       },
     });
+  },
+
+  async pendingApprovalsCount(userId, role, query = {}, tenantId = 1) {
+    if (!["manager", "hr", "admin", "superadmin"].includes(role)) {
+      return { count: 0 };
+    }
+    const siteScope = await siteService.getSiteScope(tenantId, { id: userId, role }, query.site_id || null);
+    const count = await attendanceRepository.countPendingApprovalsForReviewer({
+      userId,
+      role,
+      tenantId,
+      siteIds: siteScope.siteIds,
+      unassigned: siteScope.unassigned,
+    });
+    return { count };
   },
 
   async approvalAction(approvalId, status, comment = "", actor, tenantId = 1) {
@@ -1069,7 +1138,7 @@ export const attendanceService = {
 
       return {
         message: `${isPolicyException ? (category === "early_departure" ? "Early Departure" : "Overtime") : ("Punch " + (ap.type === "in" ? "In" : "Out"))} ${status} successfully`,
-        user_id: ap.user_id,
+        user_id: ap.employee_id,
         attendance_status: updated.status,
         review_type: ap.type,
         review_status: ap.type === "in" ? updated.punch_in_status : updated.punch_out_status,
@@ -1082,6 +1151,26 @@ export const attendanceService = {
       { actorId: actor.id, userId: response.user_id, status: response.attendance_status },
       { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(response.user_id)] }
     );
+    void notificationService.safeNotify(async () => {
+      const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, response.user_id);
+      realtimeService.emitApprovalCountUpdated("attendance", {
+        tenantId,
+        targetUserIds: approverIds,
+        actorId: actor.id,
+      });
+      await notificationService.createNotification({
+        tenantId,
+        recipientId: Number(response.user_id),
+        actorId: actor.id,
+        type: `attendance:${status}`,
+        category: "ATTENDANCE",
+        title: `Attendance ${status === "approved" ? "Approved" : "Rejected"}`,
+        message: response.message,
+        actionUrl: "/history",
+        priority: status === "rejected" ? "HIGH" : "NORMAL",
+        dedupeKey: `att:decision:${approvalId}:${status}`,
+      });
+    });
     return response;
   },
 
@@ -2312,6 +2401,29 @@ export const attendanceService = {
           { actorId: userId, attendanceId: parsedId },
           { tenantId: effectiveTenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
         );
+        void notificationService.safeNotify(async () => {
+          const approverIds = await notificationService.resolveApproverIdsForEmployee(effectiveTenantId, userId);
+          realtimeService.emitApprovalCountUpdated("attendance", {
+            tenantId: effectiveTenantId,
+            targetUserIds: approverIds,
+            actorId: userId,
+          });
+          if (approverIds.length === 0) return;
+          await notificationService.createBulkNotifications(
+            approverIds.map((recipientId) => ({
+              tenantId: effectiveTenantId,
+              recipientId,
+              actorId: userId,
+              type: "attendance:regularization",
+              category: "ATTENDANCE",
+              title: "Regularization Request",
+              message: "An employee submitted an attendance regularization request for review.",
+              actionUrl: "/attendance-approvals",
+              priority: "NORMAL",
+              dedupeKey: `att:reg:${parsedId}:${recipientId}`,
+            }))
+          );
+        });
       } catch (rtErr) {
         logger.warn("[regularizeAttendance] realtime broadcast failed: %s", rtErr.message);
       }

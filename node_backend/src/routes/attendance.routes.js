@@ -11,6 +11,7 @@ r.post("/punch-in/", authenticate, upload.single("photo"), validate(punchSchema)
 r.post("/punch-out/", authenticate, upload.single("photo"), validate(punchSchema), c.punchOut);
 r.get("/status/", authenticate, c.status);
 r.get("/approvals/", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), c.approvals);
+r.get("/approvals/pending-count", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), c.pendingApprovalsCount);
 r.post("/approvals/:approval_id/", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), validate(attendanceApprovalActionSchema), c.approvalAction);
 r.get("/dashboard/", authenticate, c.dashboard);
 r.get("/hr-dashboard/", authenticate, authorize(["hr", "admin", "superadmin"]), c.hrDashboard);

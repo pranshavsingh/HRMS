@@ -18,6 +18,7 @@ import { rosterValidationService } from "./roster-validation.service.js";
 import { auditService } from "./audit.service.js";
 import realtimeService from "./realtime.service.js";
 import { siteService } from "./site.service.js";
+import notificationService from "./notification.service.js";
 
 function wrapTx(conn) {
   if (!conn) return conn;
@@ -659,7 +660,30 @@ export const rosterService = {
         entries_published: entries.length,
       };
     });
-    if (!existingTx) realtimeService.emitToTenant(tenantId, "schedule_update", { type: "roster_published", rosterId: Number(rosterHeaderId) });
+    if (!existingTx) {
+      realtimeService.emitToTenant(tenantId, "schedule_update", { type: "roster_published", rosterId: Number(rosterHeaderId) });
+      void notificationService.safeNotify(async () => {
+        const users = await db.all(
+          `SELECT DISTINCT user_id FROM workforce_roster_entry WHERE roster_header_id = ? AND tenant_id = ?`,
+          [rosterHeaderId, tenantId]
+        );
+        if (!users || users.length === 0) return;
+        await notificationService.createBulkNotifications(
+          users.map((u) => ({
+            tenantId,
+            recipientId: Number(u.user_id),
+            actorId: actorUserId || null,
+            type: "roster:published",
+            category: "ROSTER",
+            title: "Work Roster Published",
+            message: "Your upcoming shift roster has been published. Tap to view your schedule.",
+            actionUrl: "/shifts",
+            priority: "NORMAL",
+            dedupeKey: `roster:pub:${rosterHeaderId}:${u.user_id}`,
+          }))
+        );
+      });
+    }
     return result;
   },
 

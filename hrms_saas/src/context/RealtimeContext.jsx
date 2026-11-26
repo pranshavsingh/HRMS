@@ -75,6 +75,7 @@ export const RealtimeProvider = ({ children }) => {
 
     socket.on("connect", () => {
       console.log("[Realtime] Socket.IO connected:", socket.id);
+      socket.emit("notification:sync");
       dispatchEvent("realtime:connected", {});
       syncMissedEvents();
     });
@@ -174,7 +175,7 @@ export const RealtimeProvider = ({ children }) => {
 export const useRealtime = (event, callback) => {
   const realtime = useContext(RealtimeContext);
   useEffect(() => {
-    if (!realtime) return;
+    if (!realtime || !event || typeof callback !== "function") return;
     const unsubscribe = realtime.subscribe(event, callback);
     return () => {
       unsubscribe();

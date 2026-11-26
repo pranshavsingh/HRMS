@@ -69,6 +69,16 @@ export const REALTIME_EVENTS = {
 
   // Notifications
   NOTIFICATION_CREATED: "notification:created",
+  NOTIFICATION_NEW: "notification:new",
+  NOTIFICATION_READ: "notification:read",
+  NOTIFICATION_READ_ALL: "notification:read-all",
+  NOTIFICATION_UNREAD_COUNT: "notification:unread-count",
+  NOTIFICATION_SYNC: "notification:sync",
+  NOTIFICATION_SYNC_REQUIRED: "notification:sync-required",
+
+  // Approval Pending Counts
+  APPROVAL_ATTENDANCE_COUNT_UPDATED: "approval:attendance:count-updated",
+  APPROVAL_LEAVE_COUNT_UPDATED: "approval:leave:count-updated",
 };
 
 export default REALTIME_EVENTS;

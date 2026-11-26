@@ -3,6 +3,7 @@ import { AppError } from "../middleware/errorHandler.js";
 import auditService from "./audit.service.js";
 import companyHolidayRepository from "../repositories/company-holiday.repository.js";
 import { realtimeService } from "./realtime.service.js";
+import notificationService from "./notification.service.js";
 
 const validDate = (value) => {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -105,6 +106,18 @@ export const companyHolidayService = {
       mapDuplicateError(error);
     }
     realtimeService.emitToTenant(tenantId, "holiday:created", { holidayId: holiday.id });
+    void notificationService.safeNotify(() =>
+      notificationService.notifyTenantUsers({
+        tenantId,
+        actorId: actor.id,
+        type: "holiday:created",
+        category: "HOLIDAY",
+        title: "New Company Holiday",
+        message: `${holiday.name} on ${holiday.holiday_date} has been added to the holiday calendar.`,
+        actionUrl: "/holidays",
+        dedupePrefix: `holiday:created:${holiday.id}`,
+      })
+    );
     return holiday;
   },
 
@@ -131,6 +144,18 @@ export const companyHolidayService = {
       mapDuplicateError(error);
     }
     realtimeService.emitToTenant(tenantId, "holiday:updated", { holidayId: holiday.id });
+    void notificationService.safeNotify(() =>
+      notificationService.notifyTenantUsers({
+        tenantId,
+        actorId: actor.id,
+        type: "holiday:updated",
+        category: "HOLIDAY",
+        title: "Holiday Calendar Updated",
+        message: `${holiday.name} (${holiday.holiday_date}) has been updated in the holiday calendar.`,
+        actionUrl: "/holidays",
+        dedupePrefix: `holiday:updated:${holiday.id}:${Date.now()}`,
+      })
+    );
     return holiday;
   },
 
@@ -143,6 +168,18 @@ export const companyHolidayService = {
       return before;
     });
     realtimeService.emitToTenant(tenantId, "holiday:deleted", { holidayId: Number(holidayId) });
+    void notificationService.safeNotify(() =>
+      notificationService.notifyTenantUsers({
+        tenantId,
+        actorId: actor.id,
+        type: "holiday:deleted",
+        category: "HOLIDAY",
+        title: "Company Holiday Removed",
+        message: `${deleted.name} (${deleted.holiday_date}) has been removed from the holiday calendar.`,
+        actionUrl: "/holidays",
+        dedupePrefix: `holiday:deleted:${holidayId}`,
+      })
+    );
     return { id: Number(holidayId), holiday_date: deleted.holiday_date, message: "Holiday deleted." };
   },
 

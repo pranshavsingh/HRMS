@@ -21,9 +21,12 @@ import Roster from "./pages/Roster";
 import CompanyHolidayCalendar from "./pages/CompanyHolidayCalendar";
 import SiteManagement from "./pages/SiteManagement";
 import MonthlyRegister from "./pages/MonthlyRegister";
+import Notifications from "./pages/Notifications";
 import NotFound from "./pages/NotFound";
 import { AuthProvider } from "./context/AuthContext";
+import { NotificationProvider } from "./context/NotificationContext";
 import { SiteProvider } from "./context/SiteContext";
+import { ApprovalCountsProvider } from "./context/ApprovalCountsContext";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 
 export default function App() {
@@ -31,7 +34,9 @@ export default function App() {
     <BrowserRouter>
       <ErrorBoundary>
         <AuthProvider>
-          <SiteProvider>
+          <NotificationProvider>
+            <SiteProvider>
+              <ApprovalCountsProvider>
             <Routes>
               <Route path="/" element={<Login />} />
               <Route
@@ -218,9 +223,19 @@ export default function App() {
                   </ProtectedRoute>
                 }
               />
+              <Route
+                path="/notifications"
+                element={
+                  <ProtectedRoute>
+                    <Notifications />
+                  </ProtectedRoute>
+                }
+              />
               <Route path="*" element={<NotFound />} />
             </Routes>
-          </SiteProvider>
+              </ApprovalCountsProvider>
+            </SiteProvider>
+          </NotificationProvider>
         </AuthProvider>
       </ErrorBoundary>
     </BrowserRouter>

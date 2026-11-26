@@ -52,9 +52,6 @@ export function AuthProvider({ children }) {
       const { access, user: userData } = res.data;
       if (access) {
         handleTokenUpdate(access);
-    if (access) {
-      window.dispatchEvent(new CustomEvent("token-refreshed", { detail: { access } }));
-    }
         window.dispatchEvent(new CustomEvent("token-refreshed", { detail: { access } }));
       }
       if (userData) {

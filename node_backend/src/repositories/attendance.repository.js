@@ -358,6 +358,72 @@ export const attendanceRepository = {
         tx
       );
     }
+  },
+
+  /**
+   * Efficient SQL COUNT of pending attendance exception approvals actionable by the viewer.
+   */
+  async countPendingApprovalsForReviewer({ userId, role, tenantId = 1, siteIds = null, unassigned = false }, tx = null) {
+    if (!["manager", "hr", "admin", "superadmin"].includes(role)) {
+      return 0;
+    }
+    if (!unassigned && Array.isArray(siteIds) && siteIds.length === 0) {
+      return 0;
+    }
+
+    const conditions = [
+      "aa.status = 'pending'",
+      "a.tenant_id = ?",
+      "a.user_id <> ?",
+      "EXISTS (SELECT 1 FROM workforce_user_tenant wut WHERE wut.tenant_id = a.tenant_id AND wut.user_id = a.user_id AND wut.is_active = 1)",
+      "(aa.comment LIKE '%early departure%' OR aa.comment LIKE '%overtime%' OR (aa.type = 'in' AND a.punch_in_status = 'pending') OR (aa.type = 'out' AND a.punch_out_status = 'pending'))",
+    ];
+    const params = [tenantId, userId];
+
+    if (role === "manager") {
+      conditions.push(
+        `(aa.approved_by_id = ? OR ep.manager_id = ? OR (ep.team_name IS NOT NULL AND ep.team_name != '' AND ep.team_name = (
+          SELECT mgr_ep.team_name FROM accounts_employeeprofile mgr_ep WHERE mgr_ep.user_id = ? LIMIT 1
+        )))`
+      );
+      params.push(userId, userId, userId);
+    }
+
+    const effectiveSiteExpr = `COALESCE(a.site_id, (
+      SELECT esa.site_id FROM workforce_employee_site_assignment esa
+      WHERE esa.tenant_id = a.tenant_id
+        AND esa.user_id = a.user_id
+        AND esa.effective_from <= a.date
+        AND (esa.effective_to IS NULL OR esa.effective_to >= a.date)
+      ORDER BY esa.effective_from DESC, esa.id DESC
+      LIMIT 1
+    ))`;
+
+    if (unassigned) {
+      conditions.push(`${effectiveSiteExpr} IS NULL`);
+    } else if (Array.isArray(siteIds) && siteIds.length > 0) {
+      conditions.push(`${effectiveSiteExpr} IN (${siteIds.map(() => "?").join(",")})`);
+      params.push(...siteIds.map(Number));
+    }
+
+    const row = await db.get(
+      `SELECT COUNT(DISTINCT CONCAT(
+          aa.attendance_id, ':', aa.type, ':',
+          CASE
+            WHEN aa.comment LIKE '%early departure%' THEN 'early_departure'
+            WHEN aa.comment LIKE '%overtime%' THEN 'overtime'
+            ELSE aa.type
+          END
+        )) AS cnt
+       FROM attendance_attendanceapproval aa
+       JOIN attendance_attendance a ON a.id = aa.attendance_id
+       LEFT JOIN accounts_employeeprofile ep ON ep.user_id = a.user_id
+       WHERE ${conditions.join(" AND ")}`,
+      params,
+      tx
+    );
+
+    return Number(row?.cnt || 0);
   }
 };
 

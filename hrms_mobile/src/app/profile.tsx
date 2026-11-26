@@ -114,7 +114,7 @@ export default function ProfileScreen() {
             <Bookmark size={18} color={themeColor} style={styles.rowIcon} />
             <View>
               <Text style={[styles.detailValue, { color: themeColor }]}>My Documents</Text>
-              <Text style={styles.detailLabel}>Tap to upload or view files</Text>
+              <Text style={styles.detailLabel}>Tap to view your files</Text>
             </View>
           </TouchableOpacity>
         </View>

@@ -1,5 +1,7 @@
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
+import { useApprovalCounts } from "../../context/ApprovalCountsContext";
+import PendingCountBadge from "../common/PendingCountBadge";
 import {
   LayoutDashboard,
   Clock,
@@ -16,6 +18,7 @@ import {
 
 export default function Sidebar({ isOpen = false, onClose }) {
   const { role } = useAuth();
+  const { attendancePendingCount, leavePendingCount, loading: countsLoading, error: countsError } = useApprovalCounts();
   const location = useLocation();
 
   const menuClass = (path) => {
@@ -139,11 +142,25 @@ export default function Sidebar({ isOpen = false, onClose }) {
             </Link>
 
             <Link to="/team-attendance-approvals" className={menuClass("/team-attendance-approvals")}>
-              <CheckCircle size={18} /> Attendance Approvals
+              <CheckCircle size={18} />
+              <span className="flex-1 truncate">Attendance Approvals</span>
+              <PendingCountBadge
+                count={attendancePendingCount}
+                loading={countsLoading}
+                error={countsError}
+                label="Attendance Approvals"
+              />
             </Link>
 
             <Link to="/team-leave-approvals" className={menuClass("/team-leave-approvals")}>
-              <CheckCircle size={18} /> Leave Approvals
+              <CheckCircle size={18} />
+              <span className="flex-1 truncate">Leave Approvals</span>
+              <PendingCountBadge
+                count={leavePendingCount}
+                loading={countsLoading}
+                error={countsError}
+                label="Leave Approvals"
+              />
             </Link>
 
             <Link to="/team-attendance" className={menuClass("/team-attendance")}>
@@ -170,11 +187,25 @@ export default function Sidebar({ isOpen = false, onClose }) {
             </Link>
 
             <Link to="/attendance-approvals" className={menuClass("/attendance-approvals")}>
-              <CheckCircle size={18} /> Attendance Approvals
+              <CheckCircle size={18} />
+              <span className="flex-1 truncate">Attendance Approvals</span>
+              <PendingCountBadge
+                count={attendancePendingCount}
+                loading={countsLoading}
+                error={countsError}
+                label="Attendance Approvals"
+              />
             </Link>
 
             <Link to="/leave-approvals" className={menuClass("/leave-approvals")}>
-              <CheckCircle size={18} /> Leave Approvals
+              <CheckCircle size={18} />
+              <span className="flex-1 truncate">Leave Approvals</span>
+              <PendingCountBadge
+                count={leavePendingCount}
+                loading={countsLoading}
+                error={countsError}
+                label="Leave Approvals"
+              />
             </Link>
 
             <Link to="/employees" className={menuClass("/employees")}>
@@ -225,11 +256,25 @@ export default function Sidebar({ isOpen = false, onClose }) {
             </Link>
 
             <Link to="/attendance-approvals" className={menuClass("/attendance-approvals")}>
-              <CheckCircle size={18} /> Attendance Approvals
+              <CheckCircle size={18} />
+              <span className="flex-1 truncate">Attendance Approvals</span>
+              <PendingCountBadge
+                count={attendancePendingCount}
+                loading={countsLoading}
+                error={countsError}
+                label="Attendance Approvals"
+              />
             </Link>
 
             <Link to="/leave-approvals" className={menuClass("/leave-approvals")}>
-              <CheckCircle size={18} /> Leave Approvals
+              <CheckCircle size={18} />
+              <span className="flex-1 truncate">Leave Approvals</span>
+              <PendingCountBadge
+                count={leavePendingCount}
+                loading={countsLoading}
+                error={countsError}
+                label="Leave Approvals"
+              />
             </Link>
 
             <Link to="/team-attendance" className={menuClass("/team-attendance")}>

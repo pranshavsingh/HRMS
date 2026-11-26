@@ -8,6 +8,7 @@ const r = Router();
 r.post("/apply/", authenticate, validate(applyLeaveSchema), c.applyLeave);
 r.get("/my/", authenticate, c.myLeaves);
 r.get("/approvals/", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), c.approvals);
+r.get("/approvals/pending-count", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), c.pendingApprovalsCount);
 r.post("/action/:leave_id/", authenticate, authorize(["manager", "hr", "admin", "superadmin"]), validate(leaveActionSchema), c.action);
 r.post("/concessions/", authenticate, authorize(["hr", "admin", "superadmin"]), validate(leaveConcessionSchema), c.grantConcession);
 r.get("/concessions/:employee_id/", authenticate, authorize(["hr", "admin", "superadmin"]), c.concessionsForEmployee);
