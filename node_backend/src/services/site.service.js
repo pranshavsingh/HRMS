@@ -213,6 +213,8 @@ export const siteService = {
       "INSERT INTO workforce_site_access (tenant_id, user_id, site_id, created_by) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = id",
       [tenantId, userId, siteId, actor.id]
     );
+    realtimeService.emitApprovalCountUpdated("attendance", { tenantId, targetUserIds: [Number(userId)], actorId: actor.id });
+    realtimeService.emitApprovalCountUpdated("leave", { tenantId, targetUserIds: [Number(userId)], actorId: actor.id });
     return { user_id: Number(userId), site_id: Number(siteId), access: "granted" };
   },
 
@@ -227,6 +229,8 @@ export const siteService = {
 
   async revokeSiteAccess(tenantId, userId, siteId) {
     await db.run("DELETE FROM workforce_site_access WHERE tenant_id = ? AND user_id = ? AND site_id = ?", [tenantId, userId, siteId]);
+    realtimeService.emitApprovalCountUpdated("attendance", { tenantId, targetUserIds: [Number(userId)] });
+    realtimeService.emitApprovalCountUpdated("leave", { tenantId, targetUserIds: [Number(userId)] });
     return { user_id: Number(userId), site_id: Number(siteId), access: "revoked" };
   },
 

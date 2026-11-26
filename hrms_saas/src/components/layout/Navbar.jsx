@@ -2,6 +2,7 @@ import { LogOut, User, CalendarDays, Menu } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { useSite } from "../../context/SiteContext";
 import { useAuth } from "../../context/AuthContext";
+import NotificationBell from "./NotificationBell";
 
 const ROUTE_TITLES = {
   "/attendance": "Attendance",
@@ -27,6 +28,7 @@ const ROUTE_TITLES = {
   "/holidays": "Company Holidays",
   "/site-management": "Site Management",
   "/sites": "Site Management",
+  "/notifications": "Notifications",
 };
 
 export default function Navbar({ onToggleSidebar }) {
@@ -123,6 +125,9 @@ export default function Navbar({ onToggleSidebar }) {
         >
           <CalendarDays size={19} aria-hidden="true" />
         </Link>
+
+        {/* 🔔 Notification Bell immediately before profile area */}
+        <NotificationBell />
 
         {/* 👤 User Info */}
         <div className="flex items-center gap-2 bg-gray-100 px-2 sm:px-3 py-1 rounded-lg">

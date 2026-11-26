@@ -12,6 +12,7 @@ import { formatDateToYMD } from "./shift-validation.service.js";
 import { canonicalizeJson, generateSnapshotPayloadHash } from "./shift-snapshot.service.js";
 import { auditService } from "./audit.service.js";
 import realtimeService from "./realtime.service.js";
+import notificationService from "./notification.service.js";
 import logger from "../utils/logger.js";
 
 function wrapTx(conn) {
@@ -540,7 +541,23 @@ export const shiftAssignmentService = {
         snapshot_hash: snapshotHash,
       };
     });
-    if (!existingTx) realtimeService.emitToTenant(tenantId, "schedule_update", { type: "assignment_published", userId: result.user_id, assignmentId: Number(assignmentId) });
+    if (!existingTx) {
+      realtimeService.emitToTenant(tenantId, "schedule_update", { type: "assignment_published", userId: result.user_id, assignmentId: Number(assignmentId) });
+      void notificationService.safeNotify(async () => {
+        await notificationService.createNotification({
+          tenantId,
+          recipientId: Number(result.user_id),
+          actorId: actorUserId || null,
+          type: "roster:assignment_published",
+          category: "ROSTER",
+          title: "Shift Assignment Updated",
+          message: `Your shift assignment has been published effective ${result.effective_from}.`,
+          actionUrl: "/shifts",
+          priority: "NORMAL",
+          dedupeKey: `assign:pub:${assignmentId}`,
+        });
+      });
+    }
     return result;
   },
 
@@ -584,7 +601,23 @@ export const shiftAssignmentService = {
 
       return { id: assignmentId, user_id: assignment.user_id, status: "cancelled", cancellation_reason: reason };
     });
-    if (!existingTx) realtimeService.emitToTenant(tenantId, "schedule_update", { type: "assignment_cancelled", userId: result.user_id, assignmentId: Number(assignmentId) });
+    if (!existingTx) {
+      realtimeService.emitToTenant(tenantId, "schedule_update", { type: "assignment_cancelled", userId: result.user_id, assignmentId: Number(assignmentId) });
+      void notificationService.safeNotify(async () => {
+        await notificationService.createNotification({
+          tenantId,
+          recipientId: Number(result.user_id),
+          actorId: actorUserId || null,
+          type: "roster:assignment_cancelled",
+          category: "ROSTER",
+          title: "Shift Assignment Cancelled",
+          message: `Your shift assignment was cancelled: ${result.cancellation_reason || "No reason specified"}.`,
+          actionUrl: "/shifts",
+          priority: "HIGH",
+          dedupeKey: `assign:cancel:${assignmentId}`,
+        });
+      });
+    }
     return result;
   },
 

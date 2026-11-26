@@ -14,6 +14,8 @@ import {
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
 import { useAuth } from "../../context/AuthContext";
+import { useApprovalCounts } from "../../context/ApprovalCountsContext";
+import PendingCountBadge from "../../components/PendingCountBadge";
 import { formatCompanyDate, formatCompanyDateRange } from "../../utils/date";
 import { Image } from "expo-image";
 import { 
@@ -66,6 +68,7 @@ interface LeaveApproval {
 
 export default function ApprovalsScreen() {
   const { user, isAuthenticated } = useAuth();
+  const { attendancePendingCount, leavePendingCount, loading: countsLoading, error: countsError } = useApprovalCounts();
   const [activeQueue, setActiveQueue] = useState<"punches" | "leaves">("punches");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -314,17 +317,33 @@ export default function ApprovalsScreen() {
           style={[styles.toggleBtn, activeQueue === "punches" && styles.toggleBtnActive]}
           onPress={() => setActiveQueue("punches")}
         >
-          <Text style={[styles.toggleText, activeQueue === "punches" && styles.toggleTextActive]}>
-            Punch Exceptions ({punchQueue.length})
-          </Text>
+          <View style={styles.toggleBtnInner}>
+            <Text style={[styles.toggleText, activeQueue === "punches" && styles.toggleTextActive]}>
+              Attendance Approvals
+            </Text>
+            <PendingCountBadge
+              count={attendancePendingCount}
+              loading={countsLoading}
+              error={countsError}
+              label="Attendance Approvals"
+            />
+          </View>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.toggleBtn, activeQueue === "leaves" && styles.toggleBtnActive]}
           onPress={() => setActiveQueue("leaves")}
         >
-          <Text style={[styles.toggleText, activeQueue === "leaves" && styles.toggleTextActive]}>
-            Leaves Queue ({leaveQueue.length})
-          </Text>
+          <View style={styles.toggleBtnInner}>
+            <Text style={[styles.toggleText, activeQueue === "leaves" && styles.toggleTextActive]}>
+              Leave Approvals
+            </Text>
+            <PendingCountBadge
+              count={leavePendingCount}
+              loading={countsLoading}
+              error={countsError}
+              label="Leave Approvals"
+            />
+          </View>
         </TouchableOpacity>
       </View>
 
@@ -432,6 +451,11 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     alignItems: "center",
     borderRadius: 12,
+  },
+  toggleBtnInner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
   },
   toggleBtnActive: {
     backgroundColor: "#FFFFFF",

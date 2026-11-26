@@ -159,8 +159,8 @@ export default function EmployeeDocumentsScreen() {
     return (
       <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
         <View style={styles.emptyContainer}>
-          <ShieldAlert size={44} color="#ef4444" style={{ marginBottom: 12 }} />
-          <Text style={[styles.emptyText, { fontWeight: "700", fontSize: 16, color: "#f87171" }]}>
+          <ShieldAlert size={44} color="#DC2626" style={{ marginBottom: 12 }} />
+          <Text style={[styles.emptyText, { fontWeight: "700", fontSize: 16, color: "#DC2626" }]}>
             Access Restricted
           </Text>
           <Text style={[styles.emptyText, { marginTop: 6, textAlign: "center", paddingHorizontal: 20 }]}>
@@ -177,11 +177,11 @@ export default function EmployeeDocumentsScreen() {
       <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
         <View style={styles.filterSection}>
           <View style={styles.searchRow}>
-            <Search size={16} color="#64748b" style={styles.searchIcon} />
+            <Search size={16} color="#68758A" style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
               placeholder="Search staff folder..."
-              placeholderTextColor="#64748b"
+              placeholderTextColor="#8995A7"
               value={searchQuery}
               onChangeText={setSearchQuery}
             />
@@ -190,7 +190,7 @@ export default function EmployeeDocumentsScreen() {
 
         {loading ? (
           <View style={styles.centeredSpinner}>
-            <ActivityIndicator size="large" color="#10b981" />
+            <ActivityIndicator size="large" color="#2457D6" />
           </View>
         ) : (
           <FlatList
@@ -199,8 +199,10 @@ export default function EmployeeDocumentsScreen() {
             renderItem={({ item }) => (
               <TouchableOpacity style={styles.empCard} onPress={() => handleSelectEmployee(item)}>
                 <View style={styles.empInfo}>
-                  <Users size={18} color="#10b981" style={{ marginRight: 10 }} />
-                  <View>
+                  <View style={styles.empIconBox}>
+                    <Users size={18} color="#2457D6" />
+                  </View>
+                  <View style={{ flex: 1 }}>
                     <Text style={styles.empName}>
                       {item.first_name ? `${item.first_name} ${item.last_name || ""}` : item.username}
                     </Text>
@@ -209,16 +211,16 @@ export default function EmployeeDocumentsScreen() {
                     </Text>
                   </View>
                 </View>
-                <FolderOpen size={16} color="#64748b" />
+                <FolderOpen size={18} color="#68758A" />
               </TouchableOpacity>
             )}
             contentContainerStyle={styles.listContent}
             refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#10b981" />
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
             }
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <Users size={32} color="#64748b" />
+                <Users size={32} color="#8995A7" />
                 <Text style={styles.emptyText}>No employee records found.</Text>
               </View>
             }
@@ -242,14 +244,14 @@ export default function EmployeeDocumentsScreen() {
           <Text style={styles.headerSubtitle}>Member Directory Folder</Text>
         </View>
         <TouchableOpacity style={styles.backBtn} onPress={handleClearSelection}>
-          <X size={16} color="#ffffff" style={{ marginRight: 6 }} />
+          <X size={16} color="#152238" style={{ marginRight: 6 }} />
           <Text style={styles.backBtnText}>Close Folder</Text>
         </TouchableOpacity>
       </View>
 
       {docsLoading ? (
         <View style={styles.centeredSpinner}>
-          <ActivityIndicator size="large" color="#10b981" />
+          <ActivityIndicator size="large" color="#2457D6" />
         </View>
       ) : (
         <FlatList
@@ -258,7 +260,9 @@ export default function EmployeeDocumentsScreen() {
           renderItem={({ item }) => (
             <View style={styles.docCard}>
               <View style={styles.docInfo}>
-                <FileText size={20} color="#6366f1" style={{ marginRight: 12 }} />
+                <View style={styles.docIconBox}>
+                  <FileText size={20} color="#2457D6" />
+                </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.docTitle}>{item.title}</Text>
                   <Text style={styles.docDate}>
@@ -270,18 +274,18 @@ export default function EmployeeDocumentsScreen() {
                 style={styles.openBtn}
                 onPress={() => handleOpenDocument(item.file)}
               >
-                <ExternalLink size={14} color="#10b981" style={{ marginRight: 6 }} />
+                <ExternalLink size={14} color="#2457D6" style={{ marginRight: 6 }} />
                 <Text style={styles.openBtnText}>Preview</Text>
               </TouchableOpacity>
             </View>
           )}
           contentContainerStyle={styles.listContent}
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#10b981" />
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
           }
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <FileText size={32} color="#64748b" />
+              <FileText size={32} color="#8995A7" />
               <Text style={styles.emptyText}>No documents uploaded in this folder yet.</Text>
             </View>
           }
@@ -294,28 +298,28 @@ export default function EmployeeDocumentsScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
   },
   filterSection: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderBottomWidth: 1,
-    borderBottomColor: "#33415550",
+    borderBottomColor: "#E5EAF2",
     padding: 16,
   },
   searchRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#0f172a",
-    borderRadius: 14,
+    backgroundColor: "#F8FAFC",
+    borderRadius: 12,
     paddingHorizontal: 12,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   searchIcon: {
     marginRight: 8,
   },
   searchInput: {
-    color: "#ffffff",
+    color: "#152238",
     flex: 1,
     height: 40,
     fontSize: 14,
@@ -332,25 +336,40 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 16,
+    borderColor: "#E5EAF2",
+    borderRadius: 18,
     padding: 16,
     marginBottom: 12,
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   empInfo: {
     flexDirection: "row",
     alignItems: "center",
     flex: 1,
+    paddingRight: 10,
+  },
+  empIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: "#EAF0FF",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
   },
   empName: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
     fontWeight: "700",
   },
   empMeta: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 11,
     marginTop: 2,
   },
@@ -358,39 +377,39 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     padding: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#334155",
+    borderBottomColor: "#E5EAF2",
   },
   headerInfo: {
     flex: 1,
     paddingRight: 10,
   },
   headerTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 16,
     fontWeight: "800",
   },
   headerSubtitle: {
-    color: "#10b981",
+    color: "#2457D6",
     fontSize: 11,
-    fontWeight: "600",
+    fontWeight: "700",
     textTransform: "uppercase",
     marginTop: 2,
   },
   backBtn: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#334155",
+    backgroundColor: "#F1F5F9",
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#475569",
+    borderColor: "#E2E8F0",
   },
   backBtnText: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 11,
     fontWeight: "700",
   },
@@ -398,12 +417,17 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 16,
+    borderColor: "#E5EAF2",
+    borderRadius: 18,
     padding: 16,
     marginBottom: 12,
+    shadowColor: "#243B64",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   docInfo: {
     flexDirection: "row",
@@ -411,28 +435,37 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingRight: 10,
   },
+  docIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: "#EAF0FF",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
   docTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
     fontWeight: "700",
   },
   docDate: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 11,
     marginTop: 2,
   },
   openBtn: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#10b98115",
+    backgroundColor: "#EAF0FF",
     borderWidth: 1,
-    borderColor: "#10b98130",
+    borderColor: "#BFDBFE",
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 12,
   },
   openBtnText: {
-    color: "#10b981",
+    color: "#2457D6",
     fontSize: 11,
     fontWeight: "700",
   },
@@ -442,7 +475,7 @@ const styles = StyleSheet.create({
     paddingVertical: 80,
   },
   emptyText: {
-    color: "#64748b",
+    color: "#8995A7",
     fontSize: 13,
     marginTop: 12,
     textAlign: "center",

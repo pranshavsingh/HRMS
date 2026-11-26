@@ -2,7 +2,6 @@ import React, { useEffect, useState, useMemo, useCallback } from "react";
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Modal,
   RefreshControl,
   ScrollView,
@@ -310,7 +309,7 @@ export default function LeaveScreen() {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#10b981" />
+        <ActivityIndicator size="large" color="#2457D6" />
       </View>
     );
   }
@@ -321,41 +320,52 @@ export default function LeaveScreen() {
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#10b981" />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" colors={["#2457D6"]} />
         }
       >
         {/* Metric Overview Section */}
         <View style={styles.heroSection}>
-          <Text style={styles.heroPreText}>
-            <Calendar size={12} color="#10b981" /> Leave Balances
-          </Text>
+          <View style={styles.heroPreRow}>
+            <Calendar size={13} color="#2457D6" />
+            <Text style={styles.heroPreText}>Leave Balances</Text>
+          </View>
           <Text style={styles.heroTitle}>Time Off Requests</Text>
 
           <View style={styles.statsGrid}>
             <View style={styles.statTile}>
-              <FileText size={18} color="#10b981" />
-              <Text style={styles.statLabel}>Allotted</Text>
+              <View style={[styles.statIconWrap, { backgroundColor: "#ECFDF5" }]}>
+                <FileText size={16} color="#059669" />
+              </View>
               <Text style={styles.statValue}>{summary.leave_allotted}</Text>
+              <Text style={styles.statLabel}>Allotted</Text>
             </View>
             <View style={styles.statTile}>
-              <ShieldCheck size={18} color="#10b981" />
-              <Text style={styles.statLabel}>Taken</Text>
+              <View style={[styles.statIconWrap, { backgroundColor: "#F0FDF4" }]}>
+                <ShieldCheck size={16} color="#16A34A" />
+              </View>
               <Text style={styles.statValue}>{summary.leaves_taken}</Text>
+              <Text style={styles.statLabel}>Taken</Text>
             </View>
             <View style={styles.statTile}>
-              <Clock3 size={18} color="#2563eb" />
+              <View style={[styles.statIconWrap, { backgroundColor: "#EAF0FF" }]}>
+                <Clock3 size={16} color="#2457D6" />
+              </View>
+              <Text style={[styles.statValue, { color: "#2457D6" }]}>{summary.leave_balance}</Text>
               <Text style={styles.statLabel}>Balance</Text>
-              <Text style={styles.statValue}>{summary.leave_balance}</Text>
             </View>
             <View style={styles.statTile}>
-              <ShieldCheck size={18} color="#10b981" />
-              <Text style={styles.statLabel}>Concession</Text>
+              <View style={[styles.statIconWrap, { backgroundColor: "#ECFDF5" }]}>
+                <ShieldCheck size={16} color="#0D9488" />
+              </View>
               <Text style={styles.statValue}>{summary.management_concession}</Text>
+              <Text style={styles.statLabel}>Concession</Text>
             </View>
             <View style={styles.statTile}>
-              <Calendar size={18} color="#f59e0b" />
-              <Text style={styles.statLabel}>Pending days</Text>
+              <View style={[styles.statIconWrap, { backgroundColor: "#FFFBEB" }]}>
+                <Calendar size={16} color="#D97706" />
+              </View>
               <Text style={styles.statValue}>{summary.pending_leave_days}</Text>
+              <Text style={styles.statLabel}>Pending days</Text>
             </View>
           </View>
         </View>
@@ -364,7 +374,9 @@ export default function LeaveScreen() {
         <View style={styles.formPanel}>
           <View style={styles.formHeader}>
             <Text style={styles.formTitle}>Request Time Off</Text>
-            <Plus size={20} color="#10b981" />
+            <View style={styles.formHeaderBadge}>
+              <Plus size={18} color="#2457D6" />
+            </View>
           </View>
 
           {/* Leave Type Dropdown */}
@@ -393,6 +405,7 @@ export default function LeaveScreen() {
                   setCalendarTarget("from");
                 }}
               >
+                <Calendar size={15} color="#68758A" />
                 <Text style={styles.dateTriggerText}>{formatCompanyDate(form.from_date)}</Text>
               </TouchableOpacity>
             </View>
@@ -405,6 +418,7 @@ export default function LeaveScreen() {
                   setCalendarTarget("to");
                 }}
               >
+                <Calendar size={15} color="#68758A" />
                 <Text style={styles.dateTriggerText}>{formatCompanyDate(form.to_date)}</Text>
               </TouchableOpacity>
             </View>
@@ -425,16 +439,16 @@ export default function LeaveScreen() {
             multiline
             numberOfLines={4}
             placeholder="Provide a clear, brief explanation for your request..."
-            placeholderTextColor="#64748b"
+            placeholderTextColor="#94A3B8"
             value={form.reason}
             onChangeText={val => setForm(prev => ({ ...prev, reason: val }))}
           />
 
           {hasOverlap && (
             <View style={styles.overlapWarning}>
-              <AlertTriangle size={16} color="#ef4444" style={styles.warningIcon} />
+              <AlertTriangle size={16} color="#DC2626" style={styles.warningIcon} />
               <Text style={styles.overlapWarningText}>
-                Selected dates overlap with an approved leave.
+                Selected dates overlap with an existing approved or pending leave.
               </Text>
             </View>
           )}
@@ -520,13 +534,13 @@ export default function LeaveScreen() {
             {/* Modal Header */}
             <View style={styles.calendarHeader}>
               <TouchableOpacity onPress={() => handleMonthChange("prev")} style={styles.arrowBtn}>
-                <ChevronLeft size={20} color="#ffffff" />
+                <ChevronLeft size={20} color="#152238" />
               </TouchableOpacity>
               <Text style={styles.monthLabel}>
                 {monthNames[currentMonth]} {currentYear}
               </Text>
               <TouchableOpacity onPress={() => handleMonthChange("next")} style={styles.arrowBtn}>
-                <ChevronRight size={20} color="#ffffff" />
+                <ChevronRight size={20} color="#152238" />
               </TouchableOpacity>
             </View>
 
@@ -542,10 +556,13 @@ export default function LeaveScreen() {
             {/* Grid numbers */}
             <View style={styles.daysGrid}>
               {calendarDays.map((day, idx) => {
+                const cellDateStr =
+                  day !== null
+                    ? `${currentYear}-${String(currentMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`
+                    : "";
                 const isSelected =
                   day !== null &&
-                  new Date(currentYear, currentMonth, day).toISOString().split("T")[0] ===
-                    (calendarTarget === "from" ? form.from_date : form.to_date);
+                  cellDateStr === (calendarTarget === "from" ? form.from_date : form.to_date);
 
                 return (
                   <TouchableOpacity
@@ -564,7 +581,7 @@ export default function LeaveScreen() {
 
             {/* Cancel Trigger */}
             <TouchableOpacity style={styles.closeModalBtn} onPress={() => setCalendarTarget(null)}>
-              <X size={16} color="#ffffff" style={{ marginRight: 6 }} />
+              <X size={16} color="#475569" style={{ marginRight: 6 }} />
               <Text style={styles.closeModalText}>Cancel</Text>
             </TouchableOpacity>
           </View>
@@ -577,7 +594,7 @@ export default function LeaveScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
   },
   scrollView: {
     flex: 1,
@@ -588,29 +605,39 @@ const styles = StyleSheet.create({
   },
   loadingContainer: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F6F8FC",
     alignItems: "center",
     justifyContent: "center",
   },
   // Overview Section
   heroSection: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
-    padding: 20,
-    marginBottom: 20,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  heroPreRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 6,
   },
   heroPreText: {
-    color: "#10b981",
+    color: "#2457D6",
     fontSize: 11,
-    fontWeight: "700",
+    fontWeight: "800",
     textTransform: "uppercase",
-    letterSpacing: 2,
-    marginBottom: 8,
+    letterSpacing: 1.2,
   },
   heroTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 22,
     fontWeight: "800",
     marginBottom: 16,
@@ -618,144 +645,182 @@ const styles = StyleSheet.create({
   statsGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    marginHorizontal: -4,
+    gap: 8,
   },
   statTile: {
-    width: "23%",
-    backgroundColor: "#0f172a70",
-    borderRadius: 16,
-    padding: 10,
-    margin: "1%",
+    flexGrow: 1,
+    minWidth: "30%",
+    backgroundColor: "#F8FAFC",
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#33415550",
+    borderColor: "#E5EAF2",
+  },
+  statIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 6,
   },
   statLabel: {
-    color: "#94a3b8",
-    fontSize: 9,
+    color: "#68758A",
+    fontSize: 10,
     textTransform: "uppercase",
-    fontWeight: "600",
-    marginTop: 4,
+    fontWeight: "700",
+    letterSpacing: 0.4,
+    marginTop: 2,
   },
   statValue: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "700",
-    marginTop: 2,
+    color: "#152238",
+    fontSize: 18,
+    fontWeight: "800",
   },
   // Form Panel
   formPanel: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
-    padding: 20,
-    marginBottom: 20,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 2,
   },
   formHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 16,
+    marginBottom: 8,
+  },
+  formHeaderBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: "#EAF0FF",
+    alignItems: "center",
+    justifyContent: "center",
   },
   formTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 18,
-    fontWeight: "700",
+    fontWeight: "800",
   },
   inputLabel: {
-    color: "#94a3b8",
+    color: "#475569",
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "700",
     marginBottom: 8,
     marginTop: 12,
   },
   selectorRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    backgroundColor: "#0f172a",
+    flexWrap: "wrap",
+    gap: 6,
+    backgroundColor: "#F1F5F9",
     borderRadius: 14,
     padding: 4,
   },
   selectorBtn: {
     flex: 1,
+    minWidth: "28%",
     paddingVertical: 10,
+    paddingHorizontal: 8,
     alignItems: "center",
-    borderRadius: 12,
+    borderRadius: 10,
   },
   selectorBtnActive: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
   },
   selectorText: {
-    color: "#64748b",
+    color: "#68758A",
     fontSize: 12,
     fontWeight: "700",
   },
   selectorTextActive: {
-    color: "#10b981",
+    color: "#2457D6",
   },
   datePickerRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginTop: 12,
+    marginTop: 6,
   },
   datePickerContainer: {
     width: "48%",
   },
   dateTrigger: {
-    backgroundColor: "#0f172a",
-    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#F8FAFC",
+    borderRadius: 12,
     paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   dateTriggerText: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "600",
+    color: "#152238",
+    fontSize: 13,
+    fontWeight: "700",
   },
   durationCard: {
-    backgroundColor: "#0f172a60",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#F0F5FF",
     borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 16,
-    padding: 12,
+    borderColor: "#DBEAFE",
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     marginVertical: 14,
   },
   durationLabel: {
-    color: "#94a3b8",
-    fontSize: 10,
+    color: "#1E40AF",
+    fontSize: 11,
     textTransform: "uppercase",
-    fontWeight: "600",
+    fontWeight: "800",
+    letterSpacing: 0.5,
   },
   durationValue: {
-    color: "#ffffff",
+    color: "#2457D6",
     fontSize: 16,
-    fontWeight: "700",
-    marginTop: 4,
+    fontWeight: "800",
   },
   reasonInput: {
-    backgroundColor: "#0f172a",
-    borderRadius: 14,
+    backgroundColor: "#F8FAFC",
+    borderRadius: 12,
     padding: 14,
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
     textAlignVertical: "top",
-    marginTop: 6,
+    minHeight: 96,
+    marginTop: 2,
     marginBottom: 16,
   },
   overlapWarning: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#7f1d1d30",
+    backgroundColor: "#FEF2F2",
     borderWidth: 1,
-    borderColor: "#ef444450",
-    borderRadius: 14,
+    borderColor: "#FECACA",
+    borderRadius: 12,
     padding: 12,
     marginBottom: 16,
   },
@@ -763,45 +828,50 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   overlapWarningText: {
-    color: "#fca5a5",
+    color: "#B91C1C",
     fontSize: 12,
     fontWeight: "600",
     flex: 1,
   },
   submitBtn: {
     flexDirection: "row",
-    backgroundColor: "#10b981",
-    borderRadius: 16,
+    backgroundColor: "#2457D6",
+    borderRadius: 14,
     paddingVertical: 14,
     alignItems: "center",
     justifyContent: "center",
     width: "100%",
-    marginTop: 8,
+    marginTop: 4,
   },
   submitBtnDisabled: {
-    opacity: 0.6,
+    opacity: 0.5,
   },
   submitBtnText: {
-    color: "#ffffff",
-    fontSize: 16,
+    color: "#FFFFFF",
+    fontSize: 15,
     fontWeight: "700",
   },
   // Leave History List
   listContainer: {
-    backgroundColor: "#1e293b",
-    borderRadius: 24,
-    padding: 20,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    padding: 18,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 2,
   },
   listTitle: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 18,
-    fontWeight: "700",
-    marginBottom: 16,
+    fontWeight: "800",
+    marginBottom: 12,
   },
   emptyText: {
-    color: "#64748b",
+    color: "#8995A7",
     fontSize: 14,
     textAlign: "center",
     paddingVertical: 20,
@@ -811,7 +881,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     borderTopWidth: 1,
-    borderTopColor: "#334155",
+    borderTopColor: "#EDF1F6",
     paddingVertical: 14,
   },
   historyMain: {
@@ -819,56 +889,58 @@ const styles = StyleSheet.create({
     paddingRight: 12,
   },
   historyType: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 14,
     fontWeight: "700",
   },
   historyDates: {
-    color: "#94a3b8",
-    fontSize: 11,
+    color: "#68758A",
+    fontSize: 12,
+    fontWeight: "600",
     marginTop: 4,
   },
   historyReason: {
-    color: "#64748b",
-    fontSize: 11,
-    marginTop: 6,
+    color: "#8995A7",
+    fontSize: 12,
+    marginTop: 4,
   },
   statusBadge: {
     paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
     borderWidth: 1,
   },
   badgeApproved: {
-    backgroundColor: "#064e3b",
-    borderColor: "#065f46",
+    backgroundColor: "#DEF7EC",
+    borderColor: "#A7F3D0",
   },
   badgeRejected: {
-    backgroundColor: "#7f1d1d",
-    borderColor: "#991b1b",
+    backgroundColor: "#FEE2E2",
+    borderColor: "#FECACA",
   },
   badgePending: {
-    backgroundColor: "#78350f",
-    borderColor: "#92400e",
+    backgroundColor: "#FEF3C7",
+    borderColor: "#FDE68A",
   },
   statusBadgeText: {
     fontSize: 10,
-    fontWeight: "700",
+    fontWeight: "800",
     textTransform: "uppercase",
+    letterSpacing: 0.4,
   },
   textApproved: {
-    color: "#34d399",
+    color: "#03543F",
   },
   textRejected: {
-    color: "#f87171",
+    color: "#991B1B",
   },
   textPending: {
-    color: "#fbbf24",
+    color: "#92400E",
   },
   // Calendar Modal Styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(15, 23, 42, 0.75)",
+    backgroundColor: "rgba(15, 23, 42, 0.5)",
     justifyContent: "center",
     alignItems: "center",
     padding: 16,
@@ -876,11 +948,16 @@ const styles = StyleSheet.create({
   calendarModal: {
     width: "100%",
     maxWidth: 340,
-    backgroundColor: "#1e293b",
+    backgroundColor: "#FFFFFF",
     borderRadius: 24,
     padding: 20,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E5EAF2",
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 20,
+    elevation: 6,
   },
   calendarHeader: {
     flexDirection: "row",
@@ -889,16 +966,16 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   arrowBtn: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#F1F5F9",
     padding: 8,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   monthLabel: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 16,
-    fontWeight: "700",
+    fontWeight: "800",
   },
   weekRow: {
     flexDirection: "row",
@@ -906,7 +983,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   weekLabel: {
-    color: "#64748b",
+    color: "#8995A7",
     fontSize: 12,
     fontWeight: "700",
     width: "13%",
@@ -926,28 +1003,28 @@ const styles = StyleSheet.create({
     borderRadius: 18,
   },
   dayCellSelected: {
-    backgroundColor: "#10b981",
+    backgroundColor: "#2457D6",
   },
   dayText: {
-    color: "#ffffff",
+    color: "#152238",
     fontSize: 13,
     fontWeight: "600",
   },
   dayTextSelected: {
-    color: "#ffffff",
+    color: "#FFFFFF",
     fontWeight: "800",
   },
   closeModalBtn: {
     flexDirection: "row",
-    backgroundColor: "#334155",
-    borderRadius: 14,
-    paddingVertical: 10,
+    backgroundColor: "#F1F5F9",
+    borderRadius: 12,
+    paddingVertical: 11,
     alignItems: "center",
     justifyContent: "center",
     marginTop: 16,
   },
   closeModalText: {
-    color: "#ffffff",
+    color: "#475569",
     fontSize: 14,
     fontWeight: "700",
   },

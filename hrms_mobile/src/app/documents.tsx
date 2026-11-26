@@ -12,6 +12,7 @@ import {
 import { useRouter } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
 import api from "../services/api";
+import { useAuth } from "../context/AuthContext";
 import { useRealtime } from "../context/RealtimeContext";
 import { FileUp, Upload, CheckCircle2, FileText, Search, ChevronDown, User, X } from "lucide-react-native";
 
@@ -36,6 +37,7 @@ const documentOptions = [
 
 export default function DocumentUploadScreen() {
   const router = useRouter();
+  const { user } = useAuth();
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -85,14 +87,15 @@ export default function DocumentUploadScreen() {
 
   const filteredEmployees = useMemo(() => {
     const q = empSearchQuery.trim().toLowerCase();
-    if (!q) return employees;
-    return employees.filter((e) => {
+    const others = employees.filter((e) => String(e.id) !== String(user?.id));
+    if (!q) return others;
+    return others.filter((e) => {
       const name = `${e.first_name || ""} ${e.last_name || ""}`.toLowerCase();
       const uname = (e.username || "").toLowerCase();
       const code = (e.employee_code || "").toLowerCase();
       return name.includes(q) || uname.includes(q) || code.includes(q);
     });
-  }, [employees, empSearchQuery]);
+  }, [employees, empSearchQuery, user?.id]);
 
   const handlePickDocument = async () => {
     try {
@@ -118,6 +121,10 @@ export default function DocumentUploadScreen() {
   const handleUpload = async () => {
     if (!selectedEmpId) {
       Alert.alert("Input Required", "Please select an employee");
+      return;
+    }
+    if (String(selectedEmpId) === String(user?.id)) {
+      Alert.alert("Action Restricted", "You cannot upload your own documents from the mobile application.");
       return;
     }
     if (!selectedFile) {

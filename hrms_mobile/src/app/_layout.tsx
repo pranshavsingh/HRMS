@@ -3,6 +3,8 @@ import { ActivityIndicator, Alert, StyleSheet, View } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { AuthProvider, useAuth } from "../context/AuthContext";
 import { RealtimeProvider, useRealtime } from "../context/RealtimeContext";
+import { NotificationProvider } from "../context/NotificationContext";
+import { ApprovalCountsProvider } from "../context/ApprovalCountsContext";
 
 function InitialLayout() {
   const { isAuthenticated, isLoading, logout } = useAuth();
@@ -48,6 +50,7 @@ function InitialLayout() {
       <Stack.Screen name="holidays" options={{ headerShown: true, title: "Holiday Calendar", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
       <Stack.Screen name="documents" options={{ presentation: "modal", headerShown: true, title: "Upload Documents", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
       <Stack.Screen name="my-documents" options={{ presentation: "modal", headerShown: true, title: "My Documents", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
+      <Stack.Screen name="notifications" options={{ headerShown: true, title: "Notifications", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
     </Stack>
   );
 }
@@ -56,7 +59,11 @@ export default function RootLayout() {
   return (
     <AuthProvider>
       <RealtimeProvider>
-        <InitialLayout />
+        <NotificationProvider>
+          <ApprovalCountsProvider>
+            <InitialLayout />
+          </ApprovalCountsProvider>
+        </NotificationProvider>
       </RealtimeProvider>
     </AuthProvider>
   );

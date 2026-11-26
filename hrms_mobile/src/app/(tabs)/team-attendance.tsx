@@ -24,10 +24,20 @@ import {
   User,
   TrendingUp,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  ChevronRight
 } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCompanyDate } from "../../utils/date";
+
+interface RegisterCellDetail {
+  date: string;
+  code: string;
+  work_hours?: number;
+  punch_in?: string;
+  punch_out?: string;
+  holiday_name?: string | null;
+}
 
 interface RegisterRow {
   employee_id: number;
@@ -36,7 +46,11 @@ interface RegisterRow {
   employee_code: string;
   today_status: string;
   work_hours?: number;
+  present_marks?: number;
+  absent_marks?: number;
+  leave_marks?: number;
   date_status: Record<string, string>; // Maps YYYY-MM-DD -> status code (e.g. 'P', 'A', 'L', 'PR')
+  date_details?: Record<string, RegisterCellDetail>;
 }
 
 interface RegisterDate {
@@ -71,9 +85,11 @@ export default function TeamAttendanceScreen() {
       setRegisterDates(Array.isArray(payload.register_dates) ? payload.register_dates : []);
       const rows = (payload.register_rows || []).map((row: any) => {
         const date_status: Record<string, string> = {};
+        const date_details: Record<string, RegisterCellDetail> = {};
         if (Array.isArray(row.cells)) {
           row.cells.forEach((cell: any) => {
             date_status[cell.date] = cell.code;
+            date_details[cell.date] = cell;
           });
         }
         return {
@@ -83,7 +99,11 @@ export default function TeamAttendanceScreen() {
           employee_code: row.employee_code,
           today_status: row.today_status,
           work_hours: row.total_work_hours,
+          present_marks: row.present_marks,
+          absent_marks: row.absent_marks,
+          leave_marks: row.leave_marks,
           date_status,
+          date_details,
         };
       });
       setRegisterRows(rows);
@@ -135,7 +155,12 @@ export default function TeamAttendanceScreen() {
       case "A":
         return { text: "Absent", style: styles.badgeA, textStyle: styles.textA };
       case "WO":
-        return { text: "Weekend", style: styles.badgeWO, textStyle: styles.textWO };
+      case "W":
+        return { text: "Weekly Off", style: styles.badgeWO, textStyle: styles.textWO };
+      case "H":
+        return { text: "Holiday", style: styles.badgeIP, textStyle: styles.textIP };
+      case "HD":
+        return { text: "Half Day", style: styles.badgePR, textStyle: styles.textPR };
       default:
         return { text: status || "No Record", style: styles.badgeNone, textStyle: styles.textNone };
     }
@@ -144,27 +169,51 @@ export default function TeamAttendanceScreen() {
   const renderRosterItem = ({ item }: { item: RegisterRow }) => {
     const status = getStatusLabelAndColor(item.today_status || "A");
     return (
-      <TouchableOpacity style={styles.card} onPress={() => setSelectedRow(item)}>
+      <TouchableOpacity style={styles.card} activeOpacity={0.75} onPress={() => setSelectedRow(item)}>
         <View style={styles.cardHeader}>
           <View style={styles.userRow}>
-            <User size={14} color="#68758A" />
-            <Text style={styles.employeeName}>{item.employee_name}</Text>
+            <View style={styles.avatarIcon}>
+              <User size={14} color="#2457D6" />
+            </View>
+            <Text style={styles.employeeName} numberOfLines={1}>
+              {item.employee_name || item.username}
+            </Text>
           </View>
-          <Text style={styles.codeText}>{item.employee_code}</Text>
+          {item.employee_code ? (
+            <View style={styles.codePill}>
+              <Text style={styles.codeText}>{item.employee_code}</Text>
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.cardContent}>
-          <Text style={styles.usernameText}>Username: {item.username}</Text>
+          <Text style={styles.usernameText} numberOfLines={1}>
+            @{item.username}{item.work_hours !== undefined ? `  •  ${Number(item.work_hours || 0).toFixed(1)}h this month` : ""}
+          </Text>
           <View style={styles.statusRow}>
-            <Text style={styles.statusLabel}>Today&apos;s Status:</Text>
-            <View style={[styles.statusBadge, status.style]}>
-              <Text style={[styles.statusBadgeText, status.textStyle]}>{status.text}</Text>
+            <View style={styles.statusLeft}>
+              <Text style={styles.statusLabel}>Today:</Text>
+              <View style={[styles.statusBadge, status.style]}>
+                <Text style={[styles.statusBadgeText, status.textStyle]}>{status.text}</Text>
+              </View>
+            </View>
+            <View style={styles.ledgerHint}>
+              <Text style={styles.ledgerHintText}>Ledger</Text>
+              <ChevronRight size={14} color="#2457D6" />
             </View>
           </View>
         </View>
       </TouchableOpacity>
     );
   };
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#2457D6" />
+      </View>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
@@ -272,19 +321,56 @@ export default function TeamAttendanceScreen() {
 
               {/* Monthly Ledger dates detail */}
               <ScrollView contentContainerStyle={styles.modalScroll}>
+                <View style={styles.modalSummaryRow}>
+                  <View style={styles.modalSummaryPill}>
+                    <Text style={[styles.modalSummaryVal, { color: "#15803D" }]}>
+                      {selectedRow.present_marks ?? 0}
+                    </Text>
+                    <Text style={styles.modalSummaryLbl}>Present</Text>
+                  </View>
+                  <View style={styles.modalSummaryPill}>
+                    <Text style={[styles.modalSummaryVal, { color: "#BE123C" }]}>
+                      {selectedRow.absent_marks ?? 0}
+                    </Text>
+                    <Text style={styles.modalSummaryLbl}>Absent</Text>
+                  </View>
+                  <View style={styles.modalSummaryPill}>
+                    <Text style={[styles.modalSummaryVal, { color: "#7E22CE" }]}>
+                      {selectedRow.leave_marks ?? 0}
+                    </Text>
+                    <Text style={styles.modalSummaryLbl}>Leave</Text>
+                  </View>
+                  <View style={styles.modalSummaryPill}>
+                    <Text style={[styles.modalSummaryVal, { color: "#2457D6" }]}>
+                      {Number(selectedRow.work_hours || 0).toFixed(1)}h
+                    </Text>
+                    <Text style={styles.modalSummaryLbl}>Hours</Text>
+                  </View>
+                </View>
+
                 {registerDates
                   .slice()
                   .reverse() // Descending chronological list
                   .map((dateObj) => {
                     const statusVal = selectedRow.date_status[dateObj.date] || "A";
+                    const detail = selectedRow.date_details?.[dateObj.date];
                     const status = getStatusLabelAndColor(statusVal);
                     return (
                       <View key={dateObj.date} style={styles.timelineDetailRow}>
-                        <View style={styles.timelineLeft}>
+                        <View style={[styles.timelineLeft, { flex: 1, paddingRight: 10 }]}>
                           <Text style={styles.timelineDayNum}>{dateObj.day}</Text>
-                          <Text style={styles.timelineDayName}>
-                            {dateObj.weekday || dateObj.day_name || ""} • {formatCompanyDate(dateObj.date)}
-                          </Text>
+                          <View style={{ flex: 1, marginLeft: 10 }}>
+                            <Text style={[styles.timelineDayName, { marginLeft: 0 }]}>
+                              {dateObj.weekday || dateObj.day_name || ""} • {formatCompanyDate(dateObj.date)}
+                            </Text>
+                            {detail?.holiday_name ? (
+                              <Text style={styles.timelinePunchMeta}>{detail.holiday_name}</Text>
+                            ) : detail && (detail.punch_in !== "--" || detail.punch_out !== "--") ? (
+                              <Text style={styles.timelinePunchMeta}>
+                                In: {detail.punch_in} | Out: {detail.punch_out} ({Number(detail.work_hours || 0).toFixed(2)}h)
+                              </Text>
+                            ) : null}
+                          </View>
                         </View>
                         <View style={[styles.timelineBadge, status.style]}>
                           <Text style={[styles.timelineBadgeText, status.textStyle]}>
@@ -380,16 +466,19 @@ const styles = StyleSheet.create({
   },
   statsRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
+    gap: 8,
   },
   statBox: {
-    width: "23%",
+    flex: 1,
+    minHeight: 74,
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
     borderColor: "#E5EAF2",
     borderRadius: 14,
     paddingVertical: 10,
+    paddingHorizontal: 4,
     alignItems: "center",
+    justifyContent: "center",
     shadowColor: "#243B64",
     shadowOpacity: 0.04,
     shadowRadius: 6,
@@ -406,6 +495,7 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     fontWeight: "700",
     marginTop: 4,
+    textAlign: "center",
   },
   listContent: {
     padding: 16,
@@ -430,26 +520,43 @@ const styles = StyleSheet.create({
     alignItems: "center",
     borderBottomWidth: 1,
     borderBottomColor: "#EDF1F6",
-    paddingBottom: 8,
-    marginBottom: 8,
+    paddingBottom: 10,
+    marginBottom: 10,
   },
   userRow: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
+    marginRight: 8,
+  },
+  avatarIcon: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    backgroundColor: "#EAF0FF",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 8,
   },
   employeeName: {
+    flex: 1,
     color: "#152238",
     fontSize: 14,
     fontWeight: "700",
-    marginLeft: 6,
+  },
+  codePill: {
+    backgroundColor: "#F1F5F9",
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
   },
   codeText: {
     color: "#68758A",
     fontSize: 11,
-    fontWeight: "600",
+    fontWeight: "700",
   },
   cardContent: {
-    marginTop: 4,
+    marginTop: 2,
   },
   usernameText: {
     color: "#68758A",
@@ -458,12 +565,28 @@ const styles = StyleSheet.create({
   statusRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 8,
+    justifyContent: "space-between",
+    marginTop: 10,
+  },
+  statusLeft: {
+    flexDirection: "row",
+    alignItems: "center",
   },
   statusLabel: {
     color: "#68758A",
     fontSize: 12,
+    fontWeight: "600",
     marginRight: 8,
+  },
+  ledgerHint: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+  },
+  ledgerHintText: {
+    color: "#2457D6",
+    fontSize: 12,
+    fontWeight: "700",
   },
   statusBadge: {
     paddingHorizontal: 8,
@@ -543,6 +666,37 @@ const styles = StyleSheet.create({
   modalScroll: {
     paddingBottom: 24,
   },
+  modalSummaryRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 14,
+  },
+  modalSummaryPill: {
+    flex: 1,
+    backgroundColor: "#F8FAFC",
+    borderWidth: 1,
+    borderColor: "#E5EAF2",
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    alignItems: "center",
+  },
+  modalSummaryVal: {
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  modalSummaryLbl: {
+    color: "#68758A",
+    fontSize: 9,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    marginTop: 2,
+  },
+  timelinePunchMeta: {
+    color: "#8995A7",
+    fontSize: 11,
+    marginTop: 2,
+  },
   timelineDetailRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -559,7 +713,7 @@ const styles = StyleSheet.create({
     color: "#152238",
     fontSize: 16,
     fontWeight: "800",
-    width: 24,
+    minWidth: 28,
   },
   timelineDayName: {
     color: "#68758A",

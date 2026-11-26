@@ -18,6 +18,7 @@ import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
 import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
 import { siteService } from "./site.service.js";
+import notificationService from "./notification.service.js";
 
 function makeOtp() {
   return crypto.randomInt(100000, 1000000).toString();
@@ -1106,7 +1107,7 @@ export const accountsService = {
         tx
       );
 
-      return updatedUser;
+      return { updatedUser, oldManagerId: oldSerialized?.manager_id || null, newManagerId: newSerialized?.manager_id || null, assignmentChanged: Boolean(diff.manager || diff.team_name || diff.is_active || diff.is_active_employee || data.site_id !== undefined) };
     });
 
     await redisService.del(`user:session:${employeeId}`);
@@ -1115,12 +1116,25 @@ export const accountsService = {
       { actorId: actor.id, userId: Number(employeeId) },
       { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(employeeId)] }
     );
+    if (updated?.assignmentChanged) {
+      const affectedManagers = [updated.oldManagerId, updated.newManagerId].filter(Boolean);
+      realtimeService.emitApprovalCountUpdated("attendance", {
+        tenantId,
+        targetUserIds: affectedManagers,
+        actorId: actor.id,
+      });
+      realtimeService.emitApprovalCountUpdated("leave", {
+        tenantId,
+        targetUserIds: affectedManagers,
+        actorId: actor.id,
+      });
+    }
     if (data.is_active === false || data.is_active === 0) {
       realtimeService.disconnectUser(Number(employeeId), "Account deactivated");
     }
     return {
       message: "Employee details updated successfully",
-      employee: await this.serializeStaffMember(updated, null, tenantId)
+      employee: await this.serializeStaffMember(updated.updatedUser, null, tenantId)
     };
   },
 
@@ -1256,6 +1270,21 @@ export const accountsService = {
       title,
       action: duplicate ? "replace" : "upload"
     });
+    void notificationService.safeNotify(async () => {
+      if (String(actor.id) !== String(user)) {
+        await notificationService.createNotification({
+          tenantId,
+          recipientId: Number(user),
+          actorId: actor.id,
+          type: "document:uploaded",
+          category: "DOCUMENT",
+          title: "Document Added",
+          message: `Your compliance document "${title}" has been ${duplicate ? "updated" : "uploaded"} by HR/Admin.`,
+          actionUrl: "/documents",
+          priority: "NORMAL",
+        });
+      }
+    });
 
     return { message: "Document uploaded" };
   },
@@ -1315,6 +1344,21 @@ export const accountsService = {
       userId: user,
       title,
       action: duplicate ? "replace" : "upload"
+    });
+    void notificationService.safeNotify(async () => {
+      if (String(actor.id) !== String(user)) {
+        await notificationService.createNotification({
+          tenantId,
+          recipientId: Number(user),
+          actorId: actor.id,
+          type: "document:uploaded",
+          category: "DOCUMENT",
+          title: "Document Registered",
+          message: `Your compliance document "${title}" has been ${duplicate ? "updated" : "registered"} by HR/Admin.`,
+          actionUrl: "/documents",
+          priority: "NORMAL",
+        });
+      }
     });
 
     return { message: "Document registered successfully" };

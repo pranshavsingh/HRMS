@@ -7,6 +7,8 @@ import { db } from "../db/index.js";
 import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
 import { siteService } from "./site.service.js";
 import { financialLeaveService } from "./financial-leave.service.js";
+import notificationService from "./notification.service.js";
+import { realtimeService } from "./realtime.service.js";
 import logger from "../utils/logger.js";
 
 function fullName(user) {
@@ -188,6 +190,30 @@ export const leaveService = {
       { actorId: userId, userId: Number(userId), action: "applied" },
       { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
     );
+    void notificationService.safeNotify(async () => {
+      const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, userId);
+      realtimeService.emitApprovalCountUpdated("leave", {
+        tenantId,
+        targetUserIds: approverIds,
+        actorId: userId,
+      });
+      if (approverIds.length === 0) return;
+      const retryBucket = Math.floor(Date.now() / 5000);
+      await notificationService.createBulkNotifications(
+        approverIds.map((recipientId) => ({
+          tenantId,
+          recipientId,
+          actorId: userId,
+          type: "leave:applied",
+          category: "LEAVE",
+          title: "New Leave Request",
+          message: `A ${leaveType} leave request (${fromDate} to ${toDate}) requires review.`,
+          actionUrl: "/leave-approvals",
+          priority: "NORMAL",
+          dedupeKey: `leave:applied:${userId}:${fromDate}:${toDate}:${retryBucket}:${recipientId}`,
+        }))
+      );
+    });
     return { message: "Leave applied", balance: result };
   },
 
@@ -372,6 +398,21 @@ export const leaveService = {
     });
   },
 
+  async pendingApprovalsCount(role, viewerUserId, query = {}, tenantId = 1) {
+    if (!["manager", "hr", "admin", "superadmin"].includes(role)) {
+      return { count: 0 };
+    }
+    const siteScope = await siteService.getSiteScope(tenantId, { id: viewerUserId, role }, query.site_id || null);
+    const count = await leaveRepository.countPendingApprovalsForReviewer({
+      userId: viewerUserId,
+      role,
+      tenantId,
+      siteIds: siteScope.siteIds,
+      unassigned: siteScope.unassigned,
+    });
+    return { count };
+  },
+
   async action(leaveId, status, actor, tenantId = 1) {
     const actionResult = await db.transaction(async (tx) => {
       // Lock the employee allocation row as well as the request to serialize approvals and grants.
@@ -499,6 +540,26 @@ export const leaveService = {
       days: actionResult.days,
       updated_balance: actionResult.balance,
     }, { targetUserIds: [actionResult.employeeId] });
+    void notificationService.safeNotify(async () => {
+      const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, actionResult.employeeId);
+      realtimeService.emitApprovalCountUpdated("leave", {
+        tenantId,
+        targetUserIds: approverIds,
+        actorId: actor.id,
+      });
+      await notificationService.createNotification({
+        tenantId,
+        recipientId: actionResult.employeeId,
+        actorId: actor.id,
+        type: `leave:${status}`,
+        category: "LEAVE",
+        title: `Leave ${status === "approved" ? "Approved" : "Rejected"}`,
+        message: `Your ${actionResult.leaveType} leave (${actionResult.days} day${actionResult.days === 1 ? "" : "s"}) has been ${status}.`,
+        actionUrl: "/leave",
+        priority: status === "rejected" ? "HIGH" : "NORMAL",
+        dedupeKey: `leave:decision:${leaveId}:${status}`,
+      });
+    });
     return { message: `Leave ${status} successfully` };
   },
 

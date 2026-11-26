@@ -1,8 +1,12 @@
 import React from "react";
 import { Tabs, useRouter } from "expo-router";
 import { useAuth } from "../../context/AuthContext";
+import { useNotifications } from "../../context/NotificationContext";
+import { useApprovalCounts } from "../../context/ApprovalCountsContext";
+import PendingCountBadge from "../../components/PendingCountBadge";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { 
+  Bell,
   LayoutDashboard, 
   Fingerprint, 
   Calendar, 
@@ -22,6 +26,9 @@ import { ActivityIndicator, Image, StyleSheet, Text, TouchableOpacity, View } fr
 
 export default function TabsLayout() {
   const { user, isLoading, activeTab } = useAuth();
+  const { unreadCount } = useNotifications();
+  const { attendancePendingCount, leavePendingCount, loading: countsLoading, error: countsError } = useApprovalCounts();
+  const totalApprovalsPending = attendancePendingCount + leavePendingCount;
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const tabBarBottomInset = Math.max(insets.bottom, 8);
@@ -69,6 +76,23 @@ export default function TabsLayout() {
         tabBarInactiveTintColor: "#8995A7",
         headerRight: () => (
           <View style={styles.headerRightContainer} pointerEvents="box-none">
+            <TouchableOpacity
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              accessibilityRole="button"
+              accessibilityLabel={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
+              style={styles.bellButton}
+              onPress={() => router.push("/notifications")}
+            >
+              <Bell size={20} color="#2457D6" />
+              {unreadCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>
+                    {unreadCount > 99 ? "99+" : String(unreadCount)}
+                  </Text>
+                </View>
+              )}
+            </TouchableOpacity>
             <TouchableOpacity
               activeOpacity={0.7}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -163,7 +187,18 @@ export default function TabsLayout() {
         options={{
           title: "Approvals",
           tabBarLabel: "Approvals",
-          tabBarIcon: ({ color, size }) => <CheckSquare color={color} size={size} />,
+          tabBarIcon: ({ color, size }) => (
+            <View style={{ position: "relative" }}>
+              <CheckSquare color={color} size={size} />
+              <PendingCountBadge
+                count={totalApprovalsPending}
+                loading={countsLoading}
+                error={countsError}
+                label="Pending Approvals"
+                style={{ position: "absolute", top: -6, right: -12 }}
+              />
+            </View>
+          ),
           href: (isSystem && showWorkspace) ? "/(tabs)/approvals" : null,
         }}
       />
@@ -234,6 +269,36 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
+  },
+  bellButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#EEF4FF",
+    borderWidth: 1,
+    borderColor: "#D9E5FF",
+    position: "relative",
+  },
+  bellBadge: {
+    position: "absolute",
+    top: -4,
+    right: -4,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: "#E11D48",
+    paddingHorizontal: 4,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1.5,
+    borderColor: "#F6F8FC",
+  },
+  bellBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 9,
+    fontWeight: "800",
   },
   profileButton: {
     width: 36,

@@ -49,6 +49,15 @@ export const approvals = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Retrieve authoritative count of pending attendance approvals actionable by the user.
+ */
+export const pendingApprovalsCount = asyncHandler(async (req, res) => {
+  const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
+  const result = await attendanceService.pendingApprovalsCount(req.user.id, req.user.role, req.query, tenantId);
+  res.json(result);
+});
+
+/**
  * Approve or reject location exception punches.
  */
 export const approvalAction = asyncHandler(async (req, res) => {

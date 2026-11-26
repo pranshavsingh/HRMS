@@ -230,6 +230,27 @@ export class RealtimeService {
         }
       });
 
+      socket.on("notification:sync", async () => {
+        try {
+          const tenantId = Number(user.tenant_id || 1);
+          const row = await db.get(
+            `SELECT COUNT(*) AS cnt FROM notifications
+             WHERE tenant_id = ? AND recipient_id = ? AND read_at IS NULL
+               AND (expires_at IS NULL OR expires_at > NOW())`,
+            [tenantId, user.id]
+          );
+          const unreadCount = Number(row?.cnt || 0);
+          socket.emit(REALTIME_EVENTS.NOTIFICATION_UNREAD_COUNT, {
+            eventId: `evt_sync_${Date.now()}_${user.id}`,
+            eventType: REALTIME_EVENTS.NOTIFICATION_UNREAD_COUNT,
+            timestamp: new Date().toISOString(),
+            payload: { unreadCount },
+          });
+        } catch (err) {
+          logger.warn("[Realtime] notification:sync error for user %s: %s", user.id, err.message);
+        }
+      });
+
       socket.on("disconnect", (reason) => {
         logger.debug("[Realtime] Client disconnected: SocketID [%s], UserID [%s], Reason: %s", socket.id, user.id, reason);
       });
@@ -635,6 +656,64 @@ export class RealtimeService {
     this.recordEvent(envelope);
     this.io.to("role:superadmin").emit("new_audit_log", envelope);
     this.io.to(`tenant:${tenantId}:role:superadmin`).emit("new_audit_log", envelope);
+    return envelope;
+  }
+
+  /**
+   * Emit a zero-PII approval count invalidation signal to authorized approver rooms.
+   * Clients re-fetch their own authoritative pending count from the REST endpoint.
+   *
+   * @param {"attendance" | "leave"} domain
+   * @param {{ tenantId?: number, targetUserIds?: number[], includeTenantApproverRoles?: boolean, actorId?: number | null }} options
+   */
+  emitApprovalCountUpdated(
+    domain,
+    { tenantId = 1, targetUserIds = [], includeTenantApproverRoles = true, actorId = null } = {}
+  ) {
+    if (!this.io) return null;
+    const eventType =
+      domain === "leave"
+        ? REALTIME_EVENTS.APPROVAL_LEAVE_COUNT_UPDATED
+        : REALTIME_EVENTS.APPROVAL_ATTENDANCE_COUNT_UPDATED;
+    const resolvedTenantId = Number(tenantId || 1);
+    const payload = {
+      domain,
+      tenantId: resolvedTenantId,
+      timestamp: new Date().toISOString(),
+    };
+    const envelope = createRealtimeEnvelope({
+      eventType,
+      aggregateType: domain === "leave" ? "Leave" : "Attendance",
+      aggregateId: String(resolvedTenantId),
+      payload,
+      tenantId: resolvedTenantId,
+      actorId: actorId ? Number(actorId) : null,
+    });
+    this.recordEvent(envelope);
+
+    const emittedRooms = new Set();
+    const emitToRoom = (room) => {
+      if (!emittedRooms.has(room)) {
+        emittedRooms.add(room);
+        this.io.to(room).emit(eventType, envelope);
+      }
+    };
+
+    if (includeTenantApproverRoles) {
+      for (const approverRole of ["hr", "admin", "superadmin"]) {
+        emitToRoom(`tenant:${resolvedTenantId}:role:${approverRole}`);
+      }
+    }
+
+    if (Array.isArray(targetUserIds)) {
+      for (const uid of targetUserIds) {
+        const numericId = Number(uid);
+        if (Number.isInteger(numericId) && numericId > 0) {
+          emitToRoom(`tenant:${resolvedTenantId}:user:${numericId}`);
+        }
+      }
+    }
+
     return envelope;
   }
 
