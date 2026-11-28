@@ -1,15 +1,30 @@
-import React, { useEffect } from "react";
-import { ActivityIndicator, Alert, StyleSheet, View } from "react-native";
+import React, { useEffect, useRef } from "react";
+import { ActivityIndicator, Alert, AppState, AppStateStatus, StyleSheet, View } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { AuthProvider, useAuth } from "../context/AuthContext";
 import { RealtimeProvider, useRealtime } from "../context/RealtimeContext";
 import { NotificationProvider } from "../context/NotificationContext";
 import { ApprovalCountsProvider } from "../context/ApprovalCountsContext";
+import { checkAndFetchOtaUpdate } from "../services/otaUpdateService";
 
 function InitialLayout() {
   const { isAuthenticated, isLoading, logout } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+  const appStateRef = useRef<AppStateStatus>((AppState.currentState as AppStateStatus) || "active");
+
+  // Silent background OTA update check on startup and foreground resume (never forces mid-workflow reload)
+  useEffect(() => {
+    void checkAndFetchOtaUpdate({ reason: "startup" });
+    const sub = AppState.addEventListener("change", (nextState) => {
+      const prev = appStateRef.current;
+      appStateRef.current = nextState;
+      if (prev.match(/inactive|background/) && nextState === "active") {
+        void checkAndFetchOtaUpdate({ reason: "foreground" });
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   useRealtime("session:revoked", (data) => {
     Alert.alert(

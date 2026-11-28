@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useState } from "react";
 import {
+  ActivityIndicator,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -9,14 +10,48 @@ import {
   Image,
 } from "react-native";
 import { useAuth } from "../context/AuthContext";
-import { User, LogOut, Mail, Award, Calendar, Bookmark } from "lucide-react-native";
+import { User, LogOut, Mail, Award, Calendar, Bookmark, RefreshCw } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { formatCompanyDate } from "../utils/date";
+import {
+  applyDownloadedOtaUpdate,
+  checkAndFetchOtaUpdate,
+  getOtaDiagnostics,
+  OtaDiagnostics,
+} from "../services/otaUpdateService";
 
 export default function ProfileScreen() {
   const router = useRouter();
   const { user, logout, themeColor } = useAuth();
+  const [otaInfo, setOtaInfo] = useState<OtaDiagnostics>(() => getOtaDiagnostics());
+  const [checkingOta, setCheckingOta] = useState(false);
+
+  const handleCheckUpdates = async () => {
+    setCheckingOta(true);
+    try {
+      const next = await checkAndFetchOtaUpdate({ force: true, reason: "manual" });
+      setOtaInfo(next);
+    } finally {
+      setCheckingOta(false);
+    }
+  };
+
+  const handleApplyUpdate = () => {
+    Alert.alert(
+      "Apply Downloaded Update",
+      "The app will restart to apply the latest update.",
+      [
+        { text: "Later", style: "cancel" },
+        {
+          text: "Restart Now",
+          onPress: () => {
+            void applyDownloadedOtaUpdate();
+          },
+        },
+      ]
+    );
+  };
 
   const handleLogout = () => {
     Alert.alert(
@@ -127,6 +162,46 @@ export default function ProfileScreen() {
           </Text>
         </View>
 
+        {/* App & OTA Diagnostics */}
+        <View style={styles.detailsBlock}>
+          <Text style={styles.blockTitle}>App &amp; Updates</Text>
+          <Text style={styles.supportText}>
+            Version {otaInfo.appVersion} · Runtime {otaInfo.runtimeVersion} · Channel {otaInfo.channel}
+          </Text>
+          <Text style={[styles.supportText, { marginTop: 4 }]}>
+            Bundle: {otaInfo.isEmbeddedLaunch ? "Embedded" : `OTA (${otaInfo.updateId?.slice(0, 8) || "active"})`} · Status: {otaInfo.lastCheckStatus}
+          </Text>
+          {otaInfo.lastError ? (
+            <Text style={[styles.supportText, { color: "#BE123C", marginTop: 4 }]}>
+              {otaInfo.lastError}
+            </Text>
+          ) : null}
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 12 }}>
+            <TouchableOpacity
+              style={[styles.updateBtn, { borderColor: "#CBD5E1" }]}
+              onPress={() => void handleCheckUpdates()}
+              disabled={checkingOta}
+            >
+              {checkingOta ? (
+                <ActivityIndicator size="small" color={themeColor} />
+              ) : (
+                <>
+                  <RefreshCw size={14} color={themeColor} style={{ marginRight: 6 }} />
+                  <Text style={[styles.updateBtnText, { color: themeColor }]}>Check for Updates</Text>
+                </>
+              )}
+            </TouchableOpacity>
+            {otaInfo.isUpdateReady ? (
+              <TouchableOpacity
+                style={[styles.updateBtn, { backgroundColor: themeColor, borderColor: themeColor }]}
+                onPress={handleApplyUpdate}
+              >
+                <Text style={[styles.updateBtnText, { color: "#FFFFFF" }]}>Restart to Apply Update</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </View>
+
         {/* Sign Out Button */}
         <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
           <LogOut size={18} color="#f87171" style={{ marginRight: 8 }} />
@@ -235,6 +310,19 @@ const styles = StyleSheet.create({
     color: "#68758A",
     fontSize: 13,
     lineHeight: 19,
+  },
+  updateBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    backgroundColor: "#F8FAFC",
+  },
+  updateBtnText: {
+    fontSize: 12,
+    fontWeight: "700",
   },
   logoutButton: {
     flexDirection: "row",
