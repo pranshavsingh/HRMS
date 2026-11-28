@@ -1,0 +1,250 @@
+name: HRMS Production CI/CD (GHCR + Coolify)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      deploy_to_coolify:
+        description: "Trigger Coolify production deployment after GHCR push"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: hrms-production-cicd
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: pranshavsingh
+
+jobs:
+  validate:
+    name: Validate Backend, Worker & Frontend
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping -proot_ci_password_strong_123" --health-interval=10s --health-timeout=5s --health-retries=10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: --health-cmd="redis-cli ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install and validate Backend & Worker
+        env:
+          NODE_ENV: test
+          DB_CLIENT: mysql
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root_ci_password_strong_123
+          MYSQL_DATABASE: hrms_ci_test
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          REDIS_URL: redis://127.0.0.1:6379
+          QUEUE_REDIS_URL: redis://127.0.0.1:6379
+          JWT_SECRET: super_secure_ci_test_jwt_secret_with_32_characters_min
+          OTP_SECRET: super_secure_ci_test_otp_secret_with_32_characters_min
+          OUTBOX_ENCRYPTION_KEY: 7e3c3fd7e9992ed3e0827cd4619e8edd4c531353efdf2e751a797378c7741852
+          CORS_ORIGIN: http://localhost:5173,http://localhost:3000
+        run: |
+          cd node_backend
+          npm ci
+          npm run check
+          npm run db:init:mysql
+          npm run db:migrate
+          npm run test:security
+          npm run test:phase2
+          npm run test:phase3
+
+      - name: Install, lint, and build Frontend
+        run: |
+          cd hrms_saas
+          npm ci
+          npm run lint
+          npm run build
+
+  build-and-push:
+    name: Build & Push Private GHCR Images
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      backend_digest: ${{ steps.build_backend.outputs.digest }}
+      worker_digest: ${{ steps.build_worker.outputs.digest }}
+      frontend_digest: ${{ steps.build_frontend.outputs.digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Backend image
+        id: build_backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./node_backend
+          file: ./node_backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-backend:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-backend:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=hrms-backend
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build and push Worker image
+        id: build_worker
+        uses: docker/build-push-action@v6
+        with:
+          context: ./node_backend
+          file: ./node_backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-worker:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-worker:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=hrms-worker
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build and push Frontend image
+        id: build_frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./hrms_saas
+          file: ./hrms_saas/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-frontend:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-frontend:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=hrms-frontend
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Verify published GHCR manifests and record digests
+        run: |
+          for img in hrms-backend hrms-worker hrms-frontend; do
+            echo "Verifying ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${img}:${{ github.sha }}"
+            docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${img}:${{ github.sha }}" >/dev/null
+          done
+
+          cat <<EOF > release-digests.json
+          {
+            "commit": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "images": {
+              "backend": {
+                "tag": "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-backend:${{ github.sha }}",
+                "digest": "${{ steps.build_backend.outputs.digest }}"
+              },
+              "worker": {
+                "tag": "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-worker:${{ github.sha }}",
+                "digest": "${{ steps.build_worker.outputs.digest }}"
+              },
+              "frontend": {
+                "tag": "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hrms-frontend:${{ github.sha }}",
+                "digest": "${{ steps.build_frontend.outputs.digest }}"
+              }
+            }
+          }
+          EOF
+          cat release-digests.json
+
+      - name: Upload release digests artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-digests-${{ github.sha }}
+          path: release-digests.json
+          retention-days: 90
+
+  deploy-coolify:
+    name: Trigger & Verify Coolify Production Deployment
+    needs: build-and-push
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.deploy_to_coolify == 'true') }}
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Trigger Coolify deployment webhook
+        env:
+          COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "$COOLIFY_WEBHOOK" ]; then
+            echo "::error::COOLIFY_WEBHOOK secret is not configured. Configure it in GitHub repository secrets before running production deployment."
+            exit 1
+          fi
+          if [ -n "$COOLIFY_TOKEN" ]; then
+            curl --fail --show-error --silent -X POST "$COOLIFY_WEBHOOK" \
+              -H "Authorization: Bearer $COOLIFY_TOKEN" \
+              -H "Content-Type: application/json"
+          else
+            curl --fail --show-error --silent -X POST "$COOLIFY_WEBHOOK"
+          fi
+          echo "Coolify deployment trigger accepted. Waiting for containers to roll..."
+
+      - name: Verify production API and Web health
+        env:
+          API_HEALTH_URL: ${{ vars.PRODUCTION_API_HEALTH_URL || 'https://api.sseone.io/health' }}
+          WEB_URL: ${{ vars.PRODUCTION_WEB_URL || 'https://sseone.io/' }}
+        run: |
+          sleep 20
+          for i in $(seq 1 18); do
+            if curl --fail --silent "$API_HEALTH_URL" | grep -q '"alive"'; then
+              echo "Backend health check passed on attempt $i"
+              break
+            fi
+            if [ "$i" -eq 18 ]; then
+              echo "::error::Backend health check failed after 18 attempts ($API_HEALTH_URL)"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          curl --fail --show-error --silent -o /dev/null "$WEB_URL"
+          echo "Frontend health check passed ($WEB_URL)"

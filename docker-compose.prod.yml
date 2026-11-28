@@ -59,7 +59,7 @@ services:
   # 3. Node.js Backend API Service
   # ============================================================================
   backend:
-    image: hrms-production-backend:latest
+    image: ghcr.io/pranshavsingh/hrms-backend:${HRMS_IMAGE_TAG:-latest}
     build:
       context: ./node_backend
       dockerfile: Dockerfile
@@ -129,7 +129,7 @@ services:
   # 4. Background BullMQ Queue & Cron Worker
   # ============================================================================
   worker:
-    image: hrms-production-worker:latest
+    image: ghcr.io/pranshavsingh/hrms-worker:${HRMS_IMAGE_TAG:-latest}
     build:
       context: ./node_backend
       dockerfile: Dockerfile
@@ -182,7 +182,7 @@ services:
   # 5. React Web Frontend (Nginx Alpine)
   # ============================================================================
   frontend:
-    image: hrms-production-frontend:latest
+    image: ghcr.io/pranshavsingh/hrms-frontend:${HRMS_IMAGE_TAG:-latest}
     build:
       context: ./hrms_saas
       dockerfile: Dockerfile
