@@ -4,7 +4,13 @@ import { realtimeManager } from "../utils/realtime.js";
 import auditService from "./audit.service.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { db } from "../db/index.js";
-import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
+import {
+  parsePagination,
+  formatPaginationResponse,
+  parseCursorPagination,
+  buildKeysetClause,
+  formatCursorResponse,
+} from "../utils/pagination/index.js";
 import { siteService } from "./site.service.js";
 import { financialLeaveService } from "./financial-leave.service.js";
 import notificationService from "./notification.service.js";
@@ -188,7 +194,7 @@ export const leaveService = {
     realtimeManager.broadcast(
       "leave_update",
       { actorId: userId, userId: Number(userId), action: "applied" },
-      { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
+      { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
     );
     void notificationService.safeNotify(async () => {
       const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, userId);
@@ -218,6 +224,79 @@ export const leaveService = {
   },
 
   async myLeaves(userId, query = {}, tenantId = 1) {
+    const cursorPag = parseCursorPagination(query, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `leave_my:${userId}`,
+    });
+
+    if (cursorPag.useCursor) {
+      const keyset = buildKeysetClause({
+        primaryCol: "l.created_at",
+        idCol: "l.id",
+        cursorValues: cursorPag.cursorValues,
+        direction: "DESC",
+      });
+      const whereParts = ["l.user_id = ?", "l.tenant_id = ?"];
+      const sqlParams = [userId, tenantId];
+      if (keyset.sql) {
+        whereParts.push(keyset.sql);
+        sqlParams.push(...keyset.params);
+      }
+      const rows = await db.all(
+        `SELECT l.id, l.user_id, l.leave_type, l.from_date, l.to_date, l.reason, l.status,
+                l.created_at, l.action_at, l.action_by_id,
+                ab.username AS action_by_username, ab.first_name AS action_by_first_name,
+                ab.last_name AS action_by_last_name, ab.role AS action_by_role
+         FROM leave_leave l
+         LEFT JOIN accounts_user ab ON ab.id = l.action_by_id
+         WHERE ${whereParts.join(" AND ")}
+         ORDER BY l.created_at DESC, l.id DESC
+         LIMIT ?`,
+        [...sqlParams, cursorPag.fetchLimit]
+      );
+      const roleLabels = { manager: "Manager", hr: "HR", admin: "Admin", superadmin: "Superadmin", employee: "Employee" };
+      const mapRow = (l) => {
+        let actionByName = null;
+        if (l.action_by_username) {
+          const name = `${l.action_by_first_name || ""} ${l.action_by_last_name || ""}`.trim() || l.action_by_username;
+          actionByName = `${name} (${roleLabels[l.action_by_role] || l.action_by_role})`;
+        }
+        return {
+          id: l.id, user_id: l.user_id, leave_type: l.leave_type, from_date: l.from_date, to_date: l.to_date,
+          reason: l.reason, status: l.status, created_at: l.created_at, action_at: l.action_at, action_by_id: l.action_by_id,
+          type: l.leave_type, from: l.from_date, to: l.to_date, days: leaveDays(l.from_date, l.to_date), action_by_name: actionByName,
+        };
+      };
+
+      const extra = {};
+      if (!query.cursor) {
+        const [balance, allLeaves] = await Promise.all([
+          balanceFor(userId, tenantId),
+          leaveRepository.findLeavesByUserId(userId, tenantId),
+        ]);
+        extra.summary = {
+          leave_allotted: balance.base_entitlement,
+          leaves_taken: balance.leaves_used,
+          leave_balance: balance.available_balance,
+          management_concession: balance.management_concession,
+          pending_leave_days: balance.pending_days,
+          total_requests: allLeaves.length,
+          approved_requests: allLeaves.filter((l) => l.status === "approved").length,
+          pending_requests: allLeaves.filter((l) => l.status === "pending").length,
+          rejected_requests: allLeaves.filter((l) => l.status === "rejected").length,
+        };
+      }
+      const resp = formatCursorResponse(rows, {
+        limit: cursorPag.limit,
+        scope: `leave_my:${userId}`,
+        extractCursorValues: (l) => [l.created_at instanceof Date ? l.created_at.toISOString().slice(0, 19).replace("T", " ") : String(l.created_at), Number(l.id)],
+        mapItem: mapRow,
+        extra,
+      });
+      return { ...resp, records: resp.data };
+    }
+
     const { page, limit, offset } = parsePagination(query, 50, 100);
     const [total, leaves, allLeaves] = await Promise.all([
       leaveRepository.countLeavesByUserId(userId, tenantId),
@@ -330,6 +409,57 @@ export const leaveService = {
           .filter(Boolean)
           .some((val) => String(val).toLowerCase().includes(q));
       });
+    }
+
+    const cursorPag = parseCursorPagination(query, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: "leave_approvals",
+    });
+
+    if (cursorPag.useCursor) {
+      const sorted = [...filteredApprovals].sort((a, b) => {
+        const ta = new Date(a.created_at || 0).getTime();
+        const tb = new Date(b.created_at || 0).getTime();
+        if (tb !== ta) return tb - ta;
+        return Number(b.id) - Number(a.id);
+      });
+      let slicedSource = sorted;
+      if (cursorPag.cursorValues) {
+        const [cTs, cId] = cursorPag.cursorValues;
+        slicedSource = sorted.filter((l) => {
+          const ts = new Date(l.created_at || 0).getTime();
+          return ts < cTs || (ts === cTs && Number(l.id) < Number(cId));
+        });
+      }
+      const overfetched = slicedSource.slice(0, cursorPag.fetchLimit);
+      const pageItems = overfetched.slice(0, cursorPag.limit);
+      const roleLabels = { manager: "Manager", hr: "HR", admin: "Admin", superadmin: "Superadmin", employee: "Employee" };
+      const mapped = await Promise.all(pageItems.map(async (l) => {
+        const requestor = { id: l.user_id_ref, username: l.username, first_name: l.first_name, last_name: l.last_name, email: l.email, role: l.role };
+        const profile = { team_name: l.team_name, manager_id: l.manager_id };
+        const manager = l.manager_username ? { username: l.manager_username, first_name: l.manager_first_name, last_name: l.manager_last_name } : null;
+        let actionByName = null;
+        if (l.action_by_username) {
+          const name = `${l.action_by_first_name || ""} ${l.action_by_last_name || ""}`.trim() || l.action_by_username;
+          actionByName = `${name} (${roleLabels[l.action_by_role] || l.action_by_role})`;
+        }
+        const serialized = serializeLeave({ ...l, action_by_name: actionByName }, requestor, profile, manager, { id: viewerUserId, role });
+        const balance = await balanceFor(l.user_id_ref, tenantId, l.leave_type, dateOnly(l.from_date));
+        return {
+          ...serialized,
+          employee_id: Number(l.user_id_ref),
+          designation: l.designation || null,
+          application_date: l.created_at,
+          balance: { ...balance, requested_days: serialized.days, projected_balance: balance.available_balance - serialized.days },
+        };
+      }));
+      const resp = formatCursorResponse(overfetched, {
+        limit: cursorPag.limit,
+        scope: "leave_approvals",
+        extractCursorValues: (l) => [new Date(l.created_at || 0).getTime(), Number(l.id)],
+      });
+      return { ...resp, data: mapped, records: mapped };
     }
 
     const defaultLimit = Number(query.limit) > 0 ? Number(query.limit) : 15;
@@ -468,27 +598,16 @@ export const leaveService = {
       }
 
       if (status === "approved") {
-        const parseDate = (val) => {
-          if (!val) return new Date();
-          if (val instanceof Date) return val;
-          if (typeof val === "string") {
-            if (val.includes("T")) return new Date(val);
-            return new Date(val + "T00:00:00");
-          }
-          return new Date(val);
-        };
-        const start = parseDate(leave.from_date);
-        const end = parseDate(leave.to_date);
-        const current = new Date(start);
+        const startStr = dateOnly(leave.from_date);
+        const endStr = dateOnly(leave.to_date);
+        const current = new Date(`${startStr}T00:00:00Z`);
+        const end = new Date(`${endStr}T00:00:00Z`);
         while (current <= end) {
-          const yyyy = current.getFullYear();
-          const mm = String(current.getMonth() + 1).padStart(2, "0");
-          const dd = String(current.getDate()).padStart(2, "0");
-          const dateStr = `${yyyy}-${mm}-${dd}`;
+          const dateStr = current.toISOString().slice(0, 10);
 
           const attendanceSiteId = await siteService.getEmployeeSiteId(tenantId, leave.user_id, dateStr, tx);
           await attendanceRepository.insertOrUpdateLeaveAttendance(leave.user_id, dateStr, tx, attendanceSiteId, tenantId);
-          current.setDate(current.getDate() + 1);
+          current.setUTCDate(current.getUTCDate() + 1);
         }
       }
 
@@ -531,7 +650,7 @@ export const leaveService = {
     realtimeManager.broadcast(
       "leave_update",
       { actorId: actor.id, userId: actionResult.employeeId, action: status },
-      { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [actionResult.employeeId] }
+      { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [actionResult.employeeId] }
     );
     realtimeManager.broadcast("leave_notice", {
       status,
@@ -539,7 +658,7 @@ export const leaveService = {
       leave_type: actionResult.leaveType,
       days: actionResult.days,
       updated_balance: actionResult.balance,
-    }, { targetUserIds: [actionResult.employeeId] });
+    }, { tenantId, targetUserIds: [actionResult.employeeId] });
     void notificationService.safeNotify(async () => {
       const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, actionResult.employeeId);
       realtimeService.emitApprovalCountUpdated("leave", {

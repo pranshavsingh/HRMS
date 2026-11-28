@@ -406,6 +406,7 @@ export const accountsRepository = {
     tenantId = 1,
     limit = 50,
     offset = 0,
+    cursorId = null,
     role = null,
     team = null,
     search = "",
@@ -426,7 +427,10 @@ export const accountsRepository = {
       workDate
     });
 
-    const selectParams = [tenantId, workDate, workDate, ...params, limit, offset];
+    const cursorCondition = cursorId != null ? " AND u.id < ?" : "";
+    const selectParams = cursorId != null
+      ? [tenantId, workDate, workDate, ...params, Number(cursorId), limit]
+      : [tenantId, workDate, workDate, ...params, limit, offset];
 
     const sql = `
       SELECT 
@@ -453,9 +457,9 @@ export const accountsRepository = {
         GROUP BY user_id
       ) d ON d.user_id = u.id
       LEFT JOIN accounts_user m ON m.id = ep.manager_id
-      WHERE ${whereClause}
+      WHERE ${whereClause}${cursorCondition}
       ORDER BY u.id DESC
-      LIMIT ? OFFSET ?
+      ${cursorId != null ? "LIMIT ?" : "LIMIT ? OFFSET ?"}
     `;
 
     return db.all(sql, selectParams, tx);

@@ -158,8 +158,10 @@ export default function HistoryScreen() {
     return {};
   };
 
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+
   const fetchHistory = useCallback(
-    async (pageToFetch = 1, showLoader = true, range = filterRange) => {
+    async (pageToFetch = 1, showLoader = true, range = filterRange, cursorToken: string | null = null) => {
       if (showLoader) {
         if (pageToFetch === 1) setLogsLoading(true);
         else setLoadingMore(true);
@@ -167,7 +169,12 @@ export default function HistoryScreen() {
       try {
         const dateParams = getDateParams(range);
         const res = await api.get("/attendance/history/", {
-          params: { page: pageToFetch, limit: 25, ...dateParams },
+          params: {
+            cursor_mode: "true",
+            limit: 20,
+            ...(pageToFetch > 1 && cursorToken ? { cursor: cursorToken } : {}),
+            ...dateParams,
+          },
         });
         const responseData = res.data;
         const rawRecords = Array.isArray(responseData)
@@ -180,10 +187,17 @@ export default function HistoryScreen() {
         const attendanceOnly: HistoryRecord[] = rawRecords.filter(
           (r: any) => r.status !== "leave" && r.punch_in_status !== "leave" && r.punch_out_status !== "leave"
         );
-        if (pageToFetch === 1) setHistory(attendanceOnly);
-        else setHistory((prev) => [...prev, ...attendanceOnly]);
+        if (pageToFetch === 1) {
+          setHistory(attendanceOnly);
+        } else {
+          setHistory((prev) => {
+            const seen = new Set(prev.map((x) => x.id));
+            return [...prev, ...attendanceOnly.filter((x) => !seen.has(x.id))];
+          });
+        }
         const pagination = responseData?.pagination;
-        setHasMore(pagination ? pageToFetch < (pagination.totalPages || 1) : rawRecords.length >= 25);
+        setHistoryCursor(pagination?.nextCursor || null);
+        setHasMore(Boolean(pagination?.hasMore ?? pagination?.hasNextPage));
         setPage(pageToFetch);
       } catch (err: any) {
         console.error("History fetch error:", err);
@@ -532,7 +546,9 @@ export default function HistoryScreen() {
               contentContainerStyle={styles.listContent}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />}
               onEndReached={() => {
-                if (!logsLoading && !loadingMore && hasMore) fetchHistory(page + 1, true, filterRange);
+                if (!logsLoading && !loadingMore && hasMore && historyCursor) {
+                  void fetchHistory(page + 1, true, filterRange, historyCursor);
+                }
               }}
               onEndReachedThreshold={0.3}
               renderItem={({ item }) => (

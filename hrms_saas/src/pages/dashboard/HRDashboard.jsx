@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import Layout from "../../components/layout/Layout";
 import Loader from "../../components/common/Loader";
+import Pagination from "../../components/common/Pagination";
 import API from "../../api/axios";
 import { useRealtime } from "../../context/RealtimeContext";
 
@@ -25,11 +26,15 @@ export default function HRDashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [warning, setWarning] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
 
-  const loadDashboard = async (showLoader = false) => {
+  const loadDashboard = async (showLoader = false, targetPage = page, targetLimit = pageSize) => {
     if (showLoader) setLoading(true);
     try {
-      const res = await API.get("/attendance/hr-dashboard/");
+      const res = await API.get("/attendance/hr-dashboard/", {
+        params: { page: targetPage, limit: targetLimit },
+      });
       setData(mergeDashboard(res.data));
       setWarning("");
     } catch (hrErr) {
@@ -44,8 +49,9 @@ export default function HRDashboard() {
   };
 
   useEffect(() => {
-    loadDashboard(true);
-  }, []);
+    loadDashboard(true, page, pageSize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize]);
 
   useRealtime("attendance_update", () => loadDashboard(false));
   useRealtime("leave_update", () => loadDashboard(false));
@@ -155,6 +161,18 @@ export default function HRDashboard() {
               </tbody>
             </table>
           </div>
+          <Pagination
+            page={page}
+            setPage={setPage}
+            pageSize={pageSize}
+            changePageSize={(val) => {
+              setPageSize(Number(val));
+              setPage(1);
+            }}
+            total={Number(people.recent_people_pagination?.total ?? people.recent_people_attendance.length)}
+            pageCount={Number(people.recent_people_pagination?.totalPages ?? 1)}
+            itemLabel="records"
+          />
         </section>
       </div>
     </Layout>

@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState, ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { AppState, AppStateStatus, Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
@@ -25,6 +25,7 @@ interface AuthContextType {
   isLoading: boolean;
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
+  registerPreLogoutHook: (fn: () => Promise<void>) => () => void;
   updateUserProfile: (updatedData: Partial<User>) => Promise<void>;
   activeTab: string;
   setActiveTab: (tab: string) => void;
@@ -39,6 +40,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<string>("system");
+  const preLogoutHooksRef = useRef<Set<() => Promise<void>>>(new Set());
+
+  const registerPreLogoutHook = useCallback((fn: () => Promise<void>) => {
+    preLogoutHooksRef.current.add(fn);
+    return () => {
+      preLogoutHooksRef.current.delete(fn);
+    };
+  }, []);
 
   const syncDefaultTabForUser = useCallback((u: User | null) => {
     if (u && u.role && ["admin", "superadmin", "hr", "manager"].includes(u.role.toLowerCase())) {
@@ -50,6 +59,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const logout = useCallback(async () => {
     try {
+      await Promise.allSettled(Array.from(preLogoutHooksRef.current).map((fn) => fn()));
       const storedRefreshToken = await SecureStore.getItemAsync("refresh_token");
       if (storedRefreshToken) {
         try {
@@ -260,6 +270,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         isLoading,
         login,
         logout,
+        registerPreLogoutHook,
         updateUserProfile,
         activeTab,
         setActiveTab,

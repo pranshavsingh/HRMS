@@ -56,17 +56,19 @@ export default function EmployeeRegisterModal({ employee, onClose }: EmployeeReg
   const now = new Date();
   const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
-  const [selectedMonth, setSelectedMonth] = useState(currentMonthStr);
+  const [monthState, setMonthState] = useState<{ empId: number | null; month: string }>({
+    empId: employee?.id ?? null,
+    month: currentMonthStr,
+  });
+  const selectedMonth = monthState.empId === (employee?.id ?? null) ? monthState.month : currentMonthStr;
+  const setSelectedMonth = (nextMonth: string) => {
+    setMonthState({ empId: employee?.id ?? null, month: nextMonth });
+  };
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [registerDates, setRegisterDates] = useState<RegisterDate[]>([]);
   const [empRow, setEmpRow] = useState<any>(null);
-
-  useEffect(() => {
-    if (employee) {
-      setSelectedMonth(currentMonthStr);
-    }
-  }, [employee, currentMonthStr]);
 
   const fetchRegister = useCallback(async () => {
     if (!employee) return;
@@ -94,9 +96,14 @@ export default function EmployeeRegisterModal({ employee, onClose }: EmployeeReg
   }, [employee, selectedMonth]);
 
   useEffect(() => {
-    if (employee) {
-      void fetchRegister();
-    }
+    if (!employee) return;
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) void fetchRegister();
+    });
+    return () => {
+      active = false;
+    };
   }, [employee, fetchRegister]);
 
   const changeMonth = (delta: number) => {

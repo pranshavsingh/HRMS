@@ -1,6 +1,12 @@
 import { db } from "../db/index.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
+import {
+  parsePagination,
+  formatPaginationResponse,
+  parseCursorPagination,
+  buildKeysetClause,
+  formatCursorResponse,
+} from "../utils/pagination/index.js";
 import notificationRepository from "../repositories/notification.repository.js";
 import realtimeService from "./realtime.service.js";
 import pushService from "./push.service.js";
@@ -120,9 +126,92 @@ export const notificationService = {
   },
 
   async getNotifications({ tenantId = 1, recipientId, query = {} }) {
-    const { page, limit, offset } = parsePagination(query, 20, 100);
+    const cursorPag = parseCursorPagination(query, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `notif:${recipientId}`,
+    });
     const category = query.category ? String(query.category).trim().toUpperCase() : null;
     const unreadOnly = query.unreadOnly === true || query.unreadOnly === "true" || query.unreadOnly === "1";
+
+    if (cursorPag.useCursor) {
+      const whereParts = ["tenant_id = ?", "recipient_id = ?"];
+      const sqlParams = [tenantId, recipientId];
+      if (category) {
+        whereParts.push("category = ?");
+        sqlParams.push(category);
+      }
+      if (unreadOnly) {
+        whereParts.push("read_at IS NULL");
+      }
+      const keyset = buildKeysetClause({
+        primaryCol: "created_at",
+        idCol: "id",
+        cursorValues: cursorPag.cursorValues,
+        direction: "DESC",
+      });
+      if (keyset.sql) {
+        whereParts.push(keyset.sql);
+        sqlParams.push(...keyset.params);
+      }
+
+      const [rows, unreadCount] = await Promise.all([
+        db.all(
+          `SELECT id, tenant_id, recipient_id, actor_id, type, category, title, message,
+                  data, action_url, priority, dedupe_key, read_at, expires_at, created_at, updated_at
+           FROM notifications
+           WHERE ${whereParts.join(" AND ")}
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`,
+          [...sqlParams, cursorPag.fetchLimit]
+        ),
+        query.cursor ? Promise.resolve(undefined) : notificationRepository.countUnread(tenantId, recipientId),
+      ]);
+
+      const mapNotif = (r) => {
+        let parsedData = null;
+        if (r.data != null) {
+          if (typeof r.data === "object") parsedData = r.data;
+          else {
+            try {
+              parsedData = JSON.parse(r.data);
+            } catch {
+              parsedData = null;
+            }
+          }
+        }
+        return {
+          id: Number(r.id),
+          tenantId: Number(r.tenant_id),
+          recipientId: Number(r.recipient_id),
+          actorId: r.actor_id != null ? Number(r.actor_id) : null,
+          type: r.type,
+          category: r.category,
+          title: r.title,
+          message: r.message,
+          data: parsedData,
+          actionUrl: r.action_url || null,
+          priority: r.priority,
+          dedupeKey: r.dedupe_key || null,
+          readAt: r.read_at || null,
+          expiresAt: r.expires_at || null,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+          is_read: Boolean(r.read_at),
+        };
+      };
+
+      const resp = formatCursorResponse(rows, {
+        limit: cursorPag.limit,
+        scope: `notif:${recipientId}`,
+        extractCursorValues: (r) => [r.created_at instanceof Date ? r.created_at.toISOString().slice(0, 19).replace("T", " ") : String(r.created_at), Number(r.id)],
+        mapItem: mapNotif,
+        extra: unreadCount !== undefined ? { unreadCount } : {},
+      });
+      return { ...resp, records: resp.data };
+    }
+
+    const { page, limit, offset } = parsePagination(query, 20, 100);
 
     const [{ records, total }, unreadCount] = await Promise.all([
       notificationRepository.findPaged({
@@ -256,17 +345,30 @@ export const notificationService = {
     return { deletedCount, unreadCount };
   },
 
-  async registerPushToken({ tenantId = 1, userId, token, platform = "android", provider = "expo", deviceId = null }) {
-    const cleanToken = String(token || "").trim();
-    if (!cleanToken || cleanToken.length > 500) {
+  async registerPushToken({ tenantId = 1, userId, token, platform = "android", provider = "expo", deviceId = null, subscription = null, deviceName = null }) {
+    let cleanToken = String(token || "").trim();
+    let subscriptionJson = null;
+    const cleanProvider = ["expo", "fcm", "webpush"].includes(String(provider).toLowerCase())
+      ? String(provider).toLowerCase()
+      : "expo";
+
+    if (cleanProvider === "webpush" || (subscription && typeof subscription === "object")) {
+      const endpoint = String(subscription?.endpoint || cleanToken || "").trim();
+      const p256dh = String(subscription?.keys?.p256dh || "").trim();
+      const auth = String(subscription?.keys?.auth || "").trim();
+      if (!endpoint || !p256dh || !auth) {
+        throw new AppError("Valid Web Push subscription (endpoint, keys.p256dh, keys.auth) is required", 400);
+      }
+      cleanToken = endpoint;
+      subscriptionJson = JSON.stringify({ endpoint, keys: { p256dh, auth } });
+    }
+
+    if (!cleanToken || cleanToken.length > 4096) {
       throw new AppError("Valid push token is required", 400);
     }
     const cleanPlatform = ["android", "ios", "web"].includes(String(platform).toLowerCase())
       ? String(platform).toLowerCase()
-      : "android";
-    const cleanProvider = ["expo", "fcm"].includes(String(provider).toLowerCase())
-      ? String(provider).toLowerCase()
-      : "expo";
+      : cleanProvider === "webpush" ? "web" : "android";
 
     await notificationRepository.upsertPushToken({
       tenantId,
@@ -275,15 +377,84 @@ export const notificationService = {
       platform: cleanPlatform,
       provider: cleanProvider,
       deviceId: deviceId ? String(deviceId).slice(0, 128) : null,
+      subscriptionJson,
+      deviceName: deviceName ? String(deviceName).slice(0, 120) : null,
     });
     return { registered: true };
   },
 
-  async unregisterPushToken({ userId, token }) {
+  async unregisterPushToken({ tenantId = null, userId, token }) {
     const cleanToken = String(token || "").trim();
     if (!cleanToken) return { unregistered: true };
-    await notificationRepository.deactivatePushToken(userId, cleanToken);
+    await notificationRepository.deactivatePushToken(userId, cleanToken, tenantId);
     return { unregistered: true };
+  },
+
+  async getPreferences(tenantId, userId) {
+    return notificationRepository.getPreferences(tenantId, userId);
+  },
+
+  async updatePreferences(tenantId, userId, input = {}) {
+    const existing = await notificationRepository.getPreferences(tenantId, userId);
+
+    const hasWeb = input.web_push_enabled !== undefined || input.webPushEnabled !== undefined;
+    const rawWeb = input.web_push_enabled !== undefined ? input.web_push_enabled : input.webPushEnabled;
+    if (hasWeb && typeof rawWeb !== "boolean") {
+      throw new AppError("web_push_enabled must be a boolean", 400);
+    }
+
+    const hasMobile = input.mobile_push_enabled !== undefined || input.mobilePushEnabled !== undefined;
+    const rawMobile = input.mobile_push_enabled !== undefined ? input.mobile_push_enabled : input.mobilePushEnabled;
+    if (hasMobile && typeof rawMobile !== "boolean") {
+      throw new AppError("mobile_push_enabled must be a boolean", 400);
+    }
+
+    const hasCats = input.disabled_categories !== undefined || input.disabledCategories !== undefined;
+    const rawCats = input.disabled_categories !== undefined ? input.disabled_categories : input.disabledCategories;
+    if (hasCats && (!Array.isArray(rawCats) || rawCats.some((c) => typeof c !== "string"))) {
+      throw new AppError("disabled_categories must be an array of category strings", 400);
+    }
+
+    return notificationRepository.upsertPreferences(tenantId, userId, {
+      webPushEnabled: hasWeb ? rawWeb : existing.web_push_enabled,
+      mobilePushEnabled: hasMobile ? rawMobile : existing.mobile_push_enabled,
+      disabledCategories: hasCats ? rawCats : existing.disabled_categories,
+    });
+  },
+
+  async listDevices(tenantId, userId) {
+    return notificationRepository.listUserDevices(tenantId, userId);
+  },
+
+  async removeDevice(tenantId, userId, deviceRowId) {
+    const id = Number(deviceRowId);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new AppError("Invalid device ID", 400);
+    }
+    const removed = await notificationRepository.deactivateUserDeviceById(tenantId, userId, id);
+    if (!removed) {
+      throw new AppError("Registered device not found", 404);
+    }
+    return { removed: true };
+  },
+
+  async trackClick(notificationId, userId, tenantId, { channel = null, deviceTokenId = null } = {}) {
+    const id = Number(notificationId);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new AppError("Invalid notification ID", 400);
+    }
+    const cleanChannel = channel && ["web_push", "mobile_push", "in_app"].includes(String(channel))
+      ? String(channel)
+      : null;
+    const ok = await notificationRepository.markDeliveryClicked(id, tenantId, userId, {
+      channel: cleanChannel,
+      deviceTokenId,
+    });
+    if (!ok) {
+      throw new AppError("Notification not found", 404);
+    }
+    await this.markAsRead(id, userId, tenantId).catch(() => {});
+    return { clicked: true };
   },
 
   /**

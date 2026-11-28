@@ -15,6 +15,8 @@ import { useRealtime } from "../context/RealtimeContext";
 import { FileText, ExternalLink, Calendar, ShieldCheck } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCompanyDate } from "../utils/date";
+import PaginatedFlatList from "../components/pagination/PaginatedFlatList";
+import { useCursorPagination } from "../hooks/useCursorPagination";
 
 interface Document {
   id: number;
@@ -24,36 +26,24 @@ interface Document {
 }
 
 export default function MyDocumentsScreen() {
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const {
+    items: documents,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    hasMore,
+    refresh,
+    loadMore,
+    retry,
+  } = useCursorPagination<Document>({
+    endpoint: "/auth/documents/my/",
+    limit: 20,
+    getItemKey: (d) => d.id,
+  });
 
-  const fetchMyDocuments = async (showLoader = true) => {
-    if (showLoader) setLoading(true);
-    try {
-      const res = await api.get("/auth/documents/my/");
-      setDocuments(Array.isArray(res.data) ? res.data : (res.data?.data || []));
-    } catch (err) {
-      console.error("Failed to load documents:", err);
-      Alert.alert("Error", "Unable to load documents list");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
-
-  useEffect(() => {
-    const t = setTimeout(() => { void fetchMyDocuments(); }, 0);
-    return () => clearTimeout(t);
-  }, []);
-
-  useRealtime("document_update", () => fetchMyDocuments(false));
-  useRealtime("realtime:connected", () => fetchMyDocuments(false));
-
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchMyDocuments(false);
-  };
+  useRealtime("document_update", () => void refresh());
+  useRealtime("realtime:connected", () => void refresh());
 
   const handleViewDocument = async (url: string) => {
     if (!url) {
@@ -80,62 +70,54 @@ export default function MyDocumentsScreen() {
     }
   };
 
-  if (loading) {
-    return (
-      <View style={styles.centerContainer}>
-        <ActivityIndicator size="large" color="#2457D6" />
-      </View>
-    );
-  }
-
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
-      <ScrollView
-        style={styles.container}
+      <PaginatedFlatList
+        items={documents}
+        loading={loading}
+        refreshing={refreshing}
+        loadingMore={loadingMore}
+        hasMore={hasMore}
+        error={error}
+        onRefresh={refresh}
+        onLoadMore={loadMore}
+        onRetry={retry}
+        keyExtractor={(doc: Document) => String(doc.id)}
         contentContainerStyle={styles.scrollContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
-        }
-      >
-        <View style={styles.infoBanner}>
-          <ShieldCheck size={18} color="#2457D6" style={{ marginRight: 10 }} />
-          <Text style={styles.infoBannerText}>
-            View your uploaded compliance documents below. Document uploads are managed via the HRMS Web Console.
-          </Text>
-        </View>
-
-        <View style={styles.listContainer}>
-          <Text style={styles.listTitle}>My Documents</Text>
-
-          {documents.length === 0 ? (
-            <View style={styles.emptyContainer}>
-              <FileText size={36} color="#8995A7" style={{ marginBottom: 8 }} />
-              <Text style={styles.emptyText}>No documents uploaded yet.</Text>
+        ListHeaderComponent={
+          <View>
+            <View style={styles.infoBanner}>
+              <ShieldCheck size={18} color="#2457D6" style={{ marginRight: 10 }} />
+              <Text style={styles.infoBannerText}>
+                View your uploaded compliance documents below. Document uploads are managed via the HRMS Web Console.
+              </Text>
             </View>
-          ) : (
-            documents.map((doc) => (
-              <View key={doc.id} style={styles.documentRow}>
-                <View style={styles.docInfo}>
-                  <Text style={styles.docTitle}>{doc.title}</Text>
-                  <View style={styles.docMetaRow}>
-                    <Calendar size={12} color="#68758A" style={{ marginRight: 4 }} />
-                    <Text style={styles.docMetaText}>
-                      Uploaded: {formatCompanyDate(doc.uploaded_at)}
-                    </Text>
-                  </View>
-                </View>
-                <TouchableOpacity
-                  style={styles.viewBtn}
-                  onPress={() => handleViewDocument(doc.file)}
-                >
-                  <ExternalLink size={14} color="#2457D6" style={{ marginRight: 4 }} />
-                  <Text style={styles.viewBtnText}>View</Text>
-                </TouchableOpacity>
+            <Text style={[styles.listTitle, { marginBottom: 10 }]}>My Documents</Text>
+          </View>
+        }
+        renderItem={({ item: doc }: { item: Document }) => (
+          <View style={[styles.documentRow, { backgroundColor: "#FFFFFF", paddingHorizontal: 14, borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: "#E5EAF2" }]}>
+            <View style={styles.docInfo}>
+              <Text style={styles.docTitle}>{doc.title}</Text>
+              <View style={styles.docMetaRow}>
+                <Calendar size={12} color="#68758A" style={{ marginRight: 4 }} />
+                <Text style={styles.docMetaText}>
+                  Uploaded: {formatCompanyDate(doc.uploaded_at)}
+                </Text>
               </View>
-            ))
-          )}
-        </View>
-      </ScrollView>
+            </View>
+            <TouchableOpacity
+              style={styles.viewBtn}
+              onPress={() => handleViewDocument(doc.file)}
+            >
+              <ExternalLink size={14} color="#2457D6" style={{ marginRight: 4 }} />
+              <Text style={styles.viewBtnText}>View</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        emptyTitle="No documents uploaded yet"
+        emptySubtitle="Your compliance documents will appear here once uploaded."
+      />
     </SafeAreaView>
   );
 }

@@ -205,8 +205,8 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="team-attendance"
         options={{
-          title: "Roster Attendance",
-          tabBarLabel: "Roster",
+          title: "My Team Attendance",
+          tabBarLabel: "Team",
           tabBarIcon: ({ color, size }) => <Users color={color} size={size} />,
           href: (isSystem && showWorkspace) ? "/(tabs)/team-attendance" : null,
         }}

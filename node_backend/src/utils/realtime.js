@@ -69,7 +69,10 @@ function dispatchLocal(eventName, data, filter = {}) {
 
   clients.forEach((client) => {
     try {
-      // 0. Tenant isolation
+      // 0. Tenant isolation: enforce tenantId on role-based broadcasts and whenever both are present
+      if (filter.tenantId == null && filter.targetRoles && filter.targetRoles.length > 0) {
+        return;
+      }
       if (filter.tenantId != null && client.tenantId != null && Number(client.tenantId) !== Number(filter.tenantId)) {
         return;
       }

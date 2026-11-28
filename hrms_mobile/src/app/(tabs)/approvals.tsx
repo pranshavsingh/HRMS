@@ -16,6 +16,9 @@ import { useRealtime } from "../../context/RealtimeContext";
 import { useAuth } from "../../context/AuthContext";
 import { useApprovalCounts } from "../../context/ApprovalCountsContext";
 import PendingCountBadge from "../../components/PendingCountBadge";
+import LocationDisplay from "../../components/LocationDisplay";
+import PaginatedFlatList from "../../components/pagination/PaginatedFlatList";
+import { useCursorPagination } from "../../hooks/useCursorPagination";
 import { formatCompanyDate, formatCompanyDateRange } from "../../utils/date";
 import { Image } from "expo-image";
 import { 
@@ -70,102 +73,86 @@ export default function ApprovalsScreen() {
   const { user, isAuthenticated } = useAuth();
   const { attendancePendingCount, leavePendingCount, loading: countsLoading, error: countsError } = useApprovalCounts();
   const [activeQueue, setActiveQueue] = useState<"punches" | "leaves">("punches");
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const [punchQueue, setPunchQueue] = useState<PunchException[]>([]);
-  const [leaveQueue, setLeaveQueue] = useState<LeaveApproval[]>([]);
-
   // Selected punch modal display
   const [selectedPunch, setSelectedPunch] = useState<PunchException | null>(null);
   const [actioningId, setActioningId] = useState<number | null>(null);
 
-  const fetchQueues = useCallback(async (showLoader = true) => {
-    if (!user || !isAuthenticated) return;
-    if (showLoader) setLoading(true);
-    try {
-      // 1. Fetch Punch Approvals
-      const punchRes = await api.get("/attendance/approvals/");
-      const punchData = Array.isArray(punchRes.data)
-        ? punchRes.data
-        : Array.isArray(punchRes.data?.records)
-        ? punchRes.data.records
-        : [];
-      
-      const mappedPunches: PunchException[] = punchData.map((r: any) => {
-        const timeVal = r.review_type === "in" ? r.punch_in_time : r.punch_out_time;
-        let formattedTime = "--";
-        if (timeVal) {
-          try {
-            const dateObj = new Date(timeVal);
-            formattedTime = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          } catch (e) {
-            formattedTime = timeVal;
-          }
+  const enabledAuth = Boolean(user && isAuthenticated);
+
+  const punchPag = useCursorPagination<any>({
+    endpoint: "/attendance/approvals/",
+    limit: 20,
+    params: { status: "pending" },
+    itemsKey: "records",
+    enabled: enabledAuth,
+    getItemKey: (r) => r.approval_id || r.id,
+  });
+
+  const leavePag = useCursorPagination<any>({
+    endpoint: "/leave/approvals/",
+    limit: 20,
+    params: { status: "pending" },
+    itemsKey: "records",
+    enabled: enabledAuth,
+    getItemKey: (l) => l.id,
+  });
+
+  const punchQueue: PunchException[] = punchPag.items
+    .map((r: any) => {
+      const timeVal = r.review_type === "in" ? r.punch_in_time : r.punch_out_time;
+      let formattedTime = "--";
+      if (timeVal) {
+        try {
+          formattedTime = new Date(timeVal).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        } catch {
+          formattedTime = timeVal;
         }
-        return {
-          id: r.approval_id,
-          employee_name: r.employee_name || r.employee,
-          date: r.date,
-          punch_time: formattedTime,
-          type: r.review_type,
-          latitude: r.latitude || 0,
-          longitude: r.longitude || 0,
-          photo_url: r.review_type === "in" ? r.punch_in_photo : r.punch_out_photo,
-          status: r.approval_status,
-        };
-      });
-      setPunchQueue(mappedPunches.filter((p) => p.status === "pending"));
+      }
+      return {
+        id: r.approval_id,
+        employee_name: r.employee_name || r.employee,
+        date: r.date,
+        punch_time: formattedTime,
+        type: r.review_type,
+        latitude: r.latitude || 0,
+        longitude: r.longitude || 0,
+        photo_url: r.review_type === "in" ? r.punch_in_photo : r.punch_out_photo,
+        status: r.approval_status,
+      };
+    })
+    .filter((p) => p.status === "pending");
 
-      // 2. Fetch Leave Approvals
-      const leaveRes = await api.get("/leave/approvals/");
-      const leaveData = Array.isArray(leaveRes.data)
-        ? leaveRes.data
-        : Array.isArray(leaveRes.data?.records)
-        ? leaveRes.data.records
-        : [];
-      
-      const mappedLeaves: LeaveApproval[] = leaveData.map((l: any) => {
-        return {
-          id: l.id,
-          employee_name: l.employee_name || l.employee,
-          employee_id: l.employee_id,
-          employee_role: l.employee_role,
-          team_name: l.team_name,
-          designation: l.designation,
-          leave_type: l.type,
-          from: l.from,
-          to: l.to,
-          reason: l.reason,
-          status: l.status,
-          applied_at: l.created_at,
-          balance: l.balance,
-        };
-      });
-      setLeaveQueue(mappedLeaves.filter((l) => l.status === "pending"));
+  const leaveQueue: LeaveApproval[] = leavePag.items
+    .map((l: any) => ({
+      id: l.id,
+      employee_name: l.employee_name || l.employee,
+      employee_id: l.employee_id,
+      employee_role: l.employee_role,
+      team_name: l.team_name,
+      designation: l.designation,
+      leave_type: l.type,
+      from: l.from,
+      to: l.to,
+      reason: l.reason,
+      status: l.status,
+      applied_at: l.created_at,
+      balance: l.balance,
+    }))
+    .filter((l) => l.status === "pending");
 
-    } catch (err) {
-      console.error("Error loading approvals queues:", err);
-      Alert.alert("Sync Error", "Unable to load approval items.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [user, isAuthenticated]);
+  const loading = activeQueue === "punches" ? punchPag.loading : leavePag.loading;
+  const refreshing = activeQueue === "punches" ? punchPag.refreshing : leavePag.refreshing;
 
-  useRealtime("leave_update", () => fetchQueues(false));
-  useRealtime("attendance_update", () => fetchQueues(false));
-  useRealtime("realtime:connected", () => fetchQueues(false));
+  const refreshPunch = punchPag.refresh;
+  const refreshLeave = leavePag.refresh;
 
-  useEffect(() => {
-    const t = setTimeout(() => { void fetchQueues(true); }, 0);
-    return () => clearTimeout(t);
-  }, [fetchQueues]);
+  const fetchQueues = useCallback(async () => {
+    await Promise.all([refreshPunch(), refreshLeave()]);
+  }, [refreshPunch, refreshLeave]);
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchQueues(false);
-  };
+  useRealtime("leave_update", useCallback(() => { void refreshLeave(); }, [refreshLeave]));
+  useRealtime("attendance_update", useCallback(() => { void refreshPunch(); }, [refreshPunch]));
+  useRealtime("realtime:connected", useCallback(() => { void fetchQueues(); }, [fetchQueues]));
 
   const handleActionPunch = async (id: number, decision: "approved" | "rejected") => {
     setActioningId(id);
@@ -173,7 +160,7 @@ export default function ApprovalsScreen() {
       await api.post(`/attendance/approvals/${id}/`, { status: decision });
       Alert.alert("Success", `Punch exception ${decision} successfully.`);
       setSelectedPunch(null);
-      fetchQueues(false);
+      void fetchQueues();
     } catch (err: any) {
       console.error("Error actioning punch", err);
       Alert.alert("Error", err.response?.data?.error || "Failed to submit decision.");
@@ -187,7 +174,7 @@ export default function ApprovalsScreen() {
     try {
       await api.post(`/leave/action/${id}/`, { status: decision });
       Alert.alert("Success", `Leave application ${decision} successfully.`);
-      fetchQueues(false);
+      void fetchQueues();
     } catch (err: any) {
       console.error("Error actioning leave", err);
       Alert.alert("Error", err.response?.data?.error || "Failed to submit decision.");
@@ -211,10 +198,13 @@ export default function ApprovalsScreen() {
           <Text style={styles.cardMeta}>Date: {formatCompanyDate(item.date)}</Text>
           <Text style={styles.cardMeta}>Time: {item.punch_time}</Text>
           <View style={styles.coordsRow}>
-            <MapPin size={12} color="#D97706" style={{ marginRight: 4 }} />
-            <Text style={styles.coordsText}>
-              Outside Zone: {item.latitude?.toFixed(5)}, {item.longitude?.toFixed(5)}
-            </Text>
+            <LocationDisplay
+              latitude={item.latitude}
+              longitude={item.longitude}
+              prefix="Outside Zone:"
+              iconColor="#D97706"
+              compact
+            />
           </View>
         </View>
 
@@ -347,20 +337,21 @@ export default function ApprovalsScreen() {
         </TouchableOpacity>
       </View>
 
-      <FlatList
-        data={(activeQueue === "punches" ? punchQueue : leaveQueue) as any[]}
-        keyExtractor={(item) => String(item.id)}
+      <PaginatedFlatList
+        items={(activeQueue === "punches" ? punchQueue : leaveQueue) as any[]}
+        loading={loading}
+        refreshing={refreshing}
+        loadingMore={activeQueue === "punches" ? punchPag.loadingMore : leavePag.loadingMore}
+        hasMore={activeQueue === "punches" ? punchPag.hasMore : leavePag.hasMore}
+        error={activeQueue === "punches" ? punchPag.error : leavePag.error}
+        onRefresh={activeQueue === "punches" ? punchPag.refresh : leavePag.refresh}
+        onLoadMore={activeQueue === "punches" ? punchPag.loadMore : leavePag.loadMore}
+        onRetry={activeQueue === "punches" ? punchPag.retry : leavePag.retry}
+        keyExtractor={(item: any) => String(item.id)}
         renderItem={activeQueue === "punches" ? (renderPunchItem as any) : (renderLeaveItem as any)}
         contentContainerStyle={styles.listContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
-        }
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Inbox size={40} color="#8995A7" />
-            <Text style={styles.emptyText}>All caught up! No pending approvals found.</Text>
-          </View>
-        }
+        emptyTitle="All caught up!"
+        emptySubtitle="No pending approvals found."
       />
 
       {/* --- SELFIE VIEW MODAL --- */}
@@ -395,9 +386,13 @@ export default function ApprovalsScreen() {
                   </Text>
                   <Text style={styles.metaRow}>Date: {formatCompanyDate(selectedPunch.date)}</Text>
                   <Text style={styles.metaRow}>Time: {selectedPunch.punch_time}</Text>
-                  <Text style={styles.metaRow}>
-                    Telemetry: {selectedPunch.latitude?.toFixed(6)}, {selectedPunch.longitude?.toFixed(6)}
-                  </Text>
+                  <View style={{ marginTop: 4 }}>
+                    <LocationDisplay
+                      latitude={selectedPunch.latitude}
+                      longitude={selectedPunch.longitude}
+                      prefix="Location:"
+                    />
+                  </View>
                 </View>
 
                 {/* Approve / Reject Actions in Modal */}

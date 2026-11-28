@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import Pagination from "../components/common/Pagination";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
@@ -136,8 +137,15 @@ export default function TeamAnalytics() {
   const querySiteIdRef = useRef(querySiteId);
   querySiteIdRef.current = querySiteId;
 
-  // TA-AN09: Include site_id in query parameters
-  const fetchAnalytics = useCallback(async (selectedDays, showLoader = true) => {
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [totalMembers, setTotalMembers] = useState(0);
+  const [pageCount, setPageCount] = useState(1);
+  const requestSeqRef = useRef(0);
+
+  // TA-AN09: Include site_id, search, statusFilter, focusFilter in query parameters
+  const fetchAnalytics = useCallback(async (selectedDays, showLoader = true, targetPage = page, targetLimit = pageSize) => {
+    const seq = ++requestSeqRef.current;
     if (showLoader) {
       setLoading(true);
     } else {
@@ -145,11 +153,20 @@ export default function TeamAnalytics() {
     }
 
     try {
-      const params = { days: selectedDays };
+      const params = {
+        days: selectedDays,
+        page: targetPage,
+        limit: targetLimit,
+        search: search.trim() || undefined,
+        statusFilter: statusFilter !== "all" ? statusFilter : undefined,
+        focusFilter: focusFilter !== "all" ? focusFilter : undefined,
+      };
       if (querySiteIdRef.current) params.site_id = querySiteIdRef.current;
       const res = await API.get("/attendance/team-analytics/", {
         params,
       });
+      if (seq !== requestSeqRef.current) return;
+      const membersList = Array.isArray(res.data?.members) ? res.data.members : [];
       setAnalytics({
         ...emptyAnalytics,
         ...(res.data || {}),
@@ -161,21 +178,31 @@ export default function TeamAnalytics() {
           ...emptyAnalytics.insights,
           ...(res.data?.insights || {}),
         },
-        members: Array.isArray(res.data?.members) ? res.data.members : [],
+        members: membersList,
       });
+      setTotalMembers(Number(res.data?.pagination?.total ?? membersList.length));
+      setPageCount(Number(res.data?.pagination?.totalPages ?? Math.max(1, Math.ceil(membersList.length / targetLimit))));
     } catch (err) {
+      if (seq !== requestSeqRef.current) return;
       console.error("Team analytics fetch error:", err.response?.data || err.message);
       showPopup(err.response?.data?.error || "Unable to load team analytics", "error");
       setAnalytics(emptyAnalytics);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (seq === requestSeqRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [showPopup]);
+  }, [showPopup, page, pageSize, search, statusFilter, focusFilter]);
+
+  // Reset to page 1 when filters, period, or site change
+  useEffect(() => {
+    setPage(1);
+  }, [days, querySiteId, search, statusFilter, focusFilter]);
 
   useEffect(() => {
-    fetchAnalytics(days);
-  }, [fetchAnalytics, days, querySiteId]);
+    fetchAnalytics(days, true, page, pageSize);
+  }, [fetchAnalytics, days, querySiteId, page, pageSize]);
 
   // TA-AN08: Stable real-time SSE listener avoiding subscription churn
   const handleRealtimeUpdate = useCallback(() => {
@@ -185,29 +212,7 @@ export default function TeamAnalytics() {
   useRealtime("attendance_update", handleRealtimeUpdate);
   useRealtime("leave_update", handleRealtimeUpdate);
 
-  // TA-AN02: Filter members using canonical status normalization
-  const filteredMembers = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return analytics.members.filter((item) => {
-      const matchesSearch =
-        !query ||
-        [
-          item.employee_name,
-          item.username,
-          item.email,
-          item.team_name,
-          STATUS_LABELS[normalizeStatus(item.today_status)] || item.today_status,
-        ]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(query));
-
-      const matchesStatus =
-        statusFilter === "all" ? true : normalizeStatus(item.today_status) === statusFilter;
-      const matchesFocus = (focusOptions[focusFilter] || focusOptions.all)(item);
-
-      return matchesSearch && matchesStatus && matchesFocus;
-    });
-  }, [analytics.members, focusFilter, search, statusFilter]);
+  const filteredMembers = analytics.members;
 
   const attentionMembers = useMemo(
     () =>
@@ -233,8 +238,34 @@ export default function TeamAnalytics() {
     return `"${str.replace(/"/g, '""')}"`;
   };
 
-  const handleExportCsv = () => {
-    if (!filteredMembers.length) {
+  const handleExportCsv = async () => {
+    let exportRows = filteredMembers;
+    if (pageCount > 1) {
+      try {
+        const all = [];
+        for (let p = 1; p <= pageCount; p += 1) {
+          const params = {
+            days,
+            page: p,
+            limit: 100,
+            search: search.trim() || undefined,
+            statusFilter: statusFilter !== "all" ? statusFilter : undefined,
+            focusFilter: focusFilter !== "all" ? focusFilter : undefined,
+          };
+          if (querySiteIdRef.current) params.site_id = querySiteIdRef.current;
+          const res = await API.get("/attendance/team-analytics/", { params });
+          const batch = Array.isArray(res.data?.members) ? res.data.members : [];
+          all.push(...batch);
+          const serverPages = Number(res.data?.pagination?.totalPages || 1);
+          if (p >= serverPages) break;
+        }
+        exportRows = all;
+      } catch (err) {
+        showPopup(err.response?.data?.error || "Unable to export full team analytics", "error");
+        return;
+      }
+    }
+    if (!exportRows.length) {
       showPopup("No team members to export", "error");
       return;
     }
@@ -259,7 +290,7 @@ export default function TeamAnalytics() {
       "Pending Approval Items",
       "Last Attendance Date",
     ];
-    const rows = filteredMembers.map((m) => [
+    const rows = exportRows.map((m) => [
       sanitizeCsvValue(m.employee_name || m.username),
       sanitizeCsvValue(m.username),
       sanitizeCsvValue(m.email || ""),
@@ -579,6 +610,18 @@ export default function TeamAnalytics() {
               </table>
             </div>
           )}
+          <Pagination
+            page={page}
+            setPage={setPage}
+            pageSize={pageSize}
+            changePageSize={(val) => {
+              setPageSize(Number(val));
+              setPage(1);
+            }}
+            total={totalMembers}
+            pageCount={pageCount}
+            itemLabel="members"
+          />
         </section>
       </div>
     </Layout>

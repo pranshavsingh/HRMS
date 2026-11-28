@@ -77,10 +77,13 @@ export async function publishRoster(req, res, next) {
 
 export async function getMyRoster(req, res, next) {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, cursor, cursor_mode, limit } = req.query;
     const schedule = await rosterService.getMyRoster(req.tenantId, req.user.id, {
       start_date: startDate,
       end_date: endDate,
+      cursor,
+      cursor_mode,
+      limit,
     });
     return res.status(200).json(schedule);
   } catch (err) {

@@ -31,6 +31,7 @@ import Loader from "../components/common/Loader";
 import API from "../api/axios";
 import { useRealtime } from "../context/RealtimeContext";
 import { useSite } from "../context/SiteContext";
+import LocationDisplay from "../components/common/LocationDisplay";
 import { useAuth } from "../context/AuthContext";
 
 const documentLabels = [
@@ -1831,14 +1832,12 @@ function ViewEmployeeModal({ employee, canEdit, onEdit, onClose }) {
               </h4>
               <div className="space-y-2">
                 {employee.locations.map((loc, i) => (
-                  <div key={i} className="flex items-center justify-between text-xs text-slate-600 bg-white p-2.5 rounded-xl border border-slate-200">
-                    <div className="flex items-center gap-2">
-                      <MapPin size={14} className="text-cyan-600 flex-shrink-0" />
-                      <span>
-                        Lat: {loc.latitude}, Lng: {loc.longitude}
-                      </span>
-                    </div>
-                    <span className="text-[11px] font-medium text-slate-400">
+                  <div key={i} className="flex items-center justify-between text-xs text-slate-600 bg-white p-2.5 rounded-xl border border-slate-200 gap-3">
+                    <LocationDisplay
+                      latitude={loc.latitude}
+                      longitude={loc.longitude}
+                    />
+                    <span className="text-[11px] font-medium text-slate-400 shrink-0">
                       {loc.allowed_radius}m {loc.is_primary ? "(Primary)" : ""}
                     </span>
                   </div>
@@ -1847,12 +1846,14 @@ function ViewEmployeeModal({ employee, canEdit, onEdit, onClose }) {
             </div>
           ) : employee.latitude && employee.longitude ? (
             <div className="rounded-2xl border border-slate-100 bg-slate-50/70 p-4">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
                 Office Location
               </h4>
-              <p className="text-xs text-slate-600">
-                Lat: {employee.latitude}, Lng: {employee.longitude} ({employee.allowed_radius || 100}m radius)
-              </p>
+              <LocationDisplay
+                latitude={employee.latitude}
+                longitude={employee.longitude}
+                suffix={`(${employee.allowed_radius || 100}m radius)`}
+              />
             </div>
           ) : null}
         </div>

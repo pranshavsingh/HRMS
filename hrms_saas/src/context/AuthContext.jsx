@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 import API, { setInMemoryToken, getInMemoryToken } from "../api/axios";
 
 const AuthContext = createContext(null);
@@ -25,6 +25,15 @@ export function AuthProvider({ children }) {
   const [role, setRole] = useState(() => localStorage.getItem("role") || "");
   const [accessToken, setAccessToken] = useState(() => getInMemoryToken());
   const [loading, setLoading] = useState(true);
+  const preLogoutHooksRef = useRef(new Set());
+
+  const registerPreLogoutHook = useCallback((fn) => {
+    if (typeof fn !== "function") return () => {};
+    preLogoutHooksRef.current.add(fn);
+    return () => {
+      preLogoutHooksRef.current.delete(fn);
+    };
+  }, []);
 
   // Synchronize in-memory token across components and Axios
   const handleTokenUpdate = useCallback((token) => {
@@ -123,6 +132,7 @@ export function AuthProvider({ children }) {
 
   const logout = async () => {
     try {
+      await Promise.allSettled(Array.from(preLogoutHooksRef.current).map((fn) => fn()));
       await API.post("/auth/logout/", { platform: "web" });
     } catch {
       // Ignore network errors on logout
@@ -144,6 +154,7 @@ export function AuthProvider({ children }) {
         loading,
         login,
         logout,
+        registerPreLogoutHook,
         silentRefresh,
         getAccessToken: getInMemoryToken,
       }}

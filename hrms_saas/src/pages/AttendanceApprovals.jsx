@@ -16,6 +16,7 @@ import {
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
 import Pagination from "../components/common/Pagination";
+import LocationDisplay from "../components/common/LocationDisplay";
 import API from "../api/axios";
 import { useAuth } from "../context/AuthContext";
 import { usePopup } from "../context/PopupContext";
@@ -345,7 +346,6 @@ export default function AttendanceApprovals() {
                 <option value="all">All Types</option>
                 <option value="in">Punch In (Location)</option>
                 <option value="out">Punch Out (Location)</option>
-                <option value="early_departure">Early Departure</option>
                 <option value="overtime">Overtime</option>
               </select>
             </label>
@@ -428,24 +428,13 @@ export default function AttendanceApprovals() {
                             {item.location_label}
                           </div>
 
-                          {/* GPS Coordinates and Google Maps Link */}
-                          {item.latitude != null && item.longitude != null ? (
-                            <div className="mt-2 flex items-center gap-1.5 text-xs">
-                              <MapPinned size={14} className="text-slate-400 shrink-0" />
-                              <a
-                                href={`https://www.google.com/maps?q=${item.latitude},${item.longitude}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 hover:underline font-mono"
-                                title="View location on Google Maps"
-                              >
-                                {Number(item.latitude).toFixed(4)}, {Number(item.longitude).toFixed(4)}
-                                <ExternalLink size={11} />
-                              </a>
-                            </div>
-                          ) : (
-                            <div className="mt-1 text-xs text-slate-400">No GPS data</div>
-                          )}
+                          {/* Human-Readable Location & Google Maps Link */}
+                          <div className="mt-2">
+                            <LocationDisplay
+                              latitude={item.latitude}
+                              longitude={item.longitude}
+                            />
+                          </div>
 
                           {/* Punch Selfie Proof */}
                           <div className="mt-2 flex items-center gap-2">

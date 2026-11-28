@@ -16,7 +16,13 @@ import { fullName, makeNodePassword, verifyDjangoPassword, hashPassword, verifyP
 import { sendOtpEmail } from "../utils/mailer.js";
 import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
-import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
+import {
+  parsePagination,
+  formatPaginationResponse,
+  parseCursorPagination,
+  buildKeysetClause,
+  formatCursorResponse,
+} from "../utils/pagination/index.js";
 import { siteService } from "./site.service.js";
 import notificationService from "./notification.service.js";
 
@@ -666,7 +672,7 @@ export const accountsService = {
       realtimeManager.broadcast(
         "employee_update",
         { actorId: actor.id, userId: Number(employee.created?.id), action: "created" },
-        { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(employee.created?.id)] }
+        { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(employee.created?.id)] }
       );
       return {
         message: `${role[0].toUpperCase()}${role.slice(1)} created successfully`,
@@ -758,11 +764,49 @@ export const accountsService = {
   },
 
   async getEmployees(query = {}, tenantId = 1, actor = null) {
-    const { page, limit, offset } = parsePagination(query, 50, 10000);
+    const cursorPag = parseCursorPagination(query, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `employees:${tenantId}`,
+    });
     const requested = query.site_id || null;
     const scope = actor ? await siteService.getSiteScope(tenantId, actor, requested) : { siteIds: null, unassigned: false };
     const managerId = (actor && actor.role === "manager") ? actor.id : null;
     const workDate = new Date().toISOString().slice(0, 10);
+
+    if (cursorPag.useCursor) {
+      const cursorId = cursorPag.cursorValues ? Number(cursorPag.cursorValues[0]) : null;
+      const rows = await accountsRepository.findEmployeesPaged({
+        tenantId,
+        limit: cursorPag.fetchLimit,
+        offset: 0,
+        cursorId: cursorId ?? 9007199254740991,
+        role: query.role,
+        team: query.team,
+        search: query.search || query.search_term || "",
+        status: query.status,
+        siteScope: scope,
+        managerId,
+        workDate,
+      });
+
+      const hasMore = rows.length > cursorPag.limit;
+      const slice = hasMore ? rows.slice(0, cursorPag.limit) : rows;
+      const pagedUserIds = slice.map((r) => r.id);
+      const [docCountMap, locMap] = await Promise.all([
+        accountsRepository.findDocumentCountsByUserIds(pagedUserIds),
+        accountsRepository.findLocationsByUserIds(pagedUserIds),
+      ]);
+      const data = this.serializeStaffMembersBatch(slice, docCountMap, locMap);
+      const resp = formatCursorResponse(rows, {
+        limit: cursorPag.limit,
+        scope: `employees:${tenantId}`,
+        extractCursorValues: (r) => [Number(r.id)],
+      });
+      return { ...resp, data, records: data };
+    }
+
+    const { page, limit, offset } = parsePagination(query, 50, 10000);
 
     const [rows, total, metrics, availableTeamsRows, totalDocuments] = await Promise.all([
       accountsRepository.findEmployeesPaged({
@@ -1114,7 +1158,7 @@ export const accountsService = {
     realtimeManager.broadcast(
       "employee_update",
       { actorId: actor.id, userId: Number(employeeId) },
-      { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(employeeId)] }
+      { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(employeeId)] }
     );
     if (updated?.assignmentChanged) {
       const affectedManagers = [updated.oldManagerId, updated.newManagerId].filter(Boolean);
@@ -1197,14 +1241,18 @@ export const accountsService = {
       { title: document.title, file: document.file }
     );
 
-    realtimeManager.broadcast("employee_update", { actorId: actor.id, userId: document.user_id });
+    realtimeManager.broadcast(
+      "employee_update",
+      { actorId: actor.id, userId: document.user_id },
+      { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(document.user_id)] }
+    );
     realtimeManager.broadcast("document_update", {
       actorId: actor.id,
       userId: document.user_id,
       documentId: document.id,
       title: document.title,
       action: "delete"
-    });
+    }, { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(document.user_id)] });
 
     return { message: "Document deleted successfully" };
   },
@@ -1263,13 +1311,17 @@ export const accountsService = {
       }
     }
 
-    realtimeManager.broadcast("employee_update", { actorId: actor.id, userId: user });
+    realtimeManager.broadcast(
+      "employee_update",
+      { actorId: actor.id, userId: user },
+      { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(user)] }
+    );
     realtimeManager.broadcast("document_update", {
       actorId: actor.id,
       userId: user,
       title,
       action: duplicate ? "replace" : "upload"
-    });
+    }, { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(user)] });
     void notificationService.safeNotify(async () => {
       if (String(actor.id) !== String(user)) {
         await notificationService.createNotification({
@@ -1338,13 +1390,17 @@ export const accountsService = {
       }
     }
 
-    realtimeManager.broadcast("employee_update", { actorId: actor.id, userId: user });
+    realtimeManager.broadcast(
+      "employee_update",
+      { actorId: actor.id, userId: user },
+      { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(user)] }
+    );
     realtimeManager.broadcast("document_update", {
       actorId: actor.id,
       userId: user,
       title,
       action: duplicate ? "replace" : "upload"
-    });
+    }, { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(user)] });
     void notificationService.safeNotify(async () => {
       if (String(actor.id) !== String(user)) {
         await notificationService.createNotification({
@@ -1405,14 +1461,50 @@ export const accountsService = {
   },
 
   async getMyDocuments(userId, query = {}) {
-    const docs = await accountsRepository.findDocumentsByUserId(userId);
-    const items = docs.map((d) => ({
+    const mapDoc = (d) => ({
       id: d.id,
       title: d.title,
       file: storageService.getUrl(d.file),
       download_url: storageService.getUrl(d.file, { attachment: true }),
-      uploaded_at: d.uploaded_at
-    }));
+      uploaded_at: d.uploaded_at,
+    });
+
+    const cursorPag = parseCursorPagination(query || {}, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `my_docs:${userId}`,
+    });
+    if (cursorPag.useCursor) {
+      const keyset = buildKeysetClause({
+        primaryCol: "uploaded_at",
+        idCol: "id",
+        cursorValues: cursorPag.cursorValues,
+        direction: "DESC",
+      });
+      const whereParts = ["user_id = ?"];
+      const sqlParams = [userId];
+      if (keyset.sql) {
+        whereParts.push(keyset.sql);
+        sqlParams.push(...keyset.params);
+      }
+      const rows = await db.all(
+        `SELECT id, title, file, uploaded_at FROM accounts_employeedocument
+         WHERE ${whereParts.join(" AND ")}
+         ORDER BY uploaded_at DESC, id DESC
+         LIMIT ?`,
+        [...sqlParams, cursorPag.fetchLimit]
+      );
+      const resp = formatCursorResponse(rows, {
+        limit: cursorPag.limit,
+        scope: `my_docs:${userId}`,
+        extractCursorValues: (d) => [d.uploaded_at instanceof Date ? d.uploaded_at.toISOString().slice(0, 19).replace("T", " ") : String(d.uploaded_at), Number(d.id)],
+        mapItem: mapDoc,
+      });
+      return { ...resp, records: resp.data };
+    }
+
+    const docs = await accountsRepository.findDocumentsByUserId(userId);
+    const items = docs.map(mapDoc);
 
     if (query && (query.page || query.limit)) {
       const { page, limit } = parsePagination(query, 50, 100);
@@ -1443,14 +1535,50 @@ export const accountsService = {
       await siteService.ensureEmployeeVisible(tenantId, actor, employeeId, { requireDirectReport: actor.role === "manager" });
     }
 
-    const docs = await accountsRepository.findDocumentsByUserId(employeeId);
-    const items = docs.map((d) => ({
+    const mapDoc = (d) => ({
       id: d.id,
       title: d.title,
       file: storageService.getUrl(d.file),
       download_url: storageService.getUrl(d.file, { attachment: true }),
-      uploaded_at: d.uploaded_at
-    }));
+      uploaded_at: d.uploaded_at,
+    });
+
+    const cursorPag = parseCursorPagination(query || {}, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `emp_docs:${employeeId}`,
+    });
+    if (cursorPag.useCursor) {
+      const keyset = buildKeysetClause({
+        primaryCol: "uploaded_at",
+        idCol: "id",
+        cursorValues: cursorPag.cursorValues,
+        direction: "DESC",
+      });
+      const whereParts = ["user_id = ?"];
+      const sqlParams = [employeeId];
+      if (keyset.sql) {
+        whereParts.push(keyset.sql);
+        sqlParams.push(...keyset.params);
+      }
+      const rows = await db.all(
+        `SELECT id, title, file, uploaded_at FROM accounts_employeedocument
+         WHERE ${whereParts.join(" AND ")}
+         ORDER BY uploaded_at DESC, id DESC
+         LIMIT ?`,
+        [...sqlParams, cursorPag.fetchLimit]
+      );
+      const resp = formatCursorResponse(rows, {
+        limit: cursorPag.limit,
+        scope: `emp_docs:${employeeId}`,
+        extractCursorValues: (d) => [d.uploaded_at instanceof Date ? d.uploaded_at.toISOString().slice(0, 19).replace("T", " ") : String(d.uploaded_at), Number(d.id)],
+        mapItem: mapDoc,
+      });
+      return { ...resp, records: resp.data };
+    }
+
+    const docs = await accountsRepository.findDocumentsByUserId(employeeId);
+    const items = docs.map(mapDoc);
 
     if (query && (query.page || query.limit)) {
       const { page, limit } = parsePagination(query, 50, 100);
@@ -1476,6 +1604,89 @@ export const accountsService = {
     const cleanSeverity = query.severity && query.severity.trim().toUpperCase() !== "ALL"
       ? query.severity.trim().toUpperCase()
       : "";
+
+    const cursorPag = parseCursorPagination(query, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: "audit_logs",
+    });
+
+    if (cursorPag.useCursor) {
+      const sortDir = String(query.sort || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+      const whereParts = ["1=1"];
+      const sqlParams = [];
+      if (query.search) {
+        const like = `%${String(query.search).trim()}%`;
+        whereParts.push("(al.username LIKE ? OR al.action LIKE ? OR al.details LIKE ?)");
+        sqlParams.push(like, like, like);
+      }
+      if (query.action) {
+        whereParts.push("al.action = ?");
+        sqlParams.push(query.action);
+      }
+      if (cleanSeverity) {
+        whereParts.push("al.severity = ?");
+        sqlParams.push(cleanSeverity);
+      }
+      if (query.start_date) {
+        whereParts.push("al.created_at >= ?");
+        sqlParams.push(`${query.start_date} 00:00:00`);
+      }
+      if (query.end_date) {
+        whereParts.push("al.created_at <= ?");
+        sqlParams.push(`${query.end_date} 23:59:59`);
+      }
+      const keyset = buildKeysetClause({
+        primaryCol: "al.created_at",
+        idCol: "al.id",
+        cursorValues: cursorPag.cursorValues,
+        direction: sortDir,
+      });
+      if (keyset.sql) {
+        whereParts.push(keyset.sql);
+        sqlParams.push(...keyset.params);
+      }
+
+      const [rows, uniqueActions] = await Promise.all([
+        db.all(
+          `SELECT al.id, al.user_id, al.username, al.action, al.target_id, al.details, al.ip_address, al.severity, al.created_at,
+                  tu.username AS target_username, tu.first_name AS target_first_name, tu.last_name AS target_last_name
+           FROM audit_logs al
+           LEFT JOIN accounts_user tu ON tu.id = al.target_id
+           WHERE ${whereParts.join(" AND ")}
+           ORDER BY al.created_at ${sortDir}, al.id ${sortDir}
+           LIMIT ?`,
+          [...sqlParams, cursorPag.fetchLimit]
+        ),
+        query.cursor ? Promise.resolve(undefined) : db.all("SELECT DISTINCT action FROM audit_logs WHERE action IS NOT NULL AND action != '' ORDER BY action ASC"),
+      ]);
+
+      const mapLog = (log) => {
+        let parsedDetails = null;
+        if (log.details) {
+          try { parsedDetails = JSON.parse(log.details); } catch { parsedDetails = log.details; }
+        }
+        let targetDisplay = null;
+        if (log.target_username) {
+          const name = `${log.target_first_name || ""} ${log.target_last_name || ""}`.trim();
+          targetDisplay = name ? `${name} (${log.target_username})` : log.target_username;
+        }
+        return {
+          id: log.id, user_id: log.user_id, username: log.username, action: log.action,
+          target_id: log.target_id, target_display: targetDisplay, details: parsedDetails,
+          ip_address: log.ip_address, severity: log.severity || "INFO", created_at: log.created_at,
+        };
+      };
+
+      const resp = formatCursorResponse(rows, {
+        limit: cursorPag.limit,
+        scope: "audit_logs",
+        extractCursorValues: (l) => [l.created_at instanceof Date ? l.created_at.toISOString().slice(0, 19).replace("T", " ") : String(l.created_at), Number(l.id)],
+        mapItem: mapLog,
+        extra: uniqueActions ? { availableActions: uniqueActions.map((a) => a.action) } : {},
+      });
+      return { ...resp, logs: resp.data };
+    }
 
     const limit = query.limit ? Math.min(Math.max(Number(query.limit), 1), 5000) : 50;
     const page = query.page ? Math.max(Number(query.page), 1) : 1;

@@ -57,7 +57,7 @@ export default function Sidebar({ isOpen = false, onClose }) {
         />
       )}
       <div
-        className={`fixed left-0 top-0 w-64 h-screen bg-gray-900 text-white flex flex-col p-4 z-50 transition-transform duration-200 ${
+        className={`fixed left-0 top-0 w-[var(--hrms-sidebar-width)] h-screen supports-[height:100dvh]:h-dvh bg-gray-900 text-white flex flex-col p-4 z-50 transition-transform duration-200 ${
           isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         }`}
         onClick={(e) => {

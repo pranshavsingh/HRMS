@@ -3,6 +3,8 @@ import jwt from "jsonwebtoken";
 import { config } from "../config/env.js";
 import accountsService from "../services/accounts.service.js";
 import accountsRepository from "../repositories/accounts.repository.js";
+import attendanceService from "../services/attendance.service.js";
+import leaveService from "../services/leave.service.js";
 import redisService from "../services/redis.service.js";
 import cloudinaryService from "../services/cloudinary.service.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
@@ -533,25 +535,16 @@ export const realtimeSync = asyncHandler(async (req, res) => {
 
   if (["manager", "hr", "admin", "superadmin"].includes(role)) {
     try {
-      const attRow = await db.get(
-        `SELECT COUNT(*) AS count
-         FROM attendance_attendanceapproval aa
-         JOIN attendance_attendance a ON a.id = aa.attendance_id
-         WHERE aa.status = 'pending' AND a.tenant_id = ?`,
-        [tenantId]
-      );
-      pendingAttendanceApprovals = attRow ? Number(attRow.count) : 0;
+      const attCountRes = await attendanceService.pendingApprovalsCount(userId, role, req.query, tenantId);
+      pendingAttendanceApprovals = Number(attCountRes?.count || 0);
     } catch (err) {
       degraded = true;
       logger.error("[realtimeSync] Failed to query pending attendance approvals: %s", err.message);
     }
 
     try {
-      const leaveRow = await db.get(
-        "SELECT COUNT(*) AS count FROM leave_leave WHERE status = 'pending' AND tenant_id = ?",
-        [tenantId]
-      );
-      pendingLeaveApprovals = leaveRow ? Number(leaveRow.count) : 0;
+      const leaveCountRes = await leaveService.pendingApprovalsCount(role, userId, req.query, tenantId);
+      pendingLeaveApprovals = Number(leaveCountRes?.count || 0);
     } catch (err) {
       degraded = true;
       logger.error("[realtimeSync] Failed to query pending leave approvals: %s", err.message);

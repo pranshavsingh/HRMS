@@ -1,4 +1,10 @@
+import crypto from "node:crypto";
 import { db } from "../db/index.js";
+import { AppError } from "../middleware/errorHandler.js";
+
+export function hashPushToken(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
 
 function parseJsonSafe(val) {
   if (val == null) return null;
@@ -228,43 +234,101 @@ export const notificationRepository = {
 
   // --- Push Token Management ---
 
-  async upsertPushToken({ tenantId, userId, token, platform = "android", provider = "expo", deviceId = null }, tx = null) {
+  async upsertPushToken(
+    { tenantId, userId, token, platform = "android", provider = "expo", deviceId = null, subscriptionJson = null, deviceName = null },
+    tx = null
+  ) {
+    const tokenHash = hashPushToken(token);
+    const existing = await db.get(
+      `SELECT id, tenant_id, user_id, is_active
+       FROM notification_push_tokens
+       WHERE token_hash = ?
+       LIMIT 1`,
+      [tokenHash],
+      tx
+    );
+
+    if (
+      existing &&
+      Number(existing.is_active) === 1 &&
+      (Number(existing.tenant_id) !== Number(tenantId) || Number(existing.user_id) !== Number(userId))
+    ) {
+      throw new AppError("Push token is already registered to another active account.", 409);
+    }
+
     await db.run(
       `INSERT INTO notification_push_tokens
-         (tenant_id, user_id, token, platform, provider, device_id, is_active, last_used_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, NOW())
+         (tenant_id, user_id, token, token_hash, platform, provider, device_id, subscription_json, device_name, is_active, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())
        ON DUPLICATE KEY UPDATE
          tenant_id = VALUES(tenant_id),
          user_id = VALUES(user_id),
+         token = VALUES(token),
          platform = VALUES(platform),
          provider = VALUES(provider),
          device_id = VALUES(device_id),
+         subscription_json = VALUES(subscription_json),
+         device_name = COALESCE(VALUES(device_name), device_name),
          is_active = 1,
          last_used_at = NOW(),
          updated_at = NOW()`,
-      [tenantId, userId, token, platform, provider, deviceId],
+      [tenantId, userId, token, tokenHash, platform, provider, deviceId, subscriptionJson, deviceName],
       tx
     );
   },
 
-  async deactivatePushToken(userId, token, tx = null) {
+  async deactivatePushToken(userId, token, tenantId = null, tx = null) {
+    const tokenHash = hashPushToken(token);
+    if (tenantId != null) {
+      await db.run(
+        `UPDATE notification_push_tokens
+         SET is_active = 0, updated_at = NOW()
+         WHERE tenant_id = ? AND user_id = ? AND token_hash = ?`,
+        [tenantId, userId, tokenHash],
+        tx
+      );
+      return;
+    }
     await db.run(
       `UPDATE notification_push_tokens
        SET is_active = 0, updated_at = NOW()
-       WHERE user_id = ? AND token = ?`,
-      [userId, token],
+       WHERE user_id = ? AND token_hash = ?`,
+      [userId, tokenHash],
       tx
     );
+  },
+
+  async listUserDevices(tenantId, userId, tx = null) {
+    return db.all(
+      `SELECT id, platform, provider, device_id, device_name, is_active, last_used_at, created_at
+       FROM notification_push_tokens
+       WHERE tenant_id = ? AND user_id = ? AND is_active = 1
+       ORDER BY last_used_at DESC, id DESC`,
+      [tenantId, userId],
+      tx
+    );
+  },
+
+  async deactivateUserDeviceById(tenantId, userId, deviceRowId, tx = null) {
+    const res = await db.run(
+      `UPDATE notification_push_tokens
+       SET is_active = 0, updated_at = NOW()
+       WHERE id = ? AND tenant_id = ? AND user_id = ?`,
+      [deviceRowId, tenantId, userId],
+      tx
+    );
+    return Number(res.changes || 0) > 0;
   },
 
   async deactivatePushTokensByTokenList(tokens, tx = null) {
     if (!tokens || tokens.length === 0) return;
-    const placeholders = tokens.map(() => "?").join(", ");
+    const hashes = [...new Set(tokens.map((t) => hashPushToken(t)))];
+    const placeholders = hashes.map(() => "?").join(", ");
     await db.run(
       `UPDATE notification_push_tokens
        SET is_active = 0, updated_at = NOW()
-       WHERE token IN (${placeholders})`,
-      tokens,
+       WHERE token_hash IN (${placeholders})`,
+      hashes,
       tx
     );
   },
@@ -273,7 +337,7 @@ export const notificationRepository = {
     if (!userIds || userIds.length === 0) return [];
     const placeholders = userIds.map(() => "?").join(", ");
     return db.all(
-      `SELECT id, user_id, token, platform, provider
+      `SELECT id, user_id, token, platform, provider, subscription_json, device_name
        FROM notification_push_tokens
        WHERE tenant_id = ? AND user_id IN (${placeholders}) AND is_active = 1`,
       [tenantId, ...userIds],
@@ -281,14 +345,168 @@ export const notificationRepository = {
     );
   },
 
+  // --- Notification Preferences ---
+
+  async getPreferences(tenantId, userId, tx = null) {
+    const row = await db.get(
+      `SELECT web_push_enabled, mobile_push_enabled, disabled_categories
+       FROM notification_preferences
+       WHERE tenant_id = ? AND user_id = ?`,
+      [tenantId, userId],
+      tx
+    );
+    if (!row) {
+      return { web_push_enabled: true, mobile_push_enabled: true, disabled_categories: [] };
+    }
+    let disabled = [];
+    if (row.disabled_categories) {
+      try {
+        disabled = typeof row.disabled_categories === "string"
+          ? JSON.parse(row.disabled_categories)
+          : row.disabled_categories;
+      } catch {
+        disabled = [];
+      }
+    }
+    return {
+      web_push_enabled: Boolean(row.web_push_enabled),
+      mobile_push_enabled: Boolean(row.mobile_push_enabled),
+      disabled_categories: Array.isArray(disabled) ? disabled : [],
+    };
+  },
+
+  async getPreferencesForUsers(tenantId, userIds, tx = null) {
+    if (!userIds || userIds.length === 0) return new Map();
+    const placeholders = userIds.map(() => "?").join(", ");
+    const rows = await db.all(
+      `SELECT user_id, web_push_enabled, mobile_push_enabled, disabled_categories
+       FROM notification_preferences
+       WHERE tenant_id = ? AND user_id IN (${placeholders})`,
+      [tenantId, ...userIds],
+      tx
+    );
+    const map = new Map();
+    for (const row of rows) {
+      let disabled = [];
+      if (row.disabled_categories) {
+        try {
+          disabled = typeof row.disabled_categories === "string"
+            ? JSON.parse(row.disabled_categories)
+            : row.disabled_categories;
+        } catch {
+          disabled = [];
+        }
+      }
+      map.set(Number(row.user_id), {
+        web_push_enabled: Boolean(row.web_push_enabled),
+        mobile_push_enabled: Boolean(row.mobile_push_enabled),
+        disabled_categories: Array.isArray(disabled) ? disabled : [],
+      });
+    }
+    return map;
+  },
+
+  async upsertPreferences(tenantId, userId, { webPushEnabled = true, mobilePushEnabled = true, disabledCategories = [] }, tx = null) {
+    const cleanCategories = Array.isArray(disabledCategories)
+      ? [...new Set(disabledCategories.map((c) => String(c).trim().toUpperCase()).filter(Boolean))]
+      : [];
+    await db.run(
+      `INSERT INTO notification_preferences
+         (tenant_id, user_id, web_push_enabled, mobile_push_enabled, disabled_categories)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         web_push_enabled = VALUES(web_push_enabled),
+         mobile_push_enabled = VALUES(mobile_push_enabled),
+         disabled_categories = VALUES(disabled_categories),
+         updated_at = NOW()`,
+      [tenantId, userId, webPushEnabled ? 1 : 0, mobilePushEnabled ? 1 : 0, JSON.stringify(cleanCategories)],
+      tx
+    );
+    return this.getPreferences(tenantId, userId, tx);
+  },
+
   // --- Delivery Tracking ---
 
-  async logDelivery({ notificationId, channel, status, providerMessageId = null, attempts = 1, errorMessage = null }, tx = null) {
+  async logDelivery(
+    { notificationId, channel, deviceTokenId = null, status, providerMessageId = null, attempts = 1, errorMessage = null },
+    tx = null
+  ) {
     await db.run(
       `INSERT INTO notification_deliveries
-         (notification_id, channel, status, provider_message_id, attempts, error_message)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [notificationId, channel, status, providerMessageId, attempts, errorMessage ? String(errorMessage).slice(0, 1000) : null],
+         (notification_id, channel, device_token_id, status, provider_message_id, attempts, error_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [notificationId, channel, deviceTokenId, status, providerMessageId, attempts, errorMessage ? String(errorMessage).slice(0, 1000) : null],
+      tx
+    );
+  },
+
+  async markDeliveryClicked(notificationId, tenantId, recipientId, { channel = null, deviceTokenId = null } = {}, tx = null) {
+    const notif = await this.findById(notificationId, recipientId, tenantId, tx);
+    if (!notif) return false;
+
+    const where = ["notification_id = ?"];
+    const params = [notificationId];
+    if (deviceTokenId != null && Number.isSafeInteger(Number(deviceTokenId)) && Number(deviceTokenId) > 0) {
+      where.push("device_token_id = ?");
+      params.push(Number(deviceTokenId));
+    } else if (channel) {
+      where.push("channel = ?");
+      params.push(String(channel));
+    }
+
+    await db.run(
+      `UPDATE notification_deliveries
+       SET clicked_at = COALESCE(clicked_at, NOW()), updated_at = NOW()
+       WHERE ${where.join(" AND ")}`,
+      params,
+      tx
+    );
+    return true;
+  },
+
+  async findPendingExpoReceiptDeliveries(limit = 200, minAgeMinutes = 5, tx = null) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500);
+    const safeAge = Math.max(Number(minAgeMinutes) || 0, 0);
+    return db.all(
+      `SELECT d.id, d.notification_id, d.device_token_id, d.provider_message_id,
+              n.tenant_id, t.token
+       FROM notification_deliveries d
+       JOIN notifications n ON n.id = d.notification_id
+       LEFT JOIN notification_push_tokens t ON t.id = d.device_token_id
+       WHERE d.channel = 'mobile_push'
+         AND d.status = 'SENT'
+         AND d.provider_message_id IS NOT NULL
+         AND d.created_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+         AND (d.receipt_checked_at IS NULL OR d.receipt_checked_at <= DATE_SUB(NOW(), INTERVAL 15 MINUTE))
+       ORDER BY d.created_at ASC
+       LIMIT ?`,
+      [safeAge, safeLimit],
+      tx
+    );
+  },
+
+  async updateDeliveryReceiptResult({ deliveryId, status, errorMessage = null }, tx = null) {
+    const res = await db.run(
+      `UPDATE notification_deliveries
+       SET status = ?,
+           receipt_checked_at = NOW(),
+           error_message = COALESCE(?, error_message),
+           updated_at = NOW()
+       WHERE id = ? AND status = 'SENT'`,
+      [status, errorMessage ? String(errorMessage).slice(0, 1000) : null, deliveryId],
+      tx
+    );
+    return Number(res.changes || 0) > 0;
+  },
+
+  async touchDeliveryReceiptChecked(deliveryIds, tx = null) {
+    if (!deliveryIds || deliveryIds.length === 0) return;
+    const placeholders = deliveryIds.map(() => "?").join(", ");
+    await db.run(
+      `UPDATE notification_deliveries
+       SET receipt_checked_at = NOW(), updated_at = NOW()
+       WHERE id IN (${placeholders}) AND status = 'SENT'`,
+      deliveryIds,
       tx
     );
   },

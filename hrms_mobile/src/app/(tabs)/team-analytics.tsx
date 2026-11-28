@@ -1,10 +1,7 @@
-import React, { useEffect, useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo } from "react";
 import {
   ActivityIndicator,
-  Alert,
-  FlatList,
   Modal,
-  RefreshControl,
   StyleSheet,
   Text,
   TextInput,
@@ -12,8 +9,9 @@ import {
   View,
   ScrollView,
 } from "react-native";
-import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
+import { useCursorPagination } from "../../hooks/useCursorPagination";
+import PaginatedFlatList from "../../components/pagination/PaginatedFlatList";
 import {
   TrendingUp,
   Search,
@@ -45,73 +43,53 @@ interface AnalyticsMember {
 }
 
 export default function TeamAnalyticsScreen() {
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [days, setDays] = useState("30");
   const [searchQuery, setSearchQuery] = useState("");
   const [focusFilter, setFocusFilter] = useState<"all" | "attention" | "ontrack">("all");
 
   const [summary, setSummary] = useState<any>(null);
   const [insights, setInsights] = useState<any>(null);
-  const [members, setMembers] = useState<AnalyticsMember[]>([]);
   const [selectedMember, setSelectedMember] = useState<AnalyticsMember | null>(null);
 
-  const fetchAnalytics = useCallback(async (selectedDays: string, showLoader = true) => {
-    if (showLoader) setLoading(true);
-    try {
-      const res = await api.get("/attendance/team-analytics/", {
-        params: { days: selectedDays },
-      });
-      const data = res.data || {};
-      setSummary(data.summary || null);
-      setInsights(data.insights || null);
-      setMembers(Array.isArray(data.members) ? data.members : []);
-    } catch (err: any) {
-      console.error("Error loading team analytics", err);
-      Alert.alert("Sync Error", "Unable to load team analytics.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+  const {
+    items: members,
+    loading,
+    refreshing,
+    loadingMore,
+    hasMore,
+    error,
+    refresh,
+    loadMore,
+    retry,
+  } = useCursorPagination<AnalyticsMember>({
+    endpoint: "/attendance/team-analytics/",
+    params: useMemo(
+      () => ({
+        days,
+        search: searchQuery.trim() || undefined,
+        focusFilter: focusFilter !== "all" ? focusFilter : undefined,
+      }),
+      [days, searchQuery, focusFilter]
+    ),
+    itemsKey: "members",
+    limit: 20,
+    getItemKey: (m) => m.user_id,
+    onData: (payload: any) => {
+      const raw = payload?.raw || payload;
+      if (raw?.summary) setSummary(raw.summary);
+      if (raw?.insights) setInsights(raw.insights);
+    },
+  });
 
-  useRealtime("attendance_update", () => fetchAnalytics(days, false));
-  useRealtime("leave_update", () => fetchAnalytics(days, false));
-  useRealtime("realtime:connected", () => fetchAnalytics(days, false));
-
-  useEffect(() => {
-    const t = setTimeout(() => { void fetchAnalytics(days, true); }, 0);
-    return () => clearTimeout(t);
-  }, [days, fetchAnalytics]);
+  useRealtime("attendance_update", () => refresh());
+  useRealtime("leave_update", () => refresh());
+  useRealtime("realtime:connected", () => refresh());
 
   const onRefresh = () => {
-    setRefreshing(true);
-    fetchAnalytics(days, false);
+    void refresh();
   };
 
-  // Filter members based on search query and attention/on-track tabs
-  const filteredMembers = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    return members.filter((item) => {
-      const matchesSearch =
-        !query ||
-        item.employee_name?.toLowerCase().includes(query) ||
-        item.username?.toLowerCase().includes(query) ||
-        item.email?.toLowerCase().includes(query) ||
-        item.today_status?.toLowerCase().includes(query);
-
-      const isAttention =
-        item.under_target_days > 0 ||
-        item.shortfall_hours > 0 ||
-        item.pending_approval_items > 0 ||
-        item.today_status === "ABSENT";
-
-      if (!matchesSearch) return false;
-      if (focusFilter === "attention") return isAttention;
-      if (focusFilter === "ontrack") return !isAttention;
-      return true;
-    });
-  }, [members, searchQuery, focusFilter]);
+  const filteredMembers = members;
 
   const renderMemberItem = ({ item }: { item: AnalyticsMember }) => {
     const isAttention =
@@ -158,23 +136,8 @@ export default function TeamAnalyticsScreen() {
     );
   };
 
-  if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#2457D6" />
-      </View>
-    );
-  }
-
-  return (
-    <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
-      {/* Scrollable View for Headers and Summaries */}
-      <ScrollView
-        style={styles.scrollView}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
-        }
-      >
+  const listHeader = (
+    <View style={styles.scrollView}>
         {/* Days Period Selector */}
         <View style={styles.periodRow}>
           {["7", "30", "90"].map((p) => {
@@ -299,19 +262,32 @@ export default function TeamAnalyticsScreen() {
           />
         </View>
 
-        {/* Roster of members */}
-        <View style={styles.membersListContainer}>
-          {filteredMembers.length === 0 ? (
-            <Text style={styles.emptyText}>No matching employee records found.</Text>
-          ) : (
-            filteredMembers.map((item) => (
-              <View key={item.user_id} style={{ marginBottom: 12 }}>
-                {renderMemberItem({ item })}
-              </View>
-            ))
-          )}
-        </View>
-      </ScrollView>
+    </View>
+  );
+
+  return (
+    <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
+      <PaginatedFlatList
+        items={filteredMembers}
+        keyExtractor={(item: AnalyticsMember) => String(item.user_id)}
+        renderItem={({ item }: { item: AnalyticsMember }) => (
+          <View style={{ marginBottom: 12, paddingHorizontal: 16 }}>
+            {renderMemberItem({ item })}
+          </View>
+        )}
+        contentContainerStyle={{ paddingBottom: 32 }}
+        ListHeaderComponent={listHeader}
+        loading={loading && members.length === 0}
+        refreshing={refreshing}
+        loadingMore={loadingMore}
+        hasMore={hasMore}
+        error={error}
+        onRefresh={onRefresh}
+        onLoadMore={loadMore}
+        onRetry={retry}
+        emptyTitle="No matching employee records found"
+        emptySubtitle="Try adjusting your search or window filter."
+      />
 
       {/* --- DETAILED METRICS MODAL FOR A SINGLE MEMBER --- */}
       <Modal

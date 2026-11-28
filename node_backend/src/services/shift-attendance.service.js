@@ -589,7 +589,7 @@ export const shiftAttendanceService = {
       totalHours,
       earlyDepartureMinutes,
       isEarlyDeparture,
-      earlyDepartureRequiresApproval: Boolean(isEarlyDeparture && policyVersion?.early_departure_requires_approval),
+      earlyDepartureRequiresApproval: false,
       overtimeMinutes,
       isOvertime,
       overtimeRequiresApproval: Boolean(isOvertime && policyVersion?.overtime_requires_approval),

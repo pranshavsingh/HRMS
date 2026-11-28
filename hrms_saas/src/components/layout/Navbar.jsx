@@ -78,7 +78,7 @@ export default function Navbar({ onToggleSidebar }) {
   };
 
   return (
-    <div className="fixed top-0 left-0 lg:left-64 right-0 h-16 bg-white shadow-sm border-b flex items-center justify-between gap-2 px-3 sm:px-6 z-40">
+    <div className="fixed top-0 left-0 lg:left-[var(--hrms-sidebar-width)] right-0 h-[var(--hrms-navbar-height)] bg-white shadow-sm border-b flex items-center justify-between gap-2 px-3 sm:px-6 z-40">
 
       {/* 🔥 LEFT: MENU BUTTON + PAGE TITLE */}
       <div className="flex items-center gap-2 min-w-0 flex-1">

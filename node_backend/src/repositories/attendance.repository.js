@@ -376,7 +376,8 @@ export const attendanceRepository = {
       "a.tenant_id = ?",
       "a.user_id <> ?",
       "EXISTS (SELECT 1 FROM workforce_user_tenant wut WHERE wut.tenant_id = a.tenant_id AND wut.user_id = a.user_id AND wut.is_active = 1)",
-      "(aa.comment LIKE '%early departure%' OR aa.comment LIKE '%overtime%' OR (aa.type = 'in' AND a.punch_in_status = 'pending') OR (aa.type = 'out' AND a.punch_out_status = 'pending'))",
+      "(aa.comment IS NULL OR (aa.comment NOT LIKE '%early departure%' AND aa.comment NOT LIKE '%early_departure%'))",
+      "(aa.comment LIKE '%overtime%' OR (aa.type = 'in' AND a.punch_in_status = 'pending') OR (aa.type = 'out' AND a.punch_out_status = 'pending'))",
     ];
     const params = [tenantId, userId];
 

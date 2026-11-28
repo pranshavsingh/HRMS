@@ -21,7 +21,6 @@ import {
   Layers,
   CalendarDays,
   FileClock,
-  MapPin,
   Coffee,
 } from "lucide-react";
 import "./Shifts.css";
@@ -29,10 +28,7 @@ import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
 import { shiftsApi } from "../api/shifts.api";
 import { usePopup } from "../context/PopupContext";
-import { useAuth } from "../context/AuthContext";
 import { useRealtime } from "../context/RealtimeContext";
-import SiteManagement from "./SiteManagement";
-import { useSite } from "../context/SiteContext";
 import { getCompanyLocalDate } from "../utils/date";
 
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -85,11 +81,6 @@ function calculateClientTiming(start, end) {
 
 export default function Shifts() {
   const popup = usePopup();
-  const { role } = useAuth();
-  const { refreshSites } = useSite();
-
-  // BUG-SH11: Reactive role check from useAuth()
-  const canManageSites = ["admin", "superadmin"].includes(role);
 
   const [shifts, setShifts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -667,8 +658,6 @@ export default function Shifts() {
                 onClick={() => {
                   if (activeTab === "policies" || activeTab === "weekly-off") {
                     loadPolicies(activeTab);
-                  } else if (activeTab === "sites") {
-                    refreshSites();
                   } else if (activeTab === "versions") {
                     loadShifts(pagination.page);
                     if (versionTabShiftId) fetchVersionTabHistory(versionTabShiftId);
@@ -707,7 +696,6 @@ export default function Shifts() {
               ["policies", "Policies", Shield],
               ["weekly-off", "Weekly Off", Calendar],
               ["versions", "Version History", Layers],
-              ...(canManageSites ? [["sites", "Work Sites", MapPin]] : []),
             ].map(([key, label, TabIcon]) => (
               <button
                 key={key}
@@ -722,10 +710,7 @@ export default function Shifts() {
             ))}
           </nav>
 
-          {/* TAB 1: WORK SITES */}
-          {activeTab === "sites" && canManageSites && <SiteManagement embedded />}
-
-          {/* TAB 2: GENERAL SHIFTS LIST */}
+          {/* TAB 1: GENERAL SHIFTS LIST */}
           {activeTab === "shifts" && (
             <>
               <form className="shift-filters" onSubmit={handleSearchSubmit}>
@@ -1283,14 +1268,6 @@ export default function Shifts() {
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-gray-300">
-                    <label className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={companyPolicyForm.early_departure_requires_approval}
-                        onChange={(e) => setCompanyPolicyForm({ ...companyPolicyForm, early_departure_requires_approval: e.target.checked })}
-                      />
-                      Early departure requires approval
-                    </label>
                     <label className="flex items-center gap-2">
                       <input
                         type="checkbox"

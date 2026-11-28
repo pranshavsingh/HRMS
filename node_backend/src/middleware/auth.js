@@ -3,6 +3,7 @@ import { config } from "../config/env.js";
 import { db } from "../db/index.js";
 import { AppError } from "./errorHandler.js";
 import redisService from "../services/redis.service.js";
+import accountsRepository from "../repositories/accounts.repository.js";
 
 /**
  * Authentication Middleware - Validates the JWT and fetches the user (with Redis cache).
@@ -164,9 +165,25 @@ export async function authenticateRealtime(req, res, next) {
       if (!freshUser || !freshUser.is_active) {
         return next(new AppError("Account inactive or disabled", 401));
       }
+      const tenantRow = userPayload.tenantId
+        ? await db.get(
+            "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND tenant_id = ? AND is_active = 1 LIMIT 1",
+            [freshUser.id, Number(userPayload.tenantId)]
+          )
+        : await db.get(
+            "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 ORDER BY tenant_id ASC LIMIT 1",
+            [freshUser.id]
+          );
+      if (!tenantRow) {
+        return next(new AppError("No active tenant membership for this account", 403));
+      }
       req.user = {
         ...userPayload,
+        id: Number(freshUser.id),
+        username: freshUser.username,
+        email: freshUser.email,
         role: freshUser.is_superuser ? "superadmin" : freshUser.role,
+        tenantId: Number(tenantRow.tenant_id),
       };
       return next();
     }

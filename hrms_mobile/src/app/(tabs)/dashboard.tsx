@@ -263,6 +263,26 @@ export default function DashboardScreen() {
             <Text style={styles.heroTileValue}>{pendingPunch}</Text>
           </View>
         </View>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={{
+            marginTop: 12,
+            backgroundColor: "#2457D6",
+            borderRadius: 14,
+            paddingVertical: 12,
+            paddingHorizontal: 14,
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+          onPress={() => router.push("/(tabs)/team-attendance")}
+        >
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Users size={16} color="#FFFFFF" />
+            <Text style={{ color: "#FFFFFF", fontSize: 13, fontWeight: "700" }}>My Team Attendance</Text>
+          </View>
+          <ChevronRight size={16} color="#FFFFFF" />
+        </TouchableOpacity>
       </View>
     );
   };

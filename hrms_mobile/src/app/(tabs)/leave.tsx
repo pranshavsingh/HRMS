@@ -14,6 +14,8 @@ import {
 import { useAuth } from "../../context/AuthContext";
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
+import PaginatedFlatList from "../../components/pagination/PaginatedFlatList";
+import { useCursorPagination } from "../../hooks/useCursorPagination";
 import { 
   Calendar, 
   FileText, 
@@ -44,11 +46,8 @@ export default function LeaveScreen() {
   const now = new Date();
   const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
-  const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
 
-  const [leaves, setLeaves] = useState<LeaveRecord[]>([]);
   const [summary, setSummary] = useState({
     leave_allotted: 0,
     leaves_taken: 0,
@@ -76,14 +75,41 @@ export default function LeaveScreen() {
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth()); // 0-11
 
-  const fetchLeaveData = useCallback(async (showLoader = true) => {
+  const {
+    items: leaves,
+    loading,
+    refreshing,
+    loadingMore,
+    error: leavesError,
+    hasMore,
+    refresh: refreshLeaves,
+    loadMore: loadMoreLeaves,
+    retry: retryLeaves,
+  } = useCursorPagination<LeaveRecord>({
+    endpoint: "/leave/my/",
+    limit: 20,
+    itemsKey: "records",
+    enabled: Boolean(user && isAuthenticated),
+    getItemKey: (l) => l.id,
+    onData: (pageRes) => {
+      const apiSummary = pageRes.raw?.summary;
+      if (apiSummary) {
+        setSummary({
+          leave_allotted: Number(apiSummary.leave_allotted || 0),
+          leaves_taken: Number(apiSummary.leaves_taken || 0),
+          leave_balance: Number(apiSummary.leave_balance || 0),
+          pending: Number(apiSummary.pending_requests || 0),
+          management_concession: Number(apiSummary.management_concession || 0),
+          pending_leave_days: Number(apiSummary.pending_leave_days || 0),
+        });
+      }
+    },
+  });
+
+  const fetchLeaveTypes = useCallback(async () => {
     if (!user || !isAuthenticated) return;
-    if (showLoader) setLoading(true);
     try {
-      const [res, typesRes] = await Promise.all([
-        api.get("/leave/my/"),
-        api.get("/leave/policy/available-types/").catch(() => ({ data: { leave_types: [] } })),
-      ]);
+      const typesRes = await api.get("/leave/policy/available-types/").catch(() => ({ data: { leave_types: [] } }));
       const policyTypes = Array.isArray(typesRes.data?.leave_types) ? typesRes.data.leave_types : [];
       if (policyTypes.length > 0) {
         const mapped = policyTypes.map((t: any) => ({
@@ -97,39 +123,17 @@ export default function LeaveScreen() {
             : { ...prev, leave_type: mapped[0].leave_code }
         );
       }
-      const records = Array.isArray(res.data) 
-        ? res.data 
-        : Array.isArray(res.data?.records) 
-          ? res.data.records 
-          : [];
-      
-      const apiSummary = res.data?.summary || null;
-
-      // Map to matching object schema
-      setLeaves(records);
-      setSummary({
-        leave_allotted: Number(apiSummary?.leave_allotted || 0),
-        leaves_taken: Number(apiSummary?.leaves_taken || 0),
-        leave_balance: Number(apiSummary?.leave_balance || 0),
-        pending: Number(
-          apiSummary?.pending_requests || records.filter((item: any) => item.status === "pending").length
-        ),
-        management_concession: Number(apiSummary?.management_concession || 0),
-        pending_leave_days: Number(apiSummary?.pending_leave_days || 0),
-      });
-    } catch (err: any) {
-      console.error("Leave fetch error:", err);
-      Alert.alert("Sync Error", "Unable to load leave records.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+    } catch {}
   }, [user, isAuthenticated]);
 
-  useRealtime("leave_update", () => fetchLeaveData(false));
-  useRealtime("realtime:connected", () => fetchLeaveData(false));
+  const fetchLeaveData = useCallback(async () => {
+    await Promise.all([refreshLeaves(), fetchLeaveTypes()]);
+  }, [refreshLeaves, fetchLeaveTypes]);
+
+  useRealtime("leave_update", () => void refreshLeaves());
+  useRealtime("realtime:connected", () => void fetchLeaveData());
   useRealtime("leave_notice", (notice: any) => {
-    fetchLeaveData(false);
+    void refreshLeaves();
     if (notice?.status === "concession_granted") {
       Alert.alert("Leave Concession Granted", `${notice.additional_days} ${notice.leave_type} leave days granted. Updated balance: ${notice.updated_balance} days.`);
     } else if (notice?.status === "concession_reversed") {
@@ -140,14 +144,11 @@ export default function LeaveScreen() {
   });
 
   useEffect(() => {
-    const t = setTimeout(() => { void fetchLeaveData(true); }, 0);
+    const t = setTimeout(() => {
+      void fetchLeaveTypes();
+    }, 0);
     return () => clearTimeout(t);
-  }, [fetchLeaveData]);
-
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchLeaveData(false);
-  };
+  }, [fetchLeaveTypes]);
 
   const dayDifference = (from: string, to: string) => {
     if (!from || !to) return 0;
@@ -215,7 +216,7 @@ export default function LeaveScreen() {
         to_date: todayStr,
         reason: "",
       });
-      fetchLeaveData(false);
+      void fetchLeaveData();
     } catch (err: any) {
       console.error("Apply leave error", err);
       const detail = err.response?.data;
@@ -306,24 +307,9 @@ export default function LeaveScreen() {
     setCalendarTarget(null);
   };
 
-  if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#2457D6" />
-      </View>
-    );
-  }
-
-  return (
-    <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
-      <ScrollView
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" colors={["#2457D6"]} />
-        }
-      >
-        {/* Metric Overview Section */}
+  const headerContent = (
+    <View>
+      {/* Metric Overview Section */}
         <View style={styles.heroSection}>
           <View style={styles.heroPreRow}>
             <Calendar size={13} color="#2457D6" />
@@ -470,57 +456,71 @@ export default function LeaveScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Leaves Request History Ledger */}
-        <View style={styles.listContainer}>
-          <Text style={styles.listTitle}>Leave History</Text>
-          {leaves.length === 0 ? (
-            <Text style={styles.emptyText}>No leaves filed yet.</Text>
-          ) : (
-            leaves.map((item, idx) => {
-              const days = dayDifference(item.from, item.to);
-              const status = item.status?.toLowerCase() || "pending";
-              return (
-                <View key={`${item.id}-${idx}`} style={styles.historyRow}>
-                  <View style={styles.historyMain}>
-                    <Text style={styles.historyType}>
-                      {item.leave_type ? item.leave_type.toUpperCase() : "LEAVE"} - {days} Day{days === 1 ? "" : "s"}
-                    </Text>
-                    <Text style={styles.historyDates}>
-                      {formatCompanyDateRange(item.from || (item as any).from_date, item.to || (item as any).to_date)}
-                    </Text>
-                    <Text style={styles.historyReason} numberOfLines={2}>
-                      Reason: {item.reason}
-                    </Text>
-                  </View>
-                  <View
-                    style={[
-                      styles.statusBadge,
-                      status === "approved"
-                        ? styles.badgeApproved
-                        : status === "rejected"
-                        ? styles.badgeRejected
-                        : styles.badgePending,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.statusBadgeText,
-                        status === "approved"
-                          ? styles.textApproved
-                          : status === "rejected"
-                          ? styles.textRejected
-                          : styles.textPending,
-                      ]}
-                    >
-                      {status}
-                    </Text>
-                  </View>
-                </View>
-              );
-            })
-          )}
-        </View>
-      </ScrollView>
+        <Text style={[styles.listTitle, { marginBottom: 8 }]}>Leave History</Text>
+    </View>
+  );
+
+  return (
+    <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
+      <PaginatedFlatList
+        items={leaves}
+        loading={loading}
+        refreshing={refreshing}
+        loadingMore={loadingMore}
+        hasMore={hasMore}
+        error={leavesError}
+        onRefresh={refreshLeaves}
+        onLoadMore={loadMoreLeaves}
+        onRetry={retryLeaves}
+        keyboardShouldPersistTaps="handled"
+        keyExtractor={(item: LeaveRecord) => String(item.id)}
+        contentContainerStyle={styles.scrollContent}
+        ListHeaderComponent={headerContent}
+        emptyTitle="No leaves filed yet"
+        emptySubtitle="Your leave applications will appear here."
+        renderItem={({ item }: { item: LeaveRecord }) => {
+          const days = dayDifference(item.from, item.to);
+          const status = item.status?.toLowerCase() || "pending";
+          return (
+            <View style={[styles.historyRow, { backgroundColor: "#FFFFFF", paddingHorizontal: 14, borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: "#E5EAF2" }]}>
+              <View style={styles.historyMain}>
+                <Text style={styles.historyType}>
+                  {item.leave_type ? item.leave_type.toUpperCase() : "LEAVE"} - {days} Day{days === 1 ? "" : "s"}
+                </Text>
+                <Text style={styles.historyDates}>
+                  {formatCompanyDateRange(item.from || (item as any).from_date, item.to || (item as any).to_date)}
+                </Text>
+                <Text style={styles.historyReason} numberOfLines={2}>
+                  Reason: {item.reason}
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.statusBadge,
+                  status === "approved"
+                    ? styles.badgeApproved
+                    : status === "rejected"
+                    ? styles.badgeRejected
+                    : styles.badgePending,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.statusBadgeText,
+                    status === "approved"
+                      ? styles.textApproved
+                      : status === "rejected"
+                      ? styles.textRejected
+                      : styles.textPending,
+                  ]}
+                >
+                  {status}
+                </Text>
+              </View>
+            </View>
+          );
+        }}
+      />
 
       {/* --- CUSTOM MONTH CALENDAR PICKER MODAL --- */}
       <Modal

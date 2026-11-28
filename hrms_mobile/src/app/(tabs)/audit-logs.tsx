@@ -14,6 +14,8 @@ import {
 } from "react-native";
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
+import PaginatedFlatList from "../../components/pagination/PaginatedFlatList";
+import { useCursorPagination } from "../../hooks/useCursorPagination";
 import { 
   Shield, 
   Search, 
@@ -45,16 +47,11 @@ interface AuditRecord {
 }
 
 export default function AuditLogsScreen() {
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const [logs, setLogs] = useState<AuditRecord[]>([]);
   const [availableActions, setAvailableActions] = useState<string[]>([]);
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
 
   // Filters
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [actionType, setActionType] = useState("");
   const [severity] = useState("");
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
@@ -62,62 +59,42 @@ export default function AuditLogsScreen() {
   // Selected Log detail modal
   const [selectedLog, setSelectedLog] = useState<AuditRecord | null>(null);
 
-  const fetchLogs = useCallback(async (pageNumber = 1, showLoader = true) => {
-    if (showLoader) setLoading(true);
-    try {
-      const params: Record<string, any> = {
-        page: pageNumber,
-        sort: sortOrder,
-        search: search.trim() || undefined,
-        action: actionType || undefined,
-        severity: severity || undefined,
-      };
-
-      const res = await api.get("/auth/audit-logs/", { params });
-      const payload = res.data || {};
-      
-      setLogs(Array.isArray(payload.logs) ? payload.logs : []);
-      setAvailableActions(
-        Array.isArray(payload.availableActions)
-          ? payload.availableActions
-          : (Array.isArray(payload.actions) ? payload.actions : [])
-      );
-      
-      if (payload.pagination) {
-        setTotalPages(payload.pagination.pages || 1);
-        setPage(payload.pagination.page || 1);
-      }
-    } catch (err: any) {
-      console.error("Error loading audit logs", err);
-      if (showLoader) {
-        Alert.alert("Sync Error", "Unable to retrieve system compliance logs.");
-      }
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [search, actionType, severity, sortOrder]);
-
-  useRealtime("new_audit_log", () => fetchLogs(1, false));
-  useRealtime("realtime:connected", () => fetchLogs(1, false));
-
   useEffect(() => {
-    const t = setTimeout(() => { void fetchLogs(1, true); }, 0);
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
     return () => clearTimeout(t);
-  }, [fetchLogs]);
+  }, [search]);
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchLogs(1, false);
-  };
+  const {
+    items: logs,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    hasMore,
+    refresh,
+    loadMore,
+    retry,
+  } = useCursorPagination<AuditRecord>({
+    endpoint: "/auth/audit-logs/",
+    limit: 20,
+    itemsKey: "logs",
+    params: {
+      sort: sortOrder,
+      search: debouncedSearch || undefined,
+      action: actionType || undefined,
+      severity: severity || undefined,
+    },
+    getItemKey: (l) => l.id,
+    onData: (pageRes) => {
+      const actions = pageRes.raw?.availableActions || pageRes.raw?.actions;
+      if (Array.isArray(actions) && actions.length > 0) {
+        setAvailableActions(actions);
+      }
+    },
+  });
 
-  const handlePageChange = (direction: "prev" | "next") => {
-    if (direction === "prev" && page > 1) {
-      fetchLogs(page - 1, true);
-    } else if (direction === "next" && page < totalPages) {
-      fetchLogs(page + 1, true);
-    }
-  };
+  useRealtime("new_audit_log", () => void refresh());
+  useRealtime("realtime:connected", () => void refresh());
 
   // Helper to parse detail value diffs
   const renderDetailItem = (key: string, val: any) => {
@@ -251,7 +228,7 @@ export default function AuditLogsScreen() {
 
       {/* Security Advisory & Pagination Header (Replaces unauthorized native CSV export) */}
       <View style={styles.exportHeader}>
-        <Text style={styles.resultsCount}>Page {page} of {totalPages}</Text>
+        <Text style={styles.resultsCount}>{logs.length} loaded</Text>
         <View style={styles.securityBadge}>
           <ShieldAlert size={12} color="#68758A" style={{ marginRight: 5 }} />
           <Text style={styles.securityBadgeText}>Export via Web Portal</Text>
@@ -259,48 +236,22 @@ export default function AuditLogsScreen() {
       </View>
 
       {/* Roster of Logs */}
-      {loading ? (
-        <View style={styles.centeredSpinner}>
-          <ActivityIndicator size="large" color="#2457D6" />
-        </View>
-      ) : (
-        <FlatList
-          data={logs}
-          keyExtractor={(item) => String(item.id)}
-          renderItem={renderLogItem}
-          contentContainerStyle={styles.listContent}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
-          }
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Shield size={32} color="#8995A7" />
-              <Text style={styles.emptyText}>No matching compliance logs found.</Text>
-            </View>
-          }
-        />
-      )}
-
-      {/* Pagination controls */}
-      <View style={styles.paginationRow}>
-        <TouchableOpacity
-          style={[styles.pagBtn, page <= 1 && styles.pagBtnDisabled]}
-          disabled={page <= 1}
-          onPress={() => handlePageChange("prev")}
-        >
-          <ChevronLeft size={20} color="#FFFFFF" />
-        </TouchableOpacity>
-        <Text style={styles.pagText}>
-          Page {page} / {totalPages}
-        </Text>
-        <TouchableOpacity
-          style={[styles.pagBtn, page >= totalPages && styles.pagBtnDisabled]}
-          disabled={page >= totalPages}
-          onPress={() => handlePageChange("next")}
-        >
-          <ChevronRight size={20} color="#FFFFFF" />
-        </TouchableOpacity>
-      </View>
+      <PaginatedFlatList
+        items={logs}
+        loading={loading}
+        refreshing={refreshing}
+        loadingMore={loadingMore}
+        hasMore={hasMore}
+        error={error}
+        onRefresh={refresh}
+        onLoadMore={loadMore}
+        onRetry={retry}
+        keyExtractor={(item: AuditRecord) => String(item.id)}
+        renderItem={renderLogItem}
+        contentContainerStyle={styles.listContent}
+        emptyTitle="No matching compliance logs found"
+        emptySubtitle="Try adjusting your search or action filter."
+      />
 
       {/* --- AUDIT LOGS DETAILS DIFF MODAL --- */}
       <Modal
