@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import Layout from "../../components/layout/Layout";
 import Loader from "../../components/common/Loader";
+import Pagination from "../../components/common/Pagination";
+import { usePagination } from "../../hooks/usePagination";
 import API from "../../api/axios";
 import { useRealtime } from "../../context/RealtimeContext";
 
@@ -72,6 +74,9 @@ export default function ManagerDashboard() {
 
   useRealtime("attendance_update", () => loadDashboard(false));
   useRealtime("leave_update", () => loadDashboard(false));
+
+  const ownDailyWork = data?.own_summary?.daily_work || [];
+  const timelinePagination = usePagination(ownDailyWork);
   useRealtime("employee_update", () => loadDashboard(false));
 
   if (loading) {
@@ -200,7 +205,7 @@ export default function ManagerDashboard() {
                     </td>
                   </tr>
                 ) : (
-                  own.daily_work.map((item, index) => (
+                  timelinePagination.paginatedItems.map((item, index) => (
                     <tr
                       key={`${item.date}-${index}`}
                       className="border-t border-slate-100 transition hover:bg-slate-50/80"
@@ -229,6 +234,15 @@ export default function ManagerDashboard() {
               </tbody>
             </table>
           </div>
+          <Pagination
+            page={timelinePagination.page}
+            setPage={timelinePagination.setPage}
+            pageSize={timelinePagination.pageSize}
+            changePageSize={timelinePagination.changePageSize}
+            total={timelinePagination.total}
+            pageCount={timelinePagination.pageCount}
+            itemLabel="records"
+          />
         </section>
 
       </div>

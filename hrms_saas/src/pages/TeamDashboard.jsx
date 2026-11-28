@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import Pagination from "../components/common/Pagination";
 import API from "../api/axios";
 
 const emptyTeamDashboard = {
@@ -27,11 +28,15 @@ export default function TeamDashboard() {
   const [data, setData] = useState(emptyTeamDashboard);
   const [loading, setLoading] = useState(true);
   const [warning, setWarning] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
 
   useEffect(() => {
     const loadTeamDashboard = async () => {
       try {
-        const res = await API.get("/attendance/manager-dashboard/");
+        const res = await API.get("/attendance/manager-dashboard/", {
+          params: { page, limit: pageSize },
+        });
         setData(mergeDashboard(res.data));
         setWarning("");
       } catch (err) {
@@ -48,7 +53,7 @@ export default function TeamDashboard() {
     };
 
     loadTeamDashboard();
-  }, []);
+  }, [page, pageSize]);
 
   if (loading) {
     return (
@@ -211,6 +216,18 @@ export default function TeamDashboard() {
               </tbody>
             </table>
           </div>
+          <Pagination
+            page={page}
+            setPage={setPage}
+            pageSize={pageSize}
+            changePageSize={(val) => {
+              setPageSize(Number(val));
+              setPage(1);
+            }}
+            total={Number(team.recent_team_pagination?.total ?? team.recent_team_attendance.length)}
+            pageCount={Number(team.recent_team_pagination?.totalPages ?? 1)}
+            itemLabel="records"
+          />
         </section>
       </div>
     </Layout>

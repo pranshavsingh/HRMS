@@ -8,6 +8,7 @@
 // ============================================================================
 
 import { db } from "../db/index.js";
+import { parseCursorPagination, formatCursorResponse } from "../utils/pagination/index.js";
 import { config } from "../config/env.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { formatDateToYMD } from "./shift-validation.service.js";
@@ -691,7 +692,7 @@ export const rosterService = {
    * Employee self-service schedule retrieval (`my-roster`).
    * Returns current assigned shift, today's timings, and upcoming published roster schedule.
    */
-  async getMyRoster(tenantId, userId, { start_date = null, end_date = null } = {}) {
+  async getMyRoster(tenantId, userId, { start_date = null, end_date = null, cursor = null, cursor_mode = null, limit = null } = {}) {
     const localNow = new Date();
     const today = `${localNow.getFullYear()}-${String(localNow.getMonth() + 1).padStart(2, "0")}-${String(localNow.getDate()).padStart(2, "0")}`;
     const formattedStart = start_date ? formatDateToYMD(start_date) : today;
@@ -971,6 +972,30 @@ export const rosterService = {
 
     // 2. Fetch today's current shift
     const todayEntry = schedule.find(e => e.work_date === today) || null;
+
+    const cursorPag = parseCursorPagination({ cursor, cursor_mode, limit }, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `my_roster:${userId}`,
+    });
+    if (cursorPag.useCursor) {
+      const afterDate = cursorPag.cursorValues ? String(cursorPag.cursorValues[0]) : null;
+      const filtered = afterDate ? schedule.filter((e) => e.work_date > afterDate) : schedule;
+      const sliced = filtered.slice(0, cursorPag.fetchLimit);
+      const resp = formatCursorResponse(sliced, {
+        limit: cursorPag.limit,
+        scope: `my_roster:${userId}`,
+        extractCursorValues: (e) => [e.work_date],
+      });
+      return {
+        today,
+        current_shift: todayEntry && !todayEntry.is_off_day ? todayEntry : null,
+        today_entry: todayEntry,
+        schedule: resp.data,
+        data: resp.data,
+        pagination: resp.pagination,
+      };
+    }
 
     return {
       today,

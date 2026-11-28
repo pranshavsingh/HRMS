@@ -14,6 +14,8 @@ import * as DocumentPicker from "expo-document-picker";
 import api from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import { useRealtime } from "../context/RealtimeContext";
+import { useCursorPagination } from "../hooks/useCursorPagination";
+import PaginatedFlatList from "../components/pagination/PaginatedFlatList";
 import { FileUp, Upload, CheckCircle2, FileText, Search, ChevronDown, User, X } from "lucide-react-native";
 
 interface Employee {
@@ -38,8 +40,6 @@ const documentOptions = [
 export default function DocumentUploadScreen() {
   const router = useRouter();
   const { user } = useAuth();
-  const [employees, setEmployees] = useState<Employee[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   const [selectedEmpId, setSelectedEmpId] = useState<string>("");
@@ -55,47 +55,30 @@ export default function DocumentUploadScreen() {
   const [showEmpSelector, setShowEmpSelector] = useState<boolean>(false);
   const [showDocSelector, setShowDocSelector] = useState<boolean>(false);
 
-  const fetchEmployees = async () => {
-    try {
-      const res = await api.get("/auth/employees/", {
-        params: { limit: 100 },
-      });
-      const data = Array.isArray(res.data)
-        ? res.data
-        : Array.isArray(res.data?.data)
-        ? res.data.data
-        : Array.isArray(res.data?.records)
-        ? res.data.records
-        : [];
-      setEmployees(data);
-    } catch (err) {
-      console.error("Failed to load employees:", err);
-      Alert.alert("Error", "Unable to load employees list");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const {
+    items: employees,
+    loading,
+    refreshing,
+    loadingMore,
+    hasMore,
+    error,
+    refresh,
+    loadMore,
+    retry,
+  } = useCursorPagination<Employee>({
+    endpoint: "/auth/employees/",
+    params: useMemo(() => ({ search: empSearchQuery.trim() || undefined }), [empSearchQuery]),
+    limit: 25,
+    getItemKey: (e) => e.id,
+  });
 
-  useEffect(() => {
-    const t = setTimeout(() => { void fetchEmployees(); }, 0);
-    return () => clearTimeout(t);
-  }, []);
-
-  useRealtime("document_update", () => fetchEmployees());
-  useRealtime("employee_update", () => fetchEmployees());
-  useRealtime("realtime:connected", () => fetchEmployees());
+  useRealtime("document_update", () => refresh());
+  useRealtime("employee_update", () => refresh());
+  useRealtime("realtime:connected", () => refresh());
 
   const filteredEmployees = useMemo(() => {
-    const q = empSearchQuery.trim().toLowerCase();
-    const others = employees.filter((e) => String(e.id) !== String(user?.id));
-    if (!q) return others;
-    return others.filter((e) => {
-      const name = `${e.first_name || ""} ${e.last_name || ""}`.toLowerCase();
-      const uname = (e.username || "").toLowerCase();
-      const code = (e.employee_code || "").toLowerCase();
-      return name.includes(q) || uname.includes(q) || code.includes(q);
-    });
-  }, [employees, empSearchQuery, user?.id]);
+    return employees.filter((e) => String(e.id) !== String(user?.id));
+  }, [employees, user?.id]);
 
   const handlePickDocument = async () => {
     try {
@@ -218,16 +201,25 @@ export default function DocumentUploadScreen() {
                 )}
               </View>
 
-              <ScrollView nestedScrollEnabled style={styles.dropdownScroll}>
-                {filteredEmployees.length === 0 ? (
-                  <Text style={styles.emptySearchText}>No matching staff members found.</Text>
-                ) : (
-                  filteredEmployees.map((emp) => {
+              <View style={styles.dropdownScroll}>
+                <PaginatedFlatList
+                  items={filteredEmployees}
+                  keyExtractor={(emp: Employee) => String(emp.id)}
+                  nestedScrollEnabled
+                  loading={loading && employees.length === 0}
+                  refreshing={refreshing}
+                  loadingMore={loadingMore}
+                  hasMore={hasMore}
+                  error={error}
+                  onRefresh={refresh}
+                  onLoadMore={loadMore}
+                  onRetry={retry}
+                  emptyTitle="No matching staff members found"
+                  renderItem={({ item: emp }: { item: Employee }) => {
                     const fullName = `${emp.first_name || ""} ${emp.last_name || ""}`.trim();
                     const isSelected = selectedEmpId === String(emp.id);
                     return (
                       <TouchableOpacity
-                        key={emp.id}
                         style={[styles.dropdownItem, isSelected && styles.dropdownItemActive]}
                         onPress={() => {
                           setSelectedEmpId(String(emp.id));
@@ -244,9 +236,9 @@ export default function DocumentUploadScreen() {
                         </View>
                       </TouchableOpacity>
                     );
-                  })
-                )}
-              </ScrollView>
+                  }}
+                />
+              </View>
             </View>
           )}
         </View>

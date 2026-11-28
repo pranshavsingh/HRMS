@@ -275,11 +275,6 @@ export default function Leave() {
   const handleSubmit = async (e, confirmedInsufficient = false) => {
     e?.preventDefault?.();
 
-    if (hasOverlap) {
-      showPopup("Selected dates overlap with an already approved leave request", "warning");
-      return;
-    }
-
     if (!form.reason.trim()) {
       showPopup("Please enter a reason for leave", "warning");
       return;

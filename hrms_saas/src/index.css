@@ -1,1 +1,10 @@
 @import "tailwindcss";
+
+:root {
+  --hrms-navbar-height: 4rem;
+  --hrms-sidebar-width: 16rem;
+}
+
+html {
+  scroll-padding-top: calc(var(--hrms-navbar-height) + 1rem);
+}

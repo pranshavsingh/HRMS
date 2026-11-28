@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import Pagination from "../components/common/Pagination";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
@@ -48,11 +49,15 @@ const getFileUrl = (path) => {
 export default function Documents() {
   const { showPopup } = usePopup();
   const [documents, setDocuments] = useState([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [totalDocs, setTotalDocs] = useState(0);
+  const [pageCount, setPageCount] = useState(1);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [downloadingId, setDownloadingId] = useState(null);
 
-  const fetchDocuments = useCallback(async (showLoader = true) => {
+  const fetchDocuments = useCallback(async (showLoader = true, targetPage = page, targetLimit = pageSize) => {
     if (showLoader) {
       setLoading(true);
     } else {
@@ -60,8 +65,19 @@ export default function Documents() {
     }
 
     try {
-      const res = await API.get("/auth/documents/my/");
-      setDocuments(Array.isArray(res.data) ? res.data : []);
+      const res = await API.get("/auth/documents/my/", {
+        params: { page: targetPage, limit: targetLimit },
+      });
+      const list = Array.isArray(res.data) ? res.data : (res.data?.records || res.data?.data || []);
+      const pag = res.data?.pagination || res.data || {};
+      const nextTotal = Number(pag.total ?? list.length);
+      const nextPages = Number(pag.totalPages ?? Math.max(1, Math.ceil(nextTotal / targetLimit)));
+      setDocuments(list);
+      setTotalDocs(nextTotal);
+      setPageCount(nextPages);
+      if (targetPage > nextPages && nextPages >= 1) {
+        setPage(nextPages);
+      }
     } catch (err) {
       console.error("Documents fetch error:", err.response?.data || err.message);
       showPopup("Unable to load your documents", "error");
@@ -69,7 +85,7 @@ export default function Documents() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [showPopup]);
+  }, [showPopup, page, pageSize]);
 
   useEffect(() => {
     fetchDocuments();
@@ -278,6 +294,18 @@ export default function Documents() {
               })}
             </div>
           )}
+          <Pagination
+            page={page}
+            setPage={setPage}
+            pageSize={pageSize}
+            changePageSize={(val) => {
+              setPageSize(Number(val));
+              setPage(1);
+            }}
+            total={totalDocs}
+            pageCount={pageCount}
+            itemLabel="documents"
+          />
         </section>
       </div>
     </Layout>

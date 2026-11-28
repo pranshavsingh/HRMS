@@ -7,9 +7,12 @@ import { AppError } from "../middleware/errorHandler.js";
  * Log punch-in event.
  */
 export const punchIn = asyncHandler(async (req, res) => {
-  const { latitude, longitude, photo_public_id, photo_url, accuracy } = req.body;
+  const { latitude, longitude, photo_public_id, photo_url, accuracy, location_timestamp, location_provider } = req.body;
   const directPath = photo_public_id ? `cloudinary://${photo_public_id}` : (photo_url || null);
-  const result = await attendanceService.punchIn(req.user.id, latitude, longitude, req.file, req.user, directPath, accuracy);
+  const result = await attendanceService.punchIn(req.user.id, latitude, longitude, req.file, req.user, directPath, accuracy, {
+    locationTimestamp: location_timestamp,
+    locationProvider: location_provider,
+  });
   res.json(result);
 });
 
@@ -17,9 +20,12 @@ export const punchIn = asyncHandler(async (req, res) => {
  * Log punch-out event.
  */
 export const punchOut = asyncHandler(async (req, res) => {
-  const { latitude, longitude, photo_public_id, photo_url, accuracy } = req.body;
+  const { latitude, longitude, photo_public_id, photo_url, accuracy, location_timestamp, location_provider } = req.body;
   const directPath = photo_public_id ? `cloudinary://${photo_public_id}` : (photo_url || null);
-  const result = await attendanceService.punchOut(req.user.id, latitude, longitude, req.file, req.user, directPath, accuracy);
+  const result = await attendanceService.punchOut(req.user.id, latitude, longitude, req.file, req.user, directPath, accuracy, {
+    locationTimestamp: location_timestamp,
+    locationProvider: location_provider,
+  });
   res.json(result);
 });
 
@@ -81,7 +87,7 @@ export const dashboard = asyncHandler(async (req, res) => {
  */
 export const hrDashboard = asyncHandler(async (req, res) => {
   const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
-  const result = await attendanceService.hrDashboard(req.user.id, req.user.role, tenantId);
+  const result = await attendanceService.hrDashboard(req.user.id, req.user.role, tenantId, req.query);
   res.json(result);
 });
 
@@ -90,7 +96,7 @@ export const hrDashboard = asyncHandler(async (req, res) => {
  */
 export const managerDashboard = asyncHandler(async (req, res) => {
   const tenantId = await resolveTenantId({ user: req.user, query: req.query, headers: req.headers });
-  const result = await attendanceService.managerDashboard(req.user.id, req.user.role, tenantId);
+  const result = await attendanceService.managerDashboard(req.user.id, req.user.role, tenantId, req.query);
   res.json(result);
 });
 
@@ -104,7 +110,8 @@ export const teamAnalytics = asyncHandler(async (req, res) => {
     req.query.days,
     req.user.role,
     tenantId,
-    req.query.site_id || null
+    req.query.site_id || null,
+    req.query
   );
   res.json(result);
 });
@@ -131,7 +138,8 @@ export const teamAttendance = asyncHandler(async (req, res) => {
     limit,
     team,
     tenantId,
-    req.query.site_id || null
+    req.query.site_id || null,
+    req.query
   );
   res.json(result);
 });

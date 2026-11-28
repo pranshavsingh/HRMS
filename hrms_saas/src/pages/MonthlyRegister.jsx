@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
+import LocationDisplay from "../components/common/LocationDisplay";
 import API from "../api/axios";
 import { usePopup } from "../context/PopupContext";
 import { useRealtime } from "../context/RealtimeContext";
@@ -450,6 +451,12 @@ export default function MonthlyRegister() {
                       <span>No Photo</span>
                     </div>
                   )}
+                  <div className="mt-2">
+                    <LocationDisplay
+                      latitude={selectedCell.punch_in_lat}
+                      longitude={selectedCell.punch_in_lng}
+                    />
+                  </div>
                 </div>
 
                 <div>
@@ -466,6 +473,12 @@ export default function MonthlyRegister() {
                       <span>No Photo</span>
                     </div>
                   )}
+                  <div className="mt-2">
+                    <LocationDisplay
+                      latitude={selectedCell.punch_out_lat}
+                      longitude={selectedCell.punch_out_lng}
+                    />
+                  </div>
                 </div>
               </div>
 

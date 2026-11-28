@@ -13,6 +13,9 @@ import {
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
 import EmployeeRegisterModal from "../../components/EmployeeRegisterModal";
+import LocationDisplay from "../../components/LocationDisplay";
+import PaginatedFlatList from "../../components/pagination/PaginatedFlatList";
+import { useCursorPagination } from "../../hooks/useCursorPagination";
 import {
   Contact,
   Search,
@@ -37,58 +40,34 @@ interface Employee {
 }
 
 export default function EmployeesScreen() {
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [registerTarget, setRegisterTarget] = useState<{ id: number; name: string; username: string } | null>(null);
 
-  const fetchEmployeesList = useCallback(async (showLoader = true) => {
-    if (showLoader) setLoading(true);
-    try {
-      const empRes = await api.get("/auth/employees/");
-      const empList = Array.isArray(empRes.data)
-        ? empRes.data
-        : Array.isArray(empRes.data?.data)
-        ? empRes.data.data
-        : Array.isArray(empRes.data?.records)
-        ? empRes.data.records
-        : [];
-      setEmployees(empList);
-    } catch (err: any) {
-      console.error("Error loading staff roster directory", err);
-      Alert.alert("Sync Error", "Unable to load employees database.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useRealtime("employee_update", () => fetchEmployeesList(false));
-  useRealtime("realtime:connected", () => fetchEmployeesList(false));
-
   useEffect(() => {
-    const t = setTimeout(() => { void fetchEmployeesList(true); }, 0);
+    const t = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 300);
     return () => clearTimeout(t);
-  }, [fetchEmployeesList]);
+  }, [searchQuery]);
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchEmployeesList(false);
-  };
+  const {
+    items: employees,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    hasMore,
+    refresh,
+    loadMore,
+    retry,
+  } = useCursorPagination<Employee>({
+    endpoint: "/auth/employees/",
+    limit: 20,
+    params: debouncedSearch ? { search: debouncedSearch } : {},
+    getItemKey: (e) => e.id,
+  });
 
-  const filteredEmployees = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return employees;
-    return employees.filter(
-      (emp) =>
-        emp.username?.toLowerCase().includes(query) ||
-        emp.first_name?.toLowerCase().includes(query) ||
-        emp.last_name?.toLowerCase().includes(query) ||
-        emp.email?.toLowerCase().includes(query) ||
-        emp.designation?.toLowerCase().includes(query)
-    );
-  }, [employees, searchQuery]);
+  useRealtime("employee_update", () => void refresh());
+  useRealtime("realtime:connected", () => void refresh());
 
   const renderRosterItem = ({ item }: { item: Employee }) => {
     const hasLocation =
@@ -122,10 +101,13 @@ export default function EmployeesScreen() {
 
           {hasLocation ? (
             <View style={styles.telemetryBox}>
-              <MapPin size={12} color="#2457D6" style={{ marginRight: 6 }} />
-              <Text style={styles.telemetryText}>
-                Perimeter: {Number(item.latitude).toFixed(4)}, {Number(item.longitude).toFixed(4)} ({item.allowed_radius || 100}m zone)
-              </Text>
+              <LocationDisplay
+                latitude={item.latitude}
+                longitude={item.longitude}
+                prefix="Perimeter:"
+                suffix={`(${item.allowed_radius || 100}m zone)`}
+                compact
+              />
             </View>
           ) : null}
         </View>
@@ -172,20 +154,21 @@ export default function EmployeesScreen() {
         </View>
       </View>
 
-      <FlatList
-        data={filteredEmployees}
-        keyExtractor={(item) => String(item.id)}
+      <PaginatedFlatList
+        items={employees}
+        loading={loading}
+        refreshing={refreshing}
+        loadingMore={loadingMore}
+        hasMore={hasMore}
+        error={error}
+        onRefresh={refresh}
+        onLoadMore={loadMore}
+        onRetry={retry}
+        keyExtractor={(item: Employee) => String(item.id)}
         renderItem={renderRosterItem}
         contentContainerStyle={styles.listContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
-        }
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Contact size={32} color="#8995A7" />
-            <Text style={styles.emptyText}>No employee records found in payroll registry.</Text>
-          </View>
-        }
+        emptyTitle="No employees found"
+        emptySubtitle="No employee records matched your search."
       />
 
       <EmployeeRegisterModal

@@ -3,8 +3,11 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Modal,
   RefreshControl,
+  ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -20,8 +23,11 @@ import {
   Clock,
   FileText,
   Megaphone,
+  Settings,
   ShieldAlert,
+  Smartphone,
   Trash2,
+  X,
 } from "lucide-react-native";
 import api from "../services/api";
 import { useAuth } from "../context/AuthContext";
@@ -63,10 +69,64 @@ function formatRelativeTime(value: string) {
 export default function NotificationsScreen() {
   const router = useRouter();
   const { user } = useAuth();
-  const { unreadCount, markAsRead, markAllAsRead, deleteNotification, clearAllNotifications, resolveMobileRoute } = useNotifications();
+  const {
+    unreadCount,
+    preferences,
+    devices,
+    pushPermission,
+    pushError,
+    fetchPreferences,
+    updatePreferences,
+    fetchDevices,
+    removeDevice,
+    refreshPushStatus,
+    requestMobilePushPermission,
+    unregisterMobilePush,
+    markAsRead,
+    markAllAsRead,
+    deleteNotification,
+    clearAllNotifications,
+    resolveMobileRoute,
+  } = useNotifications();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const openPushSettings = async () => {
+    setSettingsOpen(true);
+    await Promise.all([fetchPreferences(), fetchDevices(), refreshPushStatus()]);
+  };
+
+  const handleToggleMobilePush = async (nextValue: boolean) => {
+    if (nextValue) {
+      const granted = await requestMobilePushPermission();
+      if (!granted) {
+        Alert.alert(
+          "Permission Required",
+          "Notification permission is blocked or not granted. Please enable notifications for HRMS in device settings."
+        );
+      }
+    } else {
+      await unregisterMobilePush();
+      await fetchDevices();
+    }
+    await updatePreferences({
+      mobile_push_enabled: nextValue,
+    });
+  };
+
+  const handleToggleCategory = async (category: string, nextValue: boolean) => {
+    const current = Array.isArray(preferences?.disabled_categories) ? preferences.disabled_categories : [];
+    const nextDisabled = nextValue
+      ? current.filter((c) => c !== category)
+      : Array.from(new Set([...current, category]));
+    await updatePreferences({
+      web_push_enabled: preferences?.web_push_enabled ?? true,
+      mobile_push_enabled: preferences?.mobile_push_enabled ?? true,
+      disabled_categories: nextDisabled,
+    });
+  };
 
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [page, setPage] = useState(1);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -75,22 +135,31 @@ export default function NotificationsScreen() {
   const [error, setError] = useState("");
 
   const fetchList = useCallback(
-    async (targetPage = 1, append = false, showLoader = true) => {
+    async (cursorToken: string | null = null, append = false, showLoader = true) => {
       if (showLoader && !append) setLoading(true);
       setError("");
       try {
         const res = await api.get("/notifications", {
           params: {
-            page: targetPage,
+            cursor_mode: "true",
             limit: 20,
+            ...(cursorToken ? { cursor: cursorToken } : {}),
             ...(unreadOnly ? { unreadOnly: true } : {}),
           },
         });
-        const list: AppNotification[] = Array.isArray(res.data?.records) ? res.data.records : [];
+        const list: AppNotification[] = Array.isArray(res.data?.records)
+          ? res.data.records
+          : Array.isArray(res.data?.data)
+          ? res.data.data
+          : [];
         const pag = res.data?.pagination || {};
-        setHasMore(Boolean(pag.hasNextPage));
-        setPage(targetPage);
-        setNotifications((prev) => (append ? [...prev, ...list] : list));
+        setNextCursor(pag.nextCursor || null);
+        setHasMore(Boolean(pag.hasMore ?? pag.hasNextPage));
+        setNotifications((prev) => {
+          if (!append) return list;
+          const seen = new Set(prev.map((n) => n.id));
+          return [...prev, ...list.filter((n) => !seen.has(n.id))];
+        });
       } catch (err: any) {
         setError(err?.response?.data?.error || "Unable to load notifications.");
       } finally {
@@ -103,11 +172,14 @@ export default function NotificationsScreen() {
   );
 
   useEffect(() => {
-    void fetchList(1, false, true);
+    const t = setTimeout(() => {
+      void fetchList(null, false, true);
+    }, 0);
+    return () => clearTimeout(t);
   }, [fetchList]);
 
   const refreshSilent = useCallback(() => {
-    void fetchList(1, false, false);
+    void fetchList(null, false, false);
   }, [fetchList]);
 
   useRealtime("notification:new", refreshSilent);
@@ -115,9 +187,9 @@ export default function NotificationsScreen() {
   useRealtime("notification:read-all", refreshSilent);
 
   const handleLoadMore = () => {
-    if (loadingMore || !hasMore || loading) return;
+    if (loadingMore || !hasMore || loading || !nextCursor) return;
     setLoadingMore(true);
-    void fetchList(page + 1, true, false);
+    void fetchList(nextCursor, true, false);
   };
 
   const handlePressItem = async (item: AppNotification) => {
@@ -142,7 +214,7 @@ export default function NotificationsScreen() {
   const handleDeleteOne = async (id: number) => {
     setNotifications((prev) => prev.filter((n) => n.id !== id));
     await deleteNotification(id).catch(() => {
-      void fetchList(1, false, false);
+      void fetchList(null, false, false);
     });
   };
 
@@ -158,7 +230,7 @@ export default function NotificationsScreen() {
           onPress: async () => {
             setNotifications([]);
             await clearAllNotifications().catch(() => {
-              void fetchList(1, false, false);
+              void fetchList(null, false, false);
             });
           },
         },
@@ -188,6 +260,10 @@ export default function NotificationsScreen() {
         </View>
 
         <View style={styles.topActions}>
+          <TouchableOpacity style={styles.settingsBtn} onPress={() => void openPushSettings()}>
+            <Settings size={14} color="#334155" style={{ marginRight: 4 }} />
+            <Text style={styles.settingsText}>Push</Text>
+          </TouchableOpacity>
           {unreadCount > 0 && (
             <TouchableOpacity style={styles.markAllBtn} onPress={handleMarkAll}>
               <CheckCheck size={14} color="#2457D6" style={{ marginRight: 4 }} />
@@ -210,7 +286,7 @@ export default function NotificationsScreen() {
       ) : error ? (
         <View style={styles.centerBox}>
           <Text style={styles.errorText}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => void fetchList(1, false, true)}>
+          <TouchableOpacity style={styles.retryBtn} onPress={() => void fetchList(null, false, true)}>
             <Text style={styles.retryText}>Retry</Text>
           </TouchableOpacity>
         </View>
@@ -226,7 +302,7 @@ export default function NotificationsScreen() {
               refreshing={refreshing}
               onRefresh={() => {
                 setRefreshing(true);
-                void fetchList(1, false, false);
+                void fetchList(null, false, false);
               }}
               tintColor="#2457D6"
             />
@@ -283,6 +359,90 @@ export default function NotificationsScreen() {
           }
         />
       )}
+      <Modal visible={settingsOpen} animationType="slide" transparent onRequestClose={() => setSettingsOpen(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Push &amp; Devices</Text>
+              <TouchableOpacity onPress={() => setSettingsOpen(false)} style={styles.modalCloseBtn}>
+                <X size={18} color="#475569" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <View style={styles.settingRow}>
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={styles.settingLabel}>Mobile Push Notifications</Text>
+                  <Text style={styles.settingSub}>OS permission: {pushPermission}</Text>
+                  {pushError ? (
+                    <Text style={{ fontSize: 12, color: "#BE123C", marginTop: 4 }}>{pushError}</Text>
+                  ) : null}
+                  {pushPermission !== "granted" ? (
+                    <TouchableOpacity
+                      onPress={() => void requestMobilePushPermission()}
+                      style={{
+                        marginTop: 8,
+                        alignSelf: "flex-start",
+                        backgroundColor: "#2457D6",
+                        paddingHorizontal: 10,
+                        paddingVertical: 6,
+                        borderRadius: 8,
+                      }}
+                    >
+                      <Text style={{ color: "#FFFFFF", fontSize: 12, fontWeight: "600" }}>
+                        Enable &amp; Register This Device
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+                <Switch
+                  value={preferences ? preferences.mobile_push_enabled !== false : true}
+                  onValueChange={(v) => void handleToggleMobilePush(v)}
+                  trackColor={{ false: "#CBD5E1", true: "#2457D6" }}
+                />
+              </View>
+
+              <Text style={styles.sectionHeader}>Categories</Text>
+              {["LEAVE", "ATTENDANCE", "ROSTER", "DOCUMENT", "HOLIDAY", "ANNOUNCEMENT", "SYSTEM"].map((cat) => {
+                const enabled = !(preferences?.disabled_categories || []).includes(cat);
+                return (
+                  <View key={cat} style={styles.settingRow}>
+                    <Text style={styles.settingLabel}>{cat}</Text>
+                    <Switch
+                      value={enabled}
+                      onValueChange={(v) => void handleToggleCategory(cat, v)}
+                      trackColor={{ false: "#CBD5E1", true: "#2457D6" }}
+                    />
+                  </View>
+                );
+              })}
+
+              <Text style={styles.sectionHeader}>Registered Devices ({devices.length})</Text>
+              {devices.length === 0 ? (
+                <Text style={styles.emptyDeviceText}>No active push devices registered yet.</Text>
+              ) : (
+                devices.map((d) => (
+                  <View key={d.id} style={styles.deviceRow}>
+                    <View style={{ flexDirection: "row", alignItems: "center", flex: 1, gap: 8 }}>
+                      <Smartphone size={16} color="#475569" />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.deviceName} numberOfLines={1}>
+                          {d.device_name || `${d.platform} (${d.provider})`}
+                        </Text>
+                        <Text style={styles.deviceMeta}>
+                          {d.platform} · {d.provider}
+                        </Text>
+                      </View>
+                    </View>
+                    <TouchableOpacity onPress={() => void removeDevice(d.id)} style={styles.deviceRemoveBtn}>
+                      <Trash2 size={14} color="#BE123C" />
+                    </TouchableOpacity>
+                  </View>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -490,5 +650,98 @@ const styles = StyleSheet.create({
     color: "#8995A7",
     textAlign: "center",
     marginTop: 6,
+  },
+  settingsBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F1F5F9",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginRight: 6,
+  },
+  settingsText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#334155",
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
+    justifyContent: "flex-end",
+  },
+  modalSheet: {
+    backgroundColor: "#FFFFFF",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 28,
+    maxHeight: "82%",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#152238",
+  },
+  modalCloseBtn: {
+    padding: 4,
+  },
+  sectionHeader: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#64748B",
+    textTransform: "uppercase",
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  settingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F1F5F9",
+  },
+  settingLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#1E293B",
+  },
+  settingSub: {
+    fontSize: 12,
+    color: "#64748B",
+    marginTop: 2,
+  },
+  deviceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F1F5F9",
+  },
+  deviceName: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#1E293B",
+  },
+  deviceMeta: {
+    fontSize: 11,
+    color: "#64748B",
+  },
+  deviceRemoveBtn: {
+    padding: 6,
+  },
+  emptyDeviceText: {
+    fontSize: 13,
+    color: "#64748B",
+    paddingVertical: 8,
   },
 });

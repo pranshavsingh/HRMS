@@ -51,6 +51,8 @@ function InitialLayout() {
       <Stack.Screen name="documents" options={{ presentation: "modal", headerShown: true, title: "Upload Documents", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
       <Stack.Screen name="my-documents" options={{ presentation: "modal", headerShown: true, title: "My Documents", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
       <Stack.Screen name="notifications" options={{ headerShown: true, title: "Notifications", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
+      <Stack.Screen name="team-employee-register" options={{ headerShown: true, title: "Attendance Register", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
+      <Stack.Screen name="team-daily-attendance" options={{ headerShown: true, title: "Daily Attendance", headerStyle: { backgroundColor: "#F6F8FC" }, headerTintColor: "#152238", headerTitleStyle: { fontWeight: "700" } }} />
     </Stack>
   );
 }

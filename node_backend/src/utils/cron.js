@@ -183,6 +183,14 @@ export function initCron() {
     });
   });
 
+  // Poll Expo push receipts every 10 minutes to reconcile SENT -> RECEIPT_OK / FAILED and clean dead tokens
+  cron.schedule("*/10 * * * *", async () => {
+    await runWithLock("expo_push_receipts", 300, async () => {
+      const { pushService } = await import("../services/push.service.js");
+      await pushService.pollExpoPushReceipts({ minAgeMinutes: 5, limit: 200 });
+    });
+  });
+
   logger.info("Background cron jobs scheduled successfully.");
 }
 

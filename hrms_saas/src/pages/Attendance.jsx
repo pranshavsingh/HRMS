@@ -10,6 +10,9 @@ import {
   XCircle,
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
+import LocationDisplay from "../components/common/LocationDisplay";
+import { acquireBestGpsPosition } from "../services/locationService";
+import { evaluateFaceDetections, FACE_VALIDATION_CONFIG } from "../utils/faceValidation";
 import API from "../api/axios";
 import axios from "axios";
 import { usePopup } from "../context/PopupContext";
@@ -45,9 +48,6 @@ const loadFaceModels = () => {
   return faceModelsPromise;
 };
 
-const formatCoordinate = (value) =>
-  value === null || value === undefined ? "--" : Number(value).toFixed(6);
-
 const formatDate = (dateStr) => {
   if (!dateStr) return "--";
   const date = new Date(dateStr);
@@ -58,102 +58,15 @@ const formatDate = (dateStr) => {
   }).format(date);
 };
 
-const checkBlurriness = (ctx, x, y, width, height) => {
-  try {
-    const canvasWidth = ctx.canvas.width;
-    const canvasHeight = ctx.canvas.height;
-    const cropX = Math.max(0, Math.floor(x));
-    const cropY = Math.max(0, Math.floor(y));
-    const cropWidth = Math.min(canvasWidth - cropX, Math.floor(width));
-    const cropHeight = Math.min(canvasHeight - cropY, Math.floor(height));
-
-    if (cropWidth <= 4 || cropHeight <= 4) return 0;
-
-    const imgData = ctx.getImageData(cropX, cropY, cropWidth, cropHeight);
-    const data = imgData.data;
-    const w = imgData.width;
-    const h = imgData.height;
-
-    const gray = new Float32Array(w * h);
-    for (let i = 0; i < data.length; i += 4) {
-      gray[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    }
-
-    let sum = 0;
-    let sqSum = 0;
-    const count = (w - 2) * (h - 2);
-    if (count <= 0) return 0;
-
-    for (let row = 1; row < h - 1; row++) {
-      for (let col = 1; col < w - 1; col++) {
-        const idx = row * w + col;
-        const val =
-          gray[idx - w] +
-          gray[idx - 1] -
-          4 * gray[idx] +
-          gray[idx + 1] +
-          gray[idx + w];
-
-        sum += val;
-        sqSum += val * val;
-      }
-    }
-
-    const mean = sum / count;
-    const variance = sqSum / count - mean * mean;
-    return variance;
-  } catch (e) {
-    console.error("Blur check error:", e);
-    return 100;
-  }
-};
-
 /**
  * Robust Geolocation acquisition with explicit timeout, high accuracy, and typed Error normalization
  */
-const getLocation = (customOptions = {}) => {
-  return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
-      const err = new Error("Geolocation is not supported by your browser.");
-      err.code = 2; // POSITION_UNAVAILABLE
-      return reject(err);
-    }
-
-    const options = {
-      enableHighAccuracy: true,
-      timeout: 10000, // 10 second timeout
-      maximumAge: 0,
-      ...customOptions,
-    };
-
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        resolve({
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          altitude: pos.coords.altitude,
-          accuracy: pos.coords.accuracy,
-          timestamp: pos.timestamp || Date.now(),
-        });
-      },
-      (geoError) => {
-        let message = "Unable to retrieve location.";
-        if (geoError.code === 1) {
-          message = "Location permission denied. Please allow location access in your browser settings to punch attendance.";
-        } else if (geoError.code === 2) {
-          message = "Location unavailable. Please ensure GPS or device location services are turned on.";
-        } else if (geoError.code === 3) {
-          message = "Location request timed out. Please check your signal and try again.";
-        }
-        const err = new Error(message);
-        err.code = geoError.code;
-        err.originalError = geoError;
-        reject(err);
-      },
-      options
-    );
+const getLocation = (customOptions = {}) =>
+  acquireBestGpsPosition({
+    targetAccuracy: 25,
+    timeoutMs: customOptions.timeout || 7000,
+    onSample: customOptions.onSample,
   });
-};
 
 export default function Attendance() {
   const { showPopup } = usePopup();
@@ -166,6 +79,7 @@ export default function Attendance() {
   const isDetectingRef = useRef(false);
   const activeSessionIdRef = useRef(0);
   const modelsLoadedRef = useRef(false);
+  const stableFramesRef = useRef(0);
 
   // Camera state lifecycle: "idle" | "requesting" | "starting" | "ready" | "capturing" | "error"
   const [cameraState, setCameraState] = useState("idle");
@@ -341,94 +255,52 @@ export default function Attendance() {
 
       isDetectingRef.current = true;
       try {
-        const detection = await faceapi
-          .detectSingleFace(
-            video,
-            new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 })
-          )
-          .withFaceLandmarks();
-
-        if (!detection) {
-          setValidation({
-            isValid: false,
-            message: "No face detected. Please position your face inside the frame.",
-          });
-          return;
-        }
-
-        const { box } = detection.detection;
-        const landmarks = detection.landmarks;
-
-        // 1. Distance Check (Face height relative to video height)
-        const faceHeightRatio = box.height / video.videoHeight;
-        if (faceHeightRatio > 0.40) {
-          setValidation({
-            isValid: false,
-            message: "Too close! Move further back (maintain 12-15 inches).",
-          });
-          return;
-        }
-        if (faceHeightRatio < 0.18) {
-          setValidation({
-            isValid: false,
-            message: "Too far! Move closer (maintain 12-15 inches).",
-          });
-          return;
-        }
-
-        // 2. Side Face Check (Symmetry ratio between eyes and nose)
-        const leftEye = landmarks.getLeftEye();
-        const rightEye = landmarks.getRightEye();
-        const nose = landmarks.getNose();
-
-        const leftEyeX = leftEye.reduce((sum, p) => sum + p.x, 0) / leftEye.length;
-        const rightEyeX = rightEye.reduce((sum, p) => sum + p.x, 0) / rightEye.length;
-        const noseX = nose.reduce((sum, p) => sum + p.x, 0) / nose.length;
-
-        const distLeft = Math.abs(noseX - leftEyeX);
-        const distRight = Math.abs(rightEyeX - noseX);
-
-        if (distLeft === 0 || distRight === 0) {
-          setValidation({
-            isValid: false,
-            message: "Side face detected! Please look straight at the camera.",
-          });
-          return;
-        }
-
-        const symmetryRatio = Math.max(distLeft, distRight) / Math.min(distLeft, distRight);
-        if (symmetryRatio > 1.5) {
-          setValidation({
-            isValid: false,
-            message: "Side face detected! Please look straight at the camera.",
-          });
-          return;
-        }
-
-        // 3. Blur Check (Laplacian variance of face bounding box)
+        // Draw current video frame onto reusable canvas once so detection & quality check inspect the exact same frame
+        let evalCtx = null;
         if (canvas) {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          const ctx = canvas.getContext("2d");
-          if (ctx) {
-            ctx.drawImage(video, 0, 0);
-            const blurScore = checkBlurriness(ctx, box.x, box.y, box.width, box.height);
-            if (blurScore < 35) {
-              setValidation({
-                isValid: false,
-                message: "Image is blurry! Please hold still and ensure good lighting.",
-              });
-              return;
-            }
+          if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
+          if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
+          evalCtx = canvas.getContext("2d", { willReadFrequently: true });
+          if (evalCtx) {
+            evalCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
           }
         }
 
-        // All checks passed!
+        const detections = await faceapi
+          .detectAllFaces(
+            canvas || video,
+            new faceapi.TinyFaceDetectorOptions({
+              inputSize: FACE_VALIDATION_CONFIG.inputSize,
+              scoreThreshold: FACE_VALIDATION_CONFIG.scoreThreshold,
+            })
+          )
+          .withFaceLandmarks();
+
+        const res = evaluateFaceDetections({
+          detections,
+          frameWidth: video.videoWidth,
+          frameHeight: video.videoHeight,
+          evalCtx,
+        });
+
+        if (!res.ok) {
+          stableFramesRef.current = 0;
+          setValidation({ isValid: false, message: res.message });
+          return;
+        }
+
+        stableFramesRef.current += 1;
+        if (stableFramesRef.current < FACE_VALIDATION_CONFIG.requiredStableFrames) {
+          setValidation({ isValid: false, message: "Hold Still" });
+          return;
+        }
+
         setValidation({
           isValid: true,
-          message: "Perfect! Face verified. Ready to capture.",
+          message: "Face Aligned – Ready to Capture",
         });
       } catch (err) {
+        stableFramesRef.current = 0;
         console.error("Face detection loop error:", err);
       } finally {
         isDetectingRef.current = false;
@@ -498,6 +370,7 @@ export default function Attendance() {
   const stopCamera = useCallback(() => {
     // Invalidate active session so any in-flight asynchronous operations are ignored
     activeSessionIdRef.current++;
+    stableFramesRef.current = 0;
 
     stopDetectionLoop();
 
@@ -713,46 +586,68 @@ export default function Attendance() {
     });
   };
 
-  // Submission handler reusing validated location with freshness check
+  // Submission handler: 1) Capture & freeze validated frame FIRST, 2) Acquire fresh GPS, 3) Upload immutable frame
   const handleSubmit = async () => {
     if (loading || !validation.isValid) return;
-
-    if (!punchDetails?.latitude || !punchDetails?.longitude) {
-      showPopup("Location coordinates are missing. Please retry camera initialization.", "error");
-      return;
-    }
-
-    const MAX_LOCATION_AGE_MS = 5 * 60 * 1000; // 5 minutes max age
-    let coords = {
-      latitude: punchDetails.latitude,
-      longitude: punchDetails.longitude,
-      accuracy: punchDetails.accuracy ?? null,
-    };
 
     setLoading(true);
     setCameraState("capturing");
 
     try {
-      // Re-validate location freshness if session was held open for over 5 minutes
-      if (punchDetails.timestamp && Date.now() - punchDetails.timestamp > MAX_LOCATION_AGE_MS) {
-        try {
-          const freshCoords = await getLocation({ timeout: 5000 });
-          coords = {
-            latitude: freshCoords.latitude,
-            longitude: freshCoords.longitude,
-            accuracy: freshCoords.accuracy,
-          };
-          setPunchDetails((prev) => ({
-            ...prev,
-            latitude: freshCoords.latitude,
-            longitude: freshCoords.longitude,
-            accuracy: freshCoords.accuracy,
-            timestamp: freshCoords.timestamp,
-          }));
-        } catch (locErr) {
-          console.warn("Unable to refresh stale location, proceeding with validated coordinates:", locErr);
+      // 1. Immediately capture current frame onto canvas BEFORE GPS wait
+      const image = await captureImage();
+      const canvas = canvasRef.current;
+      const evalCtx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
+
+      // 2. Re-validate the exact captured frame so movement at click time cannot slip through
+      if (canvas && evalCtx && modelsLoadedRef.current) {
+        const capturedDetections = await faceapi
+          .detectAllFaces(
+            canvas,
+            new faceapi.TinyFaceDetectorOptions({
+              inputSize: FACE_VALIDATION_CONFIG.inputSize,
+              scoreThreshold: FACE_VALIDATION_CONFIG.scoreThreshold,
+            })
+          )
+          .withFaceLandmarks();
+
+        const frameCheck = evaluateFaceDetections({
+          detections: capturedDetections,
+          frameWidth: canvas.width,
+          frameHeight: canvas.height,
+          evalCtx,
+        });
+
+        if (!frameCheck.ok) {
+          stableFramesRef.current = 0;
+          setValidation({ isValid: false, message: frameCheck.message });
+          showPopup(`Capture rejected: ${frameCheck.message}. Please align your face and try again.`, "warning");
+          setCameraState("ready");
+          setLoading(false);
+          return;
         }
       }
+
+      setValidation({ isValid: true, message: "Face captured successfully." });
+
+      // 3. Acquire fresh converged GPS AFTER the validated image is already frozen as an immutable Blob
+      const freshCoords = await getLocation({ timeout: 6000 });
+      const coords = {
+        latitude: freshCoords.latitude,
+        longitude: freshCoords.longitude,
+        accuracy: freshCoords.accuracy ?? null,
+        timestamp: freshCoords.timestamp || Date.now(),
+        provider: freshCoords.provider || "web_geolocation",
+      };
+
+      setPunchDetails((prev) => ({
+        ...prev,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        altitude: freshCoords.altitude ?? prev?.altitude ?? null,
+        accuracy: coords.accuracy,
+        timestamp: coords.timestamp,
+      }));
 
       if (coords.accuracy != null && coords.accuracy > 100) {
         showPopup(
@@ -763,8 +658,6 @@ export default function Attendance() {
         setLoading(false);
         return;
       }
-
-      const image = await captureImage();
 
       const url =
         type === "in"
@@ -792,6 +685,8 @@ export default function Attendance() {
               latitude: coords.latitude,
               longitude: coords.longitude,
               accuracy: coords.accuracy != null ? Number(coords.accuracy) : undefined,
+              location_timestamp: coords.timestamp,
+              location_provider: coords.provider,
               photo_public_id: cloudRes.data.public_id,
               photo_url: cloudRes.data.secure_url,
             };
@@ -813,6 +708,8 @@ export default function Attendance() {
         if (coords.accuracy != null) {
           formData.append("accuracy", coords.accuracy);
         }
+        formData.append("location_timestamp", String(coords.timestamp));
+        formData.append("location_provider", coords.provider);
 
         const res = await API.post(url, formData);
         showPopup(res.data.message || "Success", "success");
@@ -1197,19 +1094,27 @@ export default function Attendance() {
                   }
                 />
                 <InfoCard
-                  label="Latitude"
-                  value={formatCoordinate(punchDetails?.latitude)}
-                />
-                <InfoCard
-                  label="Longitude"
-                  value={formatCoordinate(punchDetails?.longitude)}
-                />
-                <InfoCard
-                  label="Altitude"
+                  label="Location"
                   value={
-                    punchDetails?.altitude === null || punchDetails?.altitude === undefined
+                    <LocationDisplay
+                      latitude={punchDetails?.latitude}
+                      longitude={punchDetails?.longitude}
+                      compact
+                    />
+                  }
+                />
+                <InfoCard
+                  label="GPS Accuracy"
+                  value={
+                    punchDetails?.accuracy === null || punchDetails?.accuracy === undefined
                       ? "--"
-                      : `${Number(punchDetails.altitude).toFixed(2)} m`
+                      : `±${Math.round(punchDetails.accuracy)}m (${
+                          punchDetails.accuracy <= 25
+                            ? "Good"
+                            : punchDetails.accuracy <= 50
+                            ? "Moderate"
+                            : "Low"
+                        })`
                   }
                 />
                 <InfoCard
@@ -1255,7 +1160,7 @@ function InfoCard({ label, value }) {
       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
         {label}
       </p>
-      <p className="mt-2 text-sm font-semibold text-slate-900">{value}</p>
+      <div className="mt-2 text-sm font-semibold text-slate-900">{value}</div>
     </div>
   );
 }

@@ -12,6 +12,7 @@ import {
 import Layout from "../components/layout/Layout";
 import Loader from "../components/common/Loader";
 import Pagination from "../components/common/Pagination";
+import LocationDisplay from "../components/common/LocationDisplay";
 import { usePagination } from "../hooks/usePagination";
 import API from "../api/axios";
 import { useAuth } from "../context/AuthContext";
@@ -544,6 +545,10 @@ export default function TeamAttendance() {
                                       punchOut: cell.punch_out,
                                       punchInPhoto: cell.punch_in_photo,
                                       punchOutPhoto: cell.punch_out_photo,
+                                      punchInLat: cell.punch_in_lat,
+                                      punchInLng: cell.punch_in_lng,
+                                      punchOutLat: cell.punch_out_lat,
+                                      punchOutLng: cell.punch_out_lng,
                                     })}
                                     className="mt-1 text-slate-400 hover:text-slate-900 transition focus:outline-none cursor-pointer"
                                     title="View punch photos"
@@ -719,6 +724,10 @@ export default function TeamAttendance() {
                                   punchOut: item.punch_out,
                                   punchInPhoto: item.punch_in_photo,
                                   punchOutPhoto: item.punch_out_photo,
+                                  punchInLat: item.punch_in_lat,
+                                  punchInLng: item.punch_in_lng,
+                                  punchOutLat: item.punch_out_lat,
+                                  punchOutLng: item.punch_out_lng,
                                 })}
                                 className="inline-flex items-center gap-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 text-xs font-semibold transition cursor-pointer"
                               >
@@ -760,7 +769,7 @@ export default function TeamAttendance() {
             />
 
             {/* Modal Container */}
-            <div className="relative w-full max-w-2xl transform overflow-hidden rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl transition-all duration-300 flex flex-col gap-6">
+            <div className="relative w-full max-w-2xl max-h-[90vh] overflow-y-auto transform rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl transition-all duration-300 flex flex-col gap-6">
               
               {/* Header */}
               <div className="flex items-center justify-between border-b border-slate-100 pb-4">
@@ -781,7 +790,7 @@ export default function TeamAttendance() {
               {/* Photos Grid */}
               <div className="grid gap-6 md:grid-cols-2">
                 {/* Punch In */}
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 flex flex-col items-center justify-center">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 flex flex-col items-center justify-start">
                   <span className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
                     Punch In Image
                   </span>
@@ -803,10 +812,16 @@ export default function TeamAttendance() {
                       </span>
                     </div>
                   )}
+                  <div className="w-full mt-3 pt-3 border-t border-slate-200/70">
+                    <LocationDisplay
+                      latitude={photoModal.punchInLat}
+                      longitude={photoModal.punchInLng}
+                    />
+                  </div>
                 </div>
 
                 {/* Punch Out */}
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 flex flex-col items-center justify-center">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 flex flex-col items-center justify-start">
                   <span className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
                     Punch Out Image
                   </span>
@@ -828,6 +843,12 @@ export default function TeamAttendance() {
                       </span>
                     </div>
                   )}
+                  <div className="w-full mt-3 pt-3 border-t border-slate-200/70">
+                    <LocationDisplay
+                      latitude={photoModal.punchOutLat}
+                      longitude={photoModal.punchOutLng}
+                    />
+                  </div>
                 </div>
               </div>
 

@@ -1,7 +1,15 @@
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import API, { getInMemoryToken } from "../api/axios";
 import { useAuth } from "./AuthContext";
 import { useRealtime } from "./RealtimeContext";
+import {
+  getBrowserNotificationPermission,
+  getExistingPushSubscription,
+  isWebPushSupported,
+  subscribeBrowserPush,
+  unsubscribeBrowserPush,
+} from "../services/webPushService";
 
 const NotificationContext = createContext(null);
 
@@ -15,12 +23,24 @@ export function useNotifications() {
 }
 
 export function NotificationProvider({ children }) {
-  const { user, accessToken } = useAuth();
+  const { user, accessToken, registerPreLogoutHook } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
   const { subscribe } = useRealtime();
 
   const [recentNotifications, setRecentNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [pushSupported] = useState(() => isWebPushSupported());
+  const [pushPermission, setPushPermission] = useState(() => getBrowserNotificationPermission());
+  const [isPushSubscribed, setIsPushSubscribed] = useState(false);
+  const [preferences, setPreferences] = useState({
+    web_push_enabled: true,
+    mobile_push_enabled: true,
+    disabled_categories: [],
+  });
+  const [devices, setDevices] = useState([]);
+  const activeEndpointRef = useRef(null);
 
   const isAuthenticated = Boolean(user && (accessToken || getInMemoryToken()));
 
@@ -95,15 +115,126 @@ export function NotificationProvider({ children }) {
     }
   }, [isAuthenticated]);
 
-  // Reset state cleanly on logout or account switch, and sync on window focus
+  const fetchPreferences = useCallback(async () => {
+    if (!isAuthenticated) return;
+    try {
+      const res = await API.get("/notifications/preferences");
+      if (res.data) setPreferences(res.data);
+    } catch {
+      // Ignore silent preference load failure
+    }
+  }, [isAuthenticated]);
+
+  const updatePreferences = useCallback(async (nextPrefs) => {
+    if (!isAuthenticated) return null;
+    const res = await API.put("/notifications/preferences", nextPrefs);
+    if (res.data) setPreferences(res.data);
+    return res.data;
+  }, [isAuthenticated]);
+
+  const fetchDevices = useCallback(async () => {
+    if (!isAuthenticated) return;
+    try {
+      const res = await API.get("/notifications/devices");
+      setDevices(Array.isArray(res.data?.devices) ? res.data.devices : []);
+    } catch {
+      // Ignore silent device list failure
+    }
+  }, [isAuthenticated]);
+
+  const removeDevice = useCallback(async (deviceId) => {
+    if (!isAuthenticated) return;
+    await API.delete(`/notifications/devices/${deviceId}`);
+    setDevices((prev) => prev.filter((d) => Number(d.id) !== Number(deviceId)));
+  }, [isAuthenticated]);
+
+  const enableWebPush = useCallback(async () => {
+    const sub = await subscribeBrowserPush({ requestPermission: true });
+    activeEndpointRef.current = sub?.endpoint || null;
+    setPushPermission(getBrowserNotificationPermission());
+    setIsPushSubscribed(Boolean(sub));
+    await fetchDevices();
+    return sub;
+  }, [fetchDevices]);
+
+  const disableWebPush = useCallback(async () => {
+    const res = await unsubscribeBrowserPush();
+    activeEndpointRef.current = null;
+    setPushPermission(getBrowserNotificationPermission());
+    setIsPushSubscribed(false);
+    await fetchDevices();
+    if (res && !res.serverUnregistered && res.endpoint) {
+      throw new Error(res.serverError || "Browser unsubscribed, but server token deactivation failed.");
+    }
+  }, [fetchDevices]);
+
+  // Pre-logout cleanup: unregister Web Push while authenticated session is still active
+  useEffect(() => {
+    if (!registerPreLogoutHook) return undefined;
+    return registerPreLogoutHook(async () => {
+      if (isWebPushSupported()) {
+        await unsubscribeBrowserPush().catch(() => {});
+      } else if (activeEndpointRef.current) {
+        const ep = activeEndpointRef.current;
+        await API.delete("/notifications/push-token", { data: { token: ep } }).catch(() => {});
+      }
+      activeEndpointRef.current = null;
+      setIsPushSubscribed(false);
+    });
+  }, [registerPreLogoutHook]);
+
+  // Sync on auth & window focus
   useEffect(() => {
     if (!isAuthenticated) {
-      setRecentNotifications([]);
-      setUnreadCount(0);
-      return;
+      return undefined;
     }
-    void fetchUnreadCount();
-    void fetchRecentNotifications(false);
+
+    // Consume post-login redirect or cold-start notification click query params
+    try {
+      const pendingRedirect = sessionStorage.getItem("hrms_post_login_redirect");
+      if (pendingRedirect && pendingRedirect.startsWith("/")) {
+        sessionStorage.removeItem("hrms_post_login_redirect");
+        navigate(pendingRedirect, { replace: true });
+      } else if (location.search) {
+        const params = new URLSearchParams(location.search);
+        const notifClickId = params.get("notif_click");
+        if (notifClickId) {
+          const channel = params.get("notif_channel") || "web_push";
+          const deviceTokenId = params.get("notif_device") || null;
+          void API.post(`/notifications/${Number(notifClickId)}/click`, { channel, deviceTokenId }).catch(() => {});
+          params.delete("notif_click");
+          params.delete("notif_channel");
+          params.delete("notif_device");
+          const nextSearch = params.toString();
+          navigate(`${location.pathname}${nextSearch ? `?${nextSearch}` : ""}`, { replace: true });
+        }
+      }
+    } catch {
+      // Ignore URL/storage errors
+    }
+
+    let active = true;
+    Promise.resolve().then(async () => {
+      if (!active) return;
+      void fetchUnreadCount();
+      void fetchRecentNotifications(false);
+      void fetchPreferences();
+      void fetchDevices();
+      if (isWebPushSupported()) {
+        setPushPermission(getBrowserNotificationPermission());
+        const existingSub = await getExistingPushSubscription().catch(() => null);
+        if (!active) return;
+        setIsPushSubscribed(Boolean(existingSub));
+        if (Notification.permission === "granted" && existingSub) {
+          const synced = await subscribeBrowserPush({ requestPermission: false }).catch(() => null);
+          if (active && synced) {
+            activeEndpointRef.current = synced.endpoint;
+            setIsPushSubscribed(true);
+            void fetchDevices();
+          }
+        }
+      }
+    });
 
     const handleFocus = () => {
       void fetchUnreadCount();
@@ -116,10 +247,39 @@ export function NotificationProvider({ children }) {
     }, 30000);
 
     return () => {
+      active = false;
       window.removeEventListener("focus", handleFocus);
       clearInterval(interval);
     };
-  }, [isAuthenticated, user?.id, fetchUnreadCount, fetchRecentNotifications]);
+  }, [isAuthenticated, user?.id, fetchUnreadCount, fetchRecentNotifications, fetchPreferences, fetchDevices, location.pathname, location.search, navigate]);
+
+  // Listen for Service Worker notification click messages (both authenticated and login-page tabs)
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return undefined;
+    const onSwMessage = (event) => {
+      const msg = event?.data;
+      if (msg?.type === "HRMS_NOTIFICATION_CLICK") {
+        const safePath = msg.actionUrl && String(msg.actionUrl).startsWith("/") ? msg.actionUrl : "/notifications";
+        if (!isAuthenticated) {
+          try {
+            sessionStorage.setItem("hrms_post_login_redirect", safePath);
+          } catch {
+            // Ignore storage errors
+          }
+          return;
+        }
+        if (msg.notificationId) {
+          void API.post(`/notifications/${msg.notificationId}/click`, {
+            channel: msg.channel || "web_push",
+            deviceTokenId: msg.deviceTokenId || null,
+          }).catch(() => {});
+        }
+        navigate(safePath);
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onSwMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onSwMessage);
+  }, [isAuthenticated, navigate]);
 
   // Real-time Socket.IO synchronization (web <-> mobile & multi-tab)
   useEffect(() => {
@@ -187,13 +347,24 @@ export function NotificationProvider({ children }) {
   return (
     <NotificationContext.Provider
       value={{
-        recentNotifications,
-        unreadCount,
+        recentNotifications: isAuthenticated ? recentNotifications : [],
+        unreadCount: isAuthenticated ? unreadCount : 0,
         loading,
+        pushSupported,
+        pushPermission,
+        isPushSubscribed,
+        preferences,
+        devices: isAuthenticated ? devices : [],
         fetchRecentNotifications,
         fetchUnreadCount,
         markAsRead,
         markAllAsRead,
+        enableWebPush,
+        disableWebPush,
+        fetchPreferences,
+        updatePreferences,
+        fetchDevices,
+        removeDevice,
       }}
     >
       {children}

@@ -14,6 +14,8 @@ import * as FileSystem from "expo-file-system/legacy";
 import api from "../../services/api";
 import { useRealtime } from "../../context/RealtimeContext";
 import CameraViewOverlay from "../../components/CameraViewOverlay";
+import LocationDisplay from "../../components/LocationDisplay";
+import { acquireBestMobileGpsPosition } from "../../services/locationService";
 import { WebView } from "react-native-webview";
 import { 
   Camera, 
@@ -59,8 +61,35 @@ const HTML_CONTENT = `
     let modelsLoaded = false;
     let detectionInterval = null;
     let streamRef = null;
+    let isDetecting = false;
+    let isCapturing = false;
+    let stableFrames = 0;
+    const evalCanvas = document.createElement('canvas');
+    const outputCanvas = document.createElement('canvas');
 
-    const checkBlurriness = (ctx, x, y, width, height) => {
+    const CFG = {
+      scoreThreshold: 0.5,
+      inputSize: 224,
+      minFacePixels: 80,
+      minHeightRatio: 0.18,
+      maxHeightRatio: 0.48,
+      maxWidthRatio: 0.55,
+      edgeMarginRatio: 0.04,
+      maxYawOffset: 0.20,
+      maxSymmetryRatio: 1.38,
+      minPitchRatio: 0.36,
+      maxPitchRatio: 0.78,
+      maxRollDegrees: 12,
+      minBlurVariance: 35,
+      minBrightness: 45,
+      maxBrightness: 220,
+      minContrastStdDev: 18,
+      maxOverexposedRatio: 0.45,
+      maxUnderexposedRatio: 0.55,
+      requiredStableFrames: 2,
+    };
+
+    const analyzeFaceImageQuality = (ctx, x, y, width, height) => {
       try {
         const canvasWidth = ctx.canvas.width;
         const canvasHeight = ctx.canvas.height;
@@ -69,44 +98,162 @@ const HTML_CONTENT = `
         const cropWidth = Math.min(canvasWidth - cropX, Math.floor(width));
         const cropHeight = Math.min(canvasHeight - cropY, Math.floor(height));
 
-        if (cropWidth <= 4 || cropHeight <= 4) return 0;
+        if (cropWidth <= 8 || cropHeight <= 8) {
+          return { ok: false, message: 'Face Not Fully Visible' };
+        }
 
         const imgData = ctx.getImageData(cropX, cropY, cropWidth, cropHeight);
         const data = imgData.data;
         const w = imgData.width;
         const h = imgData.height;
+        const totalPixels = w * h;
 
-        const gray = new Float32Array(w * h);
-        for (let i = 0; i < data.length; i += 4) {
-          gray[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        const gray = new Float32Array(totalPixels);
+        let lumSum = 0;
+        let lumSqSum = 0;
+        let overexposed = 0;
+        let underexposed = 0;
+
+        for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+          const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          gray[p] = lum;
+          lumSum += lum;
+          lumSqSum += lum * lum;
+          if (lum > 245) overexposed++;
+          if (lum < 25) underexposed++;
         }
 
-        let sum = 0;
-        let sqSum = 0;
+        const meanBrightness = lumSum / totalPixels;
+        const contrastStdDev = Math.sqrt(Math.max(0, lumSqSum / totalPixels - meanBrightness * meanBrightness));
+        if (
+          meanBrightness < CFG.minBrightness ||
+          meanBrightness > CFG.maxBrightness ||
+          overexposed / totalPixels > CFG.maxOverexposedRatio ||
+          underexposed / totalPixels > CFG.maxUnderexposedRatio ||
+          contrastStdDev < CFG.minContrastStdDev
+        ) {
+          return { ok: false, message: 'Poor Lighting' };
+        }
+
+        let lapSum = 0;
+        let lapSqSum = 0;
         const count = (w - 2) * (h - 2);
-        if (count <= 0) return 0;
+        if (count <= 0) return { ok: false, message: 'Image Blurry' };
 
         for (let row = 1; row < h - 1; row++) {
           for (let col = 1; col < w - 1; col++) {
             const idx = row * w + col;
-            const val =
-              gray[idx - w] +
-              gray[idx - 1] -
-              4 * gray[idx] +
-              gray[idx + 1] +
-              gray[idx + w];
-
-            sum += val;
-            sqSum += val * val;
+            const val = gray[idx - w] + gray[idx - 1] - 4 * gray[idx] + gray[idx + 1] + gray[idx + w];
+            lapSum += val;
+            lapSqSum += val * val;
           }
         }
 
-        const mean = sum / count;
-        const variance = sqSum / count - mean * mean;
-        return variance;
+        const lapMean = lapSum / count;
+        const variance = lapSqSum / count - lapMean * lapMean;
+        if (!Number.isFinite(variance) || variance < CFG.minBlurVariance) {
+          return { ok: false, message: 'Image Blurry' };
+        }
+        return { ok: true };
       } catch (e) {
-        return 100;
+        return { ok: false, message: 'Image Blurry' };
       }
+    };
+
+    const avgPt = (pts) => {
+      const s = pts.reduce((a, p) => ({ x: a.x + p.x, y: a.y + p.y }), { x: 0, y: 0 });
+      return { x: s.x / pts.length, y: s.y / pts.length };
+    };
+
+    const evaluateFaceDetections = (detections, frameWidth, frameHeight, evalCtx) => {
+      if (!Array.isArray(detections) || detections.length === 0) {
+        return { ok: false, message: 'Detecting Face' };
+      }
+      if (detections.length > 1) {
+        return { ok: false, message: 'Multiple Faces Detected' };
+      }
+      const det = detections[0];
+      const box = det?.detection?.box;
+      const landmarks = det?.landmarks;
+      if (!box || !landmarks || frameWidth <= 0 || frameHeight <= 0) {
+        return { ok: false, message: 'Detecting Face' };
+      }
+      if (box.width < CFG.minFacePixels || box.height < CFG.minFacePixels) {
+        return { ok: false, message: 'Move Closer' };
+      }
+      const heightRatio = box.height / frameHeight;
+      const widthRatio = box.width / frameWidth;
+      if (heightRatio > CFG.maxHeightRatio || widthRatio > CFG.maxWidthRatio) {
+        return { ok: false, message: 'Move Farther Away' };
+      }
+      if (heightRatio < CFG.minHeightRatio) {
+        return { ok: false, message: 'Move Closer' };
+      }
+
+      const marginX = frameWidth * CFG.edgeMarginRatio;
+      const marginY = frameHeight * CFG.edgeMarginRatio;
+      if (
+        box.x < marginX ||
+        box.y < marginY ||
+        box.x + box.width > frameWidth - marginX ||
+        box.y + box.height > frameHeight - marginY
+      ) {
+        return { ok: false, message: 'Face Not Fully Visible' };
+      }
+
+      const centerXRatio = (box.x + box.width / 2) / frameWidth;
+      const centerYRatio = (box.y + box.height / 2) / frameHeight;
+      if (centerXRatio < 0.20 || centerXRatio > 0.80 || centerYRatio < 0.15 || centerYRatio > 0.85) {
+        return { ok: false, message: 'Face Not Fully Visible' };
+      }
+
+      const leftEyePts = landmarks.getLeftEye();
+      const rightEyePts = landmarks.getRightEye();
+      const nosePts = landmarks.getNose();
+      const mouthPts = landmarks.getMouth();
+      if (!leftEyePts?.length || !rightEyePts?.length || !nosePts?.length || !mouthPts?.length) {
+        return { ok: false, message: 'Face Not Fully Visible' };
+      }
+      const allKeyPts = [...leftEyePts, ...rightEyePts, ...nosePts, ...mouthPts];
+      for (const pt of allKeyPts) {
+        if (pt.x < 0 || pt.y < 0 || pt.x > frameWidth || pt.y > frameHeight) {
+          return { ok: false, message: 'Face Not Fully Visible' };
+        }
+      }
+
+      const leftEye = avgPt(leftEyePts);
+      const rightEye = avgPt(rightEyePts);
+      const noseTip = nosePts[3] || avgPt(nosePts);
+      const mouthCenter = avgPt(mouthPts);
+
+      const eyeDx = rightEye.x - leftEye.x;
+      const eyeDy = rightEye.y - leftEye.y;
+      const eyeDist = Math.hypot(eyeDx, eyeDy);
+      if (eyeDist < 12) return { ok: false, message: 'Face Not Fully Visible' };
+
+      const rollDeg = Math.abs((Math.atan2(eyeDy, eyeDx) * 180) / Math.PI);
+      if (rollDeg > CFG.maxRollDegrees) return { ok: false, message: 'Look Straight' };
+
+      const eyeMidX = (leftEye.x + rightEye.x) / 2;
+      const eyeMidY = (leftEye.y + rightEye.y) / 2;
+      const yawOffset = Math.abs(noseTip.x - eyeMidX) / eyeDist;
+      const distLeft = Math.abs(noseTip.x - leftEye.x);
+      const distRight = Math.abs(rightEye.x - noseTip.x);
+      const symmetryRatio = distLeft > 0 && distRight > 0 ? Math.max(distLeft, distRight) / Math.min(distLeft, distRight) : 99;
+      if (yawOffset > CFG.maxYawOffset || symmetryRatio > CFG.maxSymmetryRatio) {
+        return { ok: false, message: 'Look Straight' };
+      }
+
+      const faceSpanY = mouthCenter.y - eyeMidY;
+      if (faceSpanY <= 10) return { ok: false, message: 'Face Not Fully Visible' };
+      const pitchRatio = (noseTip.y - eyeMidY) / faceSpanY;
+      if (pitchRatio > CFG.maxPitchRatio) return { ok: false, message: 'Look Up' };
+      if (pitchRatio < CFG.minPitchRatio) return { ok: false, message: 'Look Down' };
+
+      const quality = analyzeFaceImageQuality(evalCtx, box.x, box.y, box.width, box.height);
+      if (!quality.ok) return { ok: false, message: quality.message };
+
+      return { ok: true, message: 'Face Aligned – Ready to Capture' };
     };
 
     const sendMsg = (payload) => {
@@ -170,6 +317,9 @@ const HTML_CONTENT = `
     };
 
     const stopCamera = () => {
+      stableFrames = 0;
+      isDetecting = false;
+      isCapturing = false;
       if (streamRef) {
         streamRef.getTracks().forEach(track => track.stop());
         streamRef = null;
@@ -180,126 +330,91 @@ const HTML_CONTENT = `
       }
     };
 
+    window.addEventListener('beforeunload', stopCamera);
+
     const startDetectionLoop = () => {
       if (detectionInterval) clearInterval(detectionInterval);
+      stableFrames = 0;
 
       detectionInterval = setInterval(async () => {
-        if (!modelsLoaded || video.paused || video.ended) return;
+        if (isDetecting || isCapturing || !modelsLoaded || video.paused || video.ended || video.videoWidth === 0 || video.videoHeight === 0) return;
+        isDetecting = true;
 
         try {
-          const detection = await faceapi
-            .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
+          if (evalCanvas.width !== video.videoWidth) evalCanvas.width = video.videoWidth;
+          if (evalCanvas.height !== video.videoHeight) evalCanvas.height = video.videoHeight;
+          const evalCtx = evalCanvas.getContext('2d', { willReadFrequently: true });
+          evalCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+
+          const detections = await faceapi
+            .detectAllFaces(evalCanvas, new faceapi.TinyFaceDetectorOptions({ inputSize: CFG.inputSize, scoreThreshold: CFG.scoreThreshold }))
             .withFaceLandmarks();
 
-          if (!detection) {
-            sendMsg({
-              type: 'VALIDATION_STATUS',
-              isValid: false,
-              message: 'No face detected. Please position your face inside the frame.'
-            });
+          const res = evaluateFaceDetections(detections, video.videoWidth, video.videoHeight, evalCtx);
+          if (!res.ok) {
+            stableFrames = 0;
+            sendMsg({ type: 'VALIDATION_STATUS', isValid: false, message: res.message });
             return;
           }
 
-          const { box } = detection.detection;
-          const landmarks = detection.landmarks;
-
-          // 1. Distance Check (Face height relative to video height)
-          const faceHeightRatio = box.height / video.videoHeight;
-          if (faceHeightRatio > 0.40) {
-            sendMsg({
-              type: 'VALIDATION_STATUS',
-              isValid: false,
-              message: 'Too close! Move further back (maintain 12-15 inches).'
-            });
-            return;
-          }
-          if (faceHeightRatio < 0.18) {
-            sendMsg({
-              type: 'VALIDATION_STATUS',
-              isValid: false,
-              message: 'Too far! Move closer (maintain 12-15 inches).'
-            });
+          stableFrames += 1;
+          if (stableFrames < CFG.requiredStableFrames) {
+            sendMsg({ type: 'VALIDATION_STATUS', isValid: false, message: 'Hold Still' });
             return;
           }
 
-          // 2. Side Face Check (Symmetry ratio between eyes and nose)
-          const leftEye = landmarks.getLeftEye();
-          const rightEye = landmarks.getRightEye();
-          const nose = landmarks.getNose();
-
-          const leftEyeX = leftEye.reduce((sum, p) => sum + p.x, 0) / leftEye.length;
-          const rightEyeX = rightEye.reduce((sum, p) => sum + p.x, 0) / rightEye.length;
-          const noseX = nose.reduce((sum, p) => sum + p.x, 0) / nose.length;
-
-          const distLeft = Math.abs(noseX - leftEyeX);
-          const distRight = Math.abs(rightEyeX - noseX);
-
-          if (distLeft === 0 || distRight === 0) {
-            sendMsg({
-              type: 'VALIDATION_STATUS',
-              isValid: false,
-              message: 'Side face detected! Please look straight.'
-            });
-            return;
-          }
-
-          const symmetryRatio = Math.max(distLeft, distRight) / Math.min(distLeft, distRight);
-          if (symmetryRatio > 1.5) {
-            sendMsg({
-              type: 'VALIDATION_STATUS',
-              isValid: false,
-              message: 'Side face detected! Please look straight.'
-            });
-            return;
-          }
-
-          // 3. Blur Check
-          const canvas = document.createElement('canvas');
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(video, 0, 0);
-
-          const blurScore = checkBlurriness(ctx, box.x, box.y, box.width, box.height);
-          if (blurScore < 35) {
-            sendMsg({
-              type: 'VALIDATION_STATUS',
-              isValid: false,
-              message: 'Image is blurry! Please hold still.'
-            });
-            return;
-          }
-
-          // All checks passed!
           sendMsg({
             type: 'VALIDATION_STATUS',
             isValid: true,
-            message: 'Perfect! Face verified. Ready to capture.'
+            message: 'Face Aligned – Ready to Capture'
           });
-
         } catch (err) {
+          stableFrames = 0;
           console.error("Detection error:", err);
+        } finally {
+          isDetecting = false;
         }
       }, 400);
     };
 
-    const captureFrame = () => {
+    const captureFrame = async () => {
+      if (isCapturing) return;
+      isCapturing = true;
       try {
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const ctx = canvas.getContext('2d');
-        
-        // Draw video frame mirrored to match front camera view
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, 0, 0);
+        if (!modelsLoaded || video.paused || video.ended || video.videoWidth === 0 || video.videoHeight === 0) {
+          throw new Error('Camera is not ready.');
+        }
+        if (evalCanvas.width !== video.videoWidth) evalCanvas.width = video.videoWidth;
+        if (evalCanvas.height !== video.videoHeight) evalCanvas.height = video.videoHeight;
+        const evalCtx = evalCanvas.getContext('2d', { willReadFrequently: true });
+        evalCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
 
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+        const detections = await faceapi
+          .detectAllFaces(evalCanvas, new faceapi.TinyFaceDetectorOptions({ inputSize: CFG.inputSize, scoreThreshold: CFG.scoreThreshold }))
+          .withFaceLandmarks();
+        const check = evaluateFaceDetections(detections, video.videoWidth, video.videoHeight, evalCtx);
+        if (!check.ok) {
+          stableFrames = 0;
+          sendMsg({ type: 'CAPTURE_FAILED', error: check.message });
+          return;
+        }
+
+        if (outputCanvas.width !== video.videoWidth) outputCanvas.width = video.videoWidth;
+        if (outputCanvas.height !== video.videoHeight) outputCanvas.height = video.videoHeight;
+        const outCtx = outputCanvas.getContext('2d');
+        outCtx.save();
+        outCtx.translate(outputCanvas.width, 0);
+        outCtx.scale(-1, 1);
+        outCtx.drawImage(evalCanvas, 0, 0);
+        outCtx.restore();
+
+        const dataUrl = outputCanvas.toDataURL('image/jpeg', 0.9);
         const base64 = dataUrl.split(',')[1];
         sendMsg({ type: 'CAPTURE_SUCCESS', base64: base64 });
       } catch (err) {
         sendMsg({ type: 'CAPTURE_FAILED', error: 'Capture error: ' + err.message });
+      } finally {
+        isCapturing = false;
       }
     };
 
@@ -350,7 +465,12 @@ export default function PunchScreen() {
   const [punchType, setPunchType] = useState<"in" | "out" | null>(null);
   const [activePunch, setActivePunch] = useState<any>(null);
   const [elapsedTime, setElapsedTime] = useState("");
-  const [currentCoords, setCurrentCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [currentCoords, setCurrentCoords] = useState<{
+    latitude: number;
+    longitude: number;
+    accuracy?: number | null;
+  } | null>(null);
+  const gpsCancelRef = useRef<{ aborted: boolean }>({ aborted: false });
 
   // WebView Face API References and States
   const webViewRef = useRef<any>(null);
@@ -469,21 +589,38 @@ export default function PunchScreen() {
     setValidationStatus(isModelLoaded ? "neutral" : "loading");
     setValidationMsg(isModelLoaded ? "Center your face within the oval" : "Initializing face detector...");
 
+    gpsCancelRef.current.aborted = true;
+    const cancelToken = { aborted: false };
+    gpsCancelRef.current = cancelToken;
+
     try {
-      const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
+      const loc = await acquireBestMobileGpsPosition({
+        targetAccuracy: 25,
+        timeoutMs: 7000,
+        cancelToken,
+        onSample: (sample) => {
+          setCurrentCoords({
+            latitude: sample.latitude,
+            longitude: sample.longitude,
+            accuracy: sample.accuracy,
+          });
+        },
       });
       setCurrentCoords({
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        accuracy: loc.accuracy,
       });
-    } catch (e) {
-      console.error("Error fetching current position", e);
-      Alert.alert("Location Failure", "Could not capture high-accuracy GPS coordinates.");
+    } catch (e: any) {
+      if (!cancelToken.aborted) {
+        console.error("Error fetching current position", e);
+        Alert.alert("Location Failure", e?.message || "Could not capture high-accuracy GPS coordinates.");
+      }
     }
   };
 
   const cancelPunch = () => {
+    gpsCancelRef.current.aborted = true;
     setCameraOn(false);
     setPunchType(null);
     setCurrentCoords(null);
@@ -492,45 +629,19 @@ export default function PunchScreen() {
   };
 
   const handleCaptureAndSubmit = async () => {
+    if (submitting) return;
     if (validationStatus !== "success") {
-      Alert.alert("Face Verification Required", "Please hold still and position your face until it is verified (oval turns solid green).");
+      Alert.alert("Face Alignment Required", "Please hold still and align your face inside the oval until it turns green.");
       return;
     }
 
     setSubmitting(true);
-
-    try {
-      // 1. Fetch high accuracy coordinates
-      const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-      });
-
-      if (loc.coords.accuracy != null && loc.coords.accuracy > 100) {
-        Alert.alert(
-          "Weak GPS Accuracy",
-          `Your GPS accuracy is ±${Math.round(loc.coords.accuracy)}m. Required accuracy is within 100 meters. Please move to an open area or enable precise location.`
-        );
-        setSubmitting(false);
-        return;
-      }
-
-      pendingCoordsRef.current = {
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-        accuracy: loc.coords.accuracy,
-      };
-
-      // 2. Request snapshot capture from WebView
-      webViewRef.current?.postMessage(
-        JSON.stringify({
-          type: "CAPTURE",
-        })
-      );
-    } catch (err: any) {
-      console.error("Location fetch failed", err);
-      Alert.alert("Location Failure", "Could not capture high-accuracy GPS coordinates.");
-      setSubmitting(false);
-    }
+    // 1. Immediately capture & validate the exact current frame BEFORE awaiting GPS
+    webViewRef.current?.postMessage(
+      JSON.stringify({
+        type: "CAPTURE",
+      })
+    );
   };
 
   const handleWebViewMessage = async (event: any) => {
@@ -577,27 +688,55 @@ export default function PunchScreen() {
   };
 
   const processAndUploadCapturedSelfie = async (base64Data: string) => {
-    const coords = pendingCoordsRef.current;
-
-    if (!coords) {
-      Alert.alert("Error", "Missing GPS coordinates.");
-      setSubmitting(false);
-      return;
-    }
-
     let tempUri: string | null = null;
+    gpsCancelRef.current.aborted = true;
+    const cancelToken = { aborted: false };
+    gpsCancelRef.current = cancelToken;
+
     try {
-      // Write base64 string to a local cache file using expo-file-system
+      // 1. Freeze the already-validated frame into an immutable local file first
       tempUri = `${FileSystem.cacheDirectory}selfie_${Date.now()}.jpg`;
       await FileSystem.writeAsStringAsync(tempUri, base64Data, {
         encoding: FileSystem.EncodingType.Base64,
       });
+      setValidationMsg("Face captured successfully.");
+
+      // 2. Acquire fresh converged high-accuracy GPS AFTER the frame is frozen
+      const loc = await acquireBestMobileGpsPosition({
+        targetAccuracy: 25,
+        timeoutMs: 7000,
+        cancelToken,
+      });
+
+      if (loc.accuracy != null && loc.accuracy > 100) {
+        Alert.alert(
+          "Weak GPS Accuracy",
+          `Your GPS accuracy is ±${Math.round(loc.accuracy)}m. Required accuracy is within 100 meters. Please move to an open area or enable precise location.`
+        );
+        setSubmitting(false);
+        return;
+      }
+
+      const coords = {
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        accuracy: loc.accuracy,
+        timestamp: loc.timestamp,
+        provider: loc.provider,
+      };
+      pendingCoordsRef.current = coords;
 
       const formData = new FormData();
       formData.append("latitude", String(coords.latitude));
       formData.append("longitude", String(coords.longitude));
       if (coords.accuracy != null) {
         formData.append("accuracy", String(coords.accuracy));
+      }
+      if (coords.timestamp != null) {
+        formData.append("location_timestamp", String(coords.timestamp));
+      }
+      if (coords.provider) {
+        formData.append("location_provider", String(coords.provider));
       }
       formData.append("photo", {
         uri: tempUri,
@@ -686,10 +825,19 @@ export default function PunchScreen() {
             <View style={styles.cameraFooter}>
               {currentCoords ? (
                 <View style={styles.gpsRow}>
-                  <MapPin size={14} color="#10b981" />
-                  <Text style={styles.gpsText}>
-                    GPS Logged: {currentCoords.latitude.toFixed(5)}, {currentCoords.longitude.toFixed(5)}
-                  </Text>
+                  <LocationDisplay
+                    latitude={currentCoords.latitude}
+                    longitude={currentCoords.longitude}
+                    suffix={
+                      currentCoords.accuracy != null
+                        ? `(±${Math.round(currentCoords.accuracy)}m)`
+                        : ""
+                    }
+                    dark
+                    compact
+                    showMapLink={false}
+                    iconColor="#10b981"
+                  />
                 </View>
               ) : (
                 <View style={styles.gpsRow}>

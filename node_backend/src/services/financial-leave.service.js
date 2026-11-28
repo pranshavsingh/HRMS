@@ -143,6 +143,7 @@ async function runTenantReset(tenantId, start, actor = null) {
   const runResult = await db.transaction(async (tx) => {
     let run = await tx.get("SELECT * FROM workforce_leave_reset_run WHERE tenant_id=? AND financial_year_start=? FOR UPDATE", [tenantId, start]);
     if (run?.status === "completed") return { runId: Number(run.id), alreadyComplete: true };
+    if (run?.status === "running") throw new AppError("A financial-year balance reset is already in progress", 409);
     if (run) {
       await tx.run("UPDATE workforce_leave_reset_run SET status='running', attempt_count=attempt_count+1, started_at=NOW(), finished_at=NULL, error_summary=NULL WHERE id=?", [run.id]);
     } else {
@@ -289,7 +290,7 @@ export const financialLeaveService = {
     const portions = new Map();
     for (const current = new Date(start); current <= end; current.setUTCDate(current.getUTCDate() + 1)) {
       const date = ymd(current);
-      const applicable = [...policies].reverse().find((policy) => String(policy.effective_from_fy_start).slice(0, 10) <= date);
+      const applicable = [...policies].reverse().find((policy) => dateString(policy.effective_from_fy_start) <= date);
       const month = Number(applicable?.financial_year_start_month || 4);
       const day = Number(applicable?.financial_year_start_day || 1);
       const yearStart = financialYearStart(date, month, day);
@@ -419,12 +420,12 @@ export const financialLeaveService = {
     const versions = await db.all("SELECT * FROM workforce_leave_policy_version WHERE tenant_id=? ORDER BY version_number DESC", [tenantId]);
     const latestPublished = versions.find((item) => item.status === "published") || null;
     const localToday = localDateInTimezone(new Date(), latestPublished?.timezone || "Asia/Kolkata");
-    const current = versions.filter((item) => item.status === "published" && String(item.effective_from_fy_start).slice(0, 10) <= localToday)
-      .sort((a, b) => String(b.effective_from_fy_start).localeCompare(String(a.effective_from_fy_start)))[0] || null;
+    const current = versions.filter((item) => item.status === "published" && dateString(item.effective_from_fy_start) <= localToday)
+      .sort((a, b) => dateString(b.effective_from_fy_start).localeCompare(dateString(a.effective_from_fy_start)) || Number(b.version_number) - Number(a.version_number))[0] || null;
     const types = current ? await getTypes(current.id, tenantId) : [];
     const history = await Promise.all(versions.map(async (version) => ({ ...version, leave_types: await getTypes(version.id, tenantId) })));
     const latestRun = await db.get("SELECT * FROM workforce_leave_reset_run WHERE tenant_id=? ORDER BY financial_year_start DESC LIMIT 1", [tenantId]);
-    return { current, versions: history, leave_types: types, next_reset_date: this.nextResetDate(current), latest_reset: latestRun };
+    return { current, latest_published: latestPublished, versions: history, leave_types: types, next_reset_date: this.nextResetDate(current || latestPublished), latest_reset: latestRun };
   },
 
   nextResetDate(policy) {
@@ -457,8 +458,12 @@ export const financialLeaveService = {
       const header = await tx.run(`INSERT INTO workforce_leave_policy_version
         (tenant_id,version_number,status,effective_from_fy_start,financial_year_start_month,financial_year_start_day,timezone,automatic_reset,legacy_shared_pool_enabled,proration_method,reason,changed_by)
         VALUES (?,?,'draft',?,?,?,?,?,?,?,?,?)`, [tenantId, version, effective, input.financial_year_start_month || 4, input.financial_year_start_day || 1, input.timezone, input.automatic_reset ? 1 : 0, input.legacy_shared_pool_enabled ? 1 : 0, input.proration_method || "none", input.reason.trim(), actor.id]);
+      const seenCodes = new Set();
       for (const type of types) {
-        if (!type.leave_code?.trim() || !type.leave_name?.trim() || Number(type.annual_entitlement) < 0) throw new AppError("Every leave type needs a name, code, and non-negative annual entitlement", 400);
+        const code = String(type.leave_code || "").trim().toLowerCase();
+        if (!code || !type.leave_name?.trim() || Number(type.annual_entitlement) < 0) throw new AppError("Every leave type needs a name, code, and non-negative annual entitlement", 400);
+        if (seenCodes.has(code)) throw new AppError(`Duplicate leave code "${code}" is not allowed`, 400);
+        seenCodes.add(code);
         await tx.run(`INSERT INTO workforce_leave_type_policy
           (tenant_id,policy_version_id,leave_code,leave_name,annual_entitlement,is_paid,carry_forward_enabled,max_carry_forward_days,carry_forward_expiry_days,expired_balance_forfeited,carry_forward_requires_approval,minimum_application_days,maximum_consecutive_days,half_day_allowed,requires_approval,requires_document,accrual_frequency,probation_restriction_months,active_status,eligibility_rules)
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [tenantId, header.lastID, type.leave_code.trim().toLowerCase(), type.leave_name.trim(), Number(type.annual_entitlement), type.is_paid ? 1 : 0, type.carry_forward_enabled ? 1 : 0, Number(type.max_carry_forward_days || 0), type.carry_forward_expiry_days || null, type.expired_balance_forfeited === false ? 0 : 1, type.carry_forward_requires_approval ? 1 : 0, Number(type.minimum_application_days || 1), type.maximum_consecutive_days || null, type.half_day_allowed ? 1 : 0, type.requires_approval === false ? 0 : 1, type.requires_document ? 1 : 0, type.accrual_frequency || "none", Number(type.probation_restriction_months || 0), type.active_status === false ? 0 : 1, JSON.stringify(type.eligibility_rules || {})]);
@@ -571,9 +576,9 @@ export const financialLeaveService = {
       }
       if (!applicable?.automatic_reset) continue;
       const currentStart = financialYearStart(today, Number(applicable.financial_year_start_month), Number(applicable.financial_year_start_day));
-      if (today < String(applicable.effective_from_fy_start).slice(0, 10)) continue;
+      if (today < dateString(applicable.effective_from_fy_start)) continue;
       const alreadyComplete = await db.get("SELECT id FROM workforce_leave_reset_run WHERE tenant_id=? AND financial_year_start=? AND status='completed'", [item.tenant_id, currentStart]);
-      if (!alreadyComplete) await runTenantReset(Number(item.tenant_id), currentStart).catch((err) => realtimeManager.broadcast("leave_reset_failed", { tenant_id: Number(item.tenant_id), financial_year_start: currentStart, message: err.message }, { targetRoles: MANAGEMENT_ROLES }));
+      if (!alreadyComplete) await runTenantReset(Number(item.tenant_id), currentStart).catch((err) => realtimeManager.broadcast("leave_reset_failed", { tenant_id: Number(item.tenant_id), financial_year_start: currentStart, message: err.message }, { tenantId: Number(item.tenant_id), targetRoles: MANAGEMENT_ROLES }));
     }
     await processAccrualsAndExpiries();
   },
@@ -588,6 +593,7 @@ export const financialLeaveService = {
     requireManager(actor);
     const employeeId = Number(input.employee_id);
     if (!Number.isSafeInteger(employeeId) || employeeId <= 0 || !input.reason?.trim()) throw new AppError("A valid employee and reason are required", 400);
+    if (input.effective_to && input.effective_to < input.effective_from) throw new AppError("Effective to date cannot be earlier than effective from date", 400);
     const policy = await db.get("SELECT * FROM workforce_leave_policy_version WHERE tenant_id=? AND status='published' AND effective_from_fy_start<=? ORDER BY effective_from_fy_start DESC LIMIT 1", [tenantId, input.effective_from]);
     const eligibilityFy = financialYearStart(input.effective_from, Number(policy?.financial_year_start_month || 4), Number(policy?.financial_year_start_day || 1));
     if (eligibilityFy !== input.effective_from) throw new AppError("Employee eligibility exceptions must begin on the first day of a financial year", 400);

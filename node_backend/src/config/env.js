@@ -41,6 +41,22 @@ export const config = {
   queueJobRemoveOnComplete: Number(process.env.QUEUE_JOB_REMOVE_ON_COMPLETE || 100),
   queueJobRemoveOnFail: Number(process.env.QUEUE_JOB_REMOVE_ON_FAIL || 500),
   outboxEncryptionKey: process.env.OUTBOX_ENCRYPTION_KEY || "",
+
+  // Reverse Geocoding (free providers only, backend-only credentials)
+  geoapifyApiKey: process.env.GEOAPIFY_API_KEY || "",
+  geocodingProvider: process.env.GEOCODING_PROVIDER || "auto",
+  geocodingCacheDays: Number(process.env.GEOCODING_CACHE_DAYS || 30),
+
+  // GPS Accuracy & Freshness Policy
+  gpsGoodAccuracyMeters: Number(process.env.GPS_GOOD_ACCURACY_METERS || 25),
+  gpsWarnAccuracyMeters: Number(process.env.GPS_WARN_ACCURACY_METERS || 50),
+  gpsMaxAccuracyMeters: Number(process.env.GPS_MAX_ACCURACY_METERS || 100),
+  gpsMaxLocationAgeMs: Number(process.env.GPS_MAX_LOCATION_AGE_MS || 120000),
+
+  // Unified Web Push (VAPID)
+  vapidPublicKey: process.env.VAPID_PUBLIC_KEY || "",
+  vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || "",
+  vapidSubject: process.env.VAPID_SUBJECT || "mailto:admin@hrms.local",
 };
 
 export function validateProductionEnv(env = process.env) {

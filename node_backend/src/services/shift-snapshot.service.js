@@ -122,7 +122,7 @@ export function buildShiftSnapshot({
       min_rest_period_minutes: Number(companyPolicyVersion?.min_rest_period_minutes ?? 660),
       grace_period_in_minutes: Number(companyPolicyVersion?.grace_period_in_minutes ?? 15),
       early_departure_grace_minutes: Number(companyPolicyVersion?.early_departure_grace_minutes ?? 15),
-      early_departure_requires_approval: Boolean(companyPolicyVersion?.early_departure_requires_approval ?? true),
+      early_departure_requires_approval: false,
       allow_unscheduled_punch: Boolean(companyPolicyVersion?.allow_unscheduled_punch ?? false),
       overtime_enabled: Boolean(companyPolicyVersion?.overtime_enabled ?? false),
       overtime_min_qualifying_minutes: Number(companyPolicyVersion?.overtime_min_qualifying_minutes ?? 60),

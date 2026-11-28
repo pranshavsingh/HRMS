@@ -10,7 +10,9 @@ import {
   Clock,
   FileText,
   Megaphone,
+  Settings,
   ShieldAlert,
+  Smartphone,
   Trash2,
 } from "lucide-react";
 import Layout from "../components/layout/Layout";
@@ -44,8 +46,26 @@ function getCategoryIcon(category) {
 
 export default function Notifications() {
   const navigate = useNavigate();
-  const { unreadCount, markAsRead, markAllAsRead, fetchUnreadCount } = useNotifications();
+  const {
+    unreadCount,
+    markAsRead,
+    markAllAsRead,
+    fetchUnreadCount,
+    pushSupported,
+    pushPermission,
+    isPushSubscribed,
+    preferences,
+    devices,
+    enableWebPush,
+    disableWebPush,
+    updatePreferences,
+    removeDevice,
+  } = useNotifications();
   const { subscribe } = useRealtime();
+
+  const [showSettings, setShowSettings] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushMsg, setPushMsg] = useState("");
 
   const [records, setRecords] = useState([]);
   const [page, setPage] = useState(1);
@@ -131,20 +151,153 @@ export default function Notifications() {
               Stay updated on leave requests, attendance approvals, rosters, and documents.
             </p>
           </div>
-          {unreadCount > 0 && (
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
             <button
               type="button"
-              onClick={async () => {
-                await markAllAsRead(category !== "ALL" ? category : null);
-                void loadNotifications();
-              }}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition self-start sm:self-auto"
+              onClick={() => setShowSettings((prev) => !prev)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-sm font-semibold hover:bg-slate-50 transition"
             >
-              <CheckCheck size={16} />
-              Mark All as Read
+              <Settings size={16} />
+              Push & Devices
             </button>
-          )}
+            {unreadCount > 0 && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await markAllAsRead(category !== "ALL" ? category : null);
+                  void loadNotifications();
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition"
+              >
+                <CheckCheck size={16} />
+                Mark All as Read
+              </button>
+            )}
+          </div>
         </div>
+
+        {showSettings && (
+          <section className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-slate-900">Push Notification Preferences & Devices</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Browser permission: <span className="font-semibold capitalize">{pushPermission}</span> ·{" "}
+                  Status: <span className="font-semibold">{isPushSubscribed ? "Subscribed" : "Not subscribed"}</span>
+                </p>
+              </div>
+              {pushSupported && (
+                <button
+                  type="button"
+                  disabled={pushBusy}
+                  onClick={async () => {
+                    setPushBusy(true);
+                    setPushMsg("");
+                    try {
+                      if (isPushSubscribed) {
+                        await disableWebPush();
+                        setPushMsg("Browser push disabled for this device.");
+                      } else {
+                        await enableWebPush();
+                        setPushMsg("Browser push enabled for this device.");
+                      }
+                    } catch (err) {
+                      setPushMsg(err?.message || "Unable to update browser push.");
+                    } finally {
+                      setPushBusy(false);
+                    }
+                  }}
+                  className={`px-4 py-2 rounded-xl text-sm font-semibold text-white transition disabled:opacity-60 ${
+                    isPushSubscribed ? "bg-slate-700 hover:bg-slate-800" : "bg-emerald-600 hover:bg-emerald-700"
+                  }`}
+                >
+                  {pushBusy ? "Updating…" : isPushSubscribed ? "Disable Browser Push" : "Enable Browser Push"}
+                </button>
+              )}
+            </div>
+
+            {pushMsg && <p className="text-xs font-medium text-blue-700 bg-blue-50 px-3 py-2 rounded-lg">{pushMsg}</p>}
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-slate-200 p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-slate-800">Channel & Category Preferences</h3>
+                <div className="flex flex-wrap gap-4">
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(preferences.web_push_enabled)}
+                      onChange={(e) => void updatePreferences({ ...preferences, web_push_enabled: e.target.checked })}
+                    />
+                    Web Push
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(preferences.mobile_push_enabled)}
+                      onChange={(e) => void updatePreferences({ ...preferences, mobile_push_enabled: e.target.checked })}
+                    />
+                    Mobile Push
+                  </label>
+                </div>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {CATEGORIES.filter((c) => c !== "ALL").map((cat) => {
+                    const disabled = (preferences.disabled_categories || []).includes(cat);
+                    return (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => {
+                          const current = preferences.disabled_categories || [];
+                          const next = disabled ? current.filter((c) => c !== cat) : [...current, cat];
+                          void updatePreferences({ ...preferences, disabled_categories: next });
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition ${
+                          disabled
+                            ? "bg-slate-100 text-slate-400 border-slate-200 line-through"
+                            : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                        }`}
+                      >
+                        {cat}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 p-4 space-y-2">
+                <h3 className="text-sm font-semibold text-slate-800">Registered Devices ({devices.length})</h3>
+                {devices.length === 0 ? (
+                  <p className="text-xs text-slate-500">No active push devices registered.</p>
+                ) : (
+                  <div className="space-y-2 max-h-40 overflow-y-auto">
+                    {devices.map((dev) => (
+                      <div key={dev.id} className="flex items-center justify-between gap-2 text-xs bg-slate-50 rounded-lg px-3 py-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Smartphone size={14} className="text-slate-500 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="font-medium text-slate-800 truncate">
+                              {dev.device_name || `${dev.platform} (${dev.provider})`}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {dev.platform} · {dev.provider}
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void removeDevice(dev.id)}
+                          className="text-rose-600 hover:underline shrink-0"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
 
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="flex flex-wrap gap-2">

@@ -9,12 +9,19 @@ import { config } from "../config/env.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { db } from "../db/index.js";
 import logger from "../utils/logger.js";
-import { parsePagination, formatPaginationResponse } from "../utils/pagination.js";
+import {
+  parsePagination,
+  formatPaginationResponse,
+  parseCursorPagination,
+  buildKeysetClause,
+  formatCursorResponse,
+} from "../utils/pagination/index.js";
 import { shiftAttendanceService } from "./shift-attendance.service.js";
 import { siteService } from "./site.service.js";
 import { financialLeaveService } from "./financial-leave.service.js";
 import notificationService from "./notification.service.js";
 import { realtimeService } from "./realtime.service.js";
+import locationService from "./location.service.js";
 
 const APPROVAL_CLOSED_STATUS = "closed";
 const REVIEW_ROLES_BY_REQUESTOR = {
@@ -146,6 +153,63 @@ async function isOutsideAllottedArea(userId, latitude, longitude, tx = null) {
   }
 
   return distanceMeters(officeLat, officeLng, punchLat, punchLng) > radius;
+}
+
+function validateAndClassifyGpsTelemetry({ latitude, longitude, accuracy = null, locationTimestamp = null, locationProvider = null }) {
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    throw new AppError("Invalid GPS coordinates. Finite latitude and longitude are required.", 400);
+  }
+
+  let accuracyMeters = null;
+  if (accuracy !== null && accuracy !== undefined && accuracy !== "") {
+    const acc = Number(accuracy);
+    if (!Number.isFinite(acc) || acc < 0) {
+      throw new AppError("Invalid GPS accuracy value.", 400);
+    }
+    if (acc > config.gpsMaxAccuracyMeters) {
+      throw new AppError(
+        `GPS accuracy is too low (${Math.round(acc)}m). A fix within ${config.gpsMaxAccuracyMeters}m is required.`,
+        400
+      );
+    }
+    accuracyMeters = Number(acc.toFixed(2));
+  }
+
+  let locationTs = null;
+  if (locationTimestamp !== null && locationTimestamp !== undefined && locationTimestamp !== "") {
+    const numericTs = Number(locationTimestamp);
+    const parsedDate = Number.isFinite(numericTs) ? new Date(numericTs) : new Date(String(locationTimestamp));
+    if (Number.isNaN(parsedDate.getTime())) {
+      throw new AppError("Invalid GPS location timestamp.", 400);
+    }
+    const ageMs = Date.now() - parsedDate.getTime();
+    if (ageMs > config.gpsMaxLocationAgeMs) {
+      throw new AppError(
+        `GPS location is stale (${Math.round(ageMs / 1000)}s old). Please acquire a fresh location fix before punching.`,
+        400
+      );
+    }
+    locationTs = parsedDate;
+  }
+
+  let accuracyTier = "unknown";
+  let warning = null;
+  if (accuracyMeters !== null) {
+    if (accuracyMeters <= config.gpsGoodAccuracyMeters) {
+      accuracyTier = "good";
+    } else if (accuracyMeters <= config.gpsWarnAccuracyMeters) {
+      accuracyTier = "moderate";
+      warning = `Moderate GPS accuracy (±${Math.round(accuracyMeters)}m).`;
+    } else {
+      accuracyTier = "low";
+      warning = `Low indoor/network GPS accuracy (±${Math.round(accuracyMeters)}m).`;
+    }
+  }
+
+  const provider = locationProvider ? String(locationProvider).trim().slice(0, 32) : null;
+  return { lat, lng, accuracyMeters, locationTs, provider, accuracyTier, warning };
 }
 
 function overallAttendanceStatus(attendance) {
@@ -412,7 +476,7 @@ export const attendanceService = {
     };
   },
 
-  async punchIn(userId, latitude, longitude, file, actor, directPath = null, accuracy = null) {
+  async punchIn(userId, latitude, longitude, file, actor, directPath = null, accuracy = null, telemetryMeta = {}) {
     const relativePath = directPath || (file ? await storageService.store(file, "attendance") : null);
     if (!relativePath) {
       throw new AppError("Photo is required for attendance punch", 400);
@@ -426,13 +490,24 @@ export const attendanceService = {
           throw new AppError("Active user account required", 400);
         }
 
-        // Validate coordinates and GPS accuracy (BUG-A10: 100m maximum acceptable accuracy tolerance)
-        if (!Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) {
-          throw new AppError("Invalid GPS coordinates. Finite latitude and longitude are required.", 400);
+        const tenantRow = await db.get(
+          "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 ORDER BY tenant_id ASC LIMIT 1",
+          [userId],
+          tx
+        );
+        const resolvedTenantId = Number(actor?.tenantId || actor?.tenant_id || tenantRow?.tenant_id || 0);
+        if (!resolvedTenantId) {
+          throw new AppError("Active tenant membership required", 403);
         }
-        if (accuracy != null && Number.isFinite(Number(accuracy)) && Number(accuracy) > 100) {
-          throw new AppError(`GPS accuracy is too low (${Math.round(Number(accuracy))}m). A fix within 100m is required.`, 400);
-        }
+
+        // Validate coordinates, GPS accuracy, and location freshness
+        const gps = validateAndClassifyGpsTelemetry({
+          latitude,
+          longitude,
+          accuracy,
+          locationTimestamp: telemetryMeta?.locationTimestamp,
+          locationProvider: telemetryMeta?.locationProvider,
+        });
 
         // 2. Check approved leave under lock
         const todayStr = getCompanyLocalDateString();
@@ -478,13 +553,8 @@ export const attendanceService = {
         const now = new Date();
         const dateStr = getCompanyLocalDateString(now);
 
-        // 5. Resolve Tenant ID
-        const tenantRow = await db.get(
-          "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 LIMIT 1",
-          [userId],
-          tx
-        );
-        const tenantId = tenantRow?.tenant_id || 1;
+        // 5. Resolve Tenant ID (already resolved from workforce_user_tenant)
+        const tenantId = resolvedTenantId;
 
         // 6. Tiered Shift Resolution & Punctuality Calculation
         const resolvedShift = await shiftAttendanceService.resolveShiftForPunchIn(tenantId, userId, now, tx);
@@ -499,8 +569,11 @@ export const attendanceService = {
           work_date: workDate,
           punch_in_time: now,
           punch_in_photo: relativePath,
-          punch_in_lat: Number(latitude),
-          punch_in_lng: Number(longitude),
+          punch_in_lat: gps.lat,
+          punch_in_lng: gps.lng,
+          punch_in_accuracy: gps.accuracyMeters,
+          punch_in_location_ts: gps.locationTs,
+          punch_in_location_provider: gps.provider,
           punch_in_outside: Number(punchInOutside),
           geofence_status: punchInOutside ? "outside" : "inside",
           punch_in_status: punchInStatus,
@@ -535,6 +608,8 @@ export const attendanceService = {
         }
 
         return {
+          id: attId,
+          tenant_id: resolvedTenantId,
           message: needsApproval ? "Punch In submitted for approval" : "Punch In Successful",
           outside_location: punchInOutside,
           requires_approval: needsApproval,
@@ -555,24 +630,29 @@ export const attendanceService = {
         };
       });
 
+      const effectiveTenantId = Number(result.tenant_id);
       realtimeManager.broadcast(
         "attendance_update",
-        { actorId: actor.id },
-        { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
+        { actorId: actor.id, userId: Number(userId), tenantId: effectiveTenantId },
+        {
+          tenantId: effectiveTenantId,
+          targetRoles: ["hr", "admin", "superadmin", "manager"],
+          targetUserIds: [Number(userId)],
+        }
       );
-      if (result.status === "pending" || result.outside) {
+      void locationService.reverseGeocode(Number(latitude), Number(longitude)).catch(() => {});
+      if (result.status === "pending" || result.outside_location) {
         void notificationService.safeNotify(async () => {
-          const tenantId = actor.tenant_id || 1;
-          const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, userId);
+          const approverIds = await notificationService.resolveApproverIdsForEmployee(effectiveTenantId, userId);
           realtimeService.emitApprovalCountUpdated("attendance", {
-            tenantId,
+            tenantId: effectiveTenantId,
             targetUserIds: approverIds,
             actorId: actor.id,
           });
           if (approverIds.length === 0) return;
           await notificationService.createBulkNotifications(
             approverIds.map((recipientId) => ({
-              tenantId,
+              tenantId: effectiveTenantId,
               recipientId,
               actorId: actor.id,
               type: "attendance:punch_in_review",
@@ -599,7 +679,7 @@ export const attendanceService = {
     }
   },
 
-  async punchOut(userId, latitude, longitude, file, actor, directPath = null, accuracy = null) {
+  async punchOut(userId, latitude, longitude, file, actor, directPath = null, accuracy = null, telemetryMeta = {}) {
     const relativePath = directPath || (file ? await storageService.store(file, "attendance") : null);
     if (!relativePath) {
       throw new AppError("Photo is required for attendance punch", 400);
@@ -613,13 +693,24 @@ export const attendanceService = {
           throw new AppError("User not found", 404);
         }
 
-        // Validate coordinates and GPS accuracy (BUG-A10: 100m maximum acceptable accuracy tolerance)
-        if (!Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) {
-          throw new AppError("Invalid GPS coordinates. Finite latitude and longitude are required.", 400);
+        const tenantRow = await db.get(
+          "SELECT tenant_id FROM workforce_user_tenant WHERE user_id = ? AND is_active = 1 ORDER BY tenant_id ASC LIMIT 1",
+          [userId],
+          tx
+        );
+        const resolvedTenantId = Number(actor?.tenantId || actor?.tenant_id || tenantRow?.tenant_id || 0);
+        if (!resolvedTenantId) {
+          throw new AppError("Active tenant membership required", 403);
         }
-        if (accuracy != null && Number.isFinite(Number(accuracy)) && Number(accuracy) > 100) {
-          throw new AppError(`GPS accuracy is too low (${Math.round(Number(accuracy))}m). A fix within 100m is required.`, 400);
-        }
+
+        // Validate coordinates, GPS accuracy, and location freshness
+        const gps = validateAndClassifyGpsTelemetry({
+          latitude,
+          longitude,
+          accuracy,
+          locationTimestamp: telemetryMeta?.locationTimestamp,
+          locationProvider: telemetryMeta?.locationProvider,
+        });
 
         // 2. Locate open attendance record
         const att = await attendanceRepository.findOpenAttendance(userId, tx, false);
@@ -632,7 +723,7 @@ export const attendanceService = {
         const outEval = await shiftAttendanceService.evaluatePunchOut(att, now, tx);
 
         let reviewers = [];
-        const policyApprovalRequired = Boolean(outEval.earlyDepartureRequiresApproval || outEval.overtimeRequiresApproval);
+        const policyApprovalRequired = Boolean(outEval.overtimeRequiresApproval);
         if (punchOutOutside || policyApprovalRequired) {
           reviewers = await approvalRouteForUser(userId, tx);
           if (punchOutOutside && (!reviewers || reviewers.length === 0)) {
@@ -658,8 +749,11 @@ export const attendanceService = {
         const updateResult = await attendanceRepository.updateAttendance(att.id, {
           punch_out_time: now,
           punch_out_photo: relativePath,
-          punch_out_lat: Number(latitude),
-          punch_out_lng: Number(longitude),
+          punch_out_lat: gps.lat,
+          punch_out_lng: gps.lng,
+          punch_out_accuracy: gps.accuracyMeters,
+          punch_out_location_ts: gps.locationTs,
+          punch_out_location_provider: gps.provider,
           punch_out_outside: Number(punchOutOutside),
           punch_out_status: punchOutStatus,
           status: finalStatus,
@@ -688,20 +782,7 @@ export const attendanceService = {
           await attendanceRepository.insertApprovalsBatch(approvalRows, tx);
         }
 
-        // Manager policy approvals (decoupled from physical punch status)
-        if (outEval.earlyDepartureRequiresApproval && reviewers.length > 0) {
-          const earlyApprovalRows = reviewers.map((reviewer) => ({
-            role: reviewer.role,
-            status: "pending",
-            comment: `Early departure by ${outEval.earlyDepartureMinutes} minutes`,
-            created_at: now,
-            approved_by_id: reviewer.id,
-            attendance_id: att.id,
-            type: "out"
-          }));
-          await attendanceRepository.insertApprovalsBatch(earlyApprovalRows, tx);
-        }
-
+        // Manager policy approvals (decoupled from physical punch status; early departure no longer requires approval)
         if (outEval.overtimeRequiresApproval && reviewers.length > 0) {
           const overtimeApprovalRows = reviewers.map((reviewer) => ({
             role: reviewer.role,
@@ -717,8 +798,14 @@ export const attendanceService = {
 
         const updated = await attendanceRepository.findAttendanceById(att.id, tx);
         const requiresApproval = Boolean(geofenceNeedsApproval || policyApprovalRequired);
+        const outTenantId = Number(updated?.tenant_id || att.tenant_id || resolvedTenantId || 0);
+        if (!outTenantId) {
+          throw new AppError("Active tenant membership required", 403);
+        }
 
         return {
+          id: att.id,
+          tenant_id: outTenantId,
           message: requiresApproval ? "Punch Out submitted for approval" : "Punch Out Successful",
           outside_location: punchOutOutside,
           requires_approval: requiresApproval,
@@ -746,24 +833,29 @@ export const attendanceService = {
         };
       });
 
+      const effectiveTenantId = Number(result.tenant_id);
       realtimeManager.broadcast(
         "attendance_update",
-        { actorId: actor.id },
-        { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(userId)] }
+        { actorId: actor.id, userId: Number(userId), tenantId: effectiveTenantId },
+        {
+          tenantId: effectiveTenantId,
+          targetRoles: ["hr", "admin", "superadmin", "manager"],
+          targetUserIds: [Number(userId)],
+        }
       );
-      if (result.status === "pending" || result.outside || result.is_early_departure || result.is_overtime) {
+      void locationService.reverseGeocode(Number(latitude), Number(longitude)).catch(() => {});
+      if (result.final_status === "pending" || result.outside_location || result.requires_approval || result.is_overtime) {
         void notificationService.safeNotify(async () => {
-          const tenantId = actor.tenant_id || 1;
-          const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, userId);
+          const approverIds = await notificationService.resolveApproverIdsForEmployee(effectiveTenantId, userId);
           realtimeService.emitApprovalCountUpdated("attendance", {
-            tenantId,
+            tenantId: effectiveTenantId,
             targetUserIds: approverIds,
             actorId: actor.id,
           });
           if (approverIds.length === 0) return;
           await notificationService.createBulkNotifications(
             approverIds.map((recipientId) => ({
-              tenantId,
+              tenantId: effectiveTenantId,
               recipientId,
               actorId: actor.id,
               type: "attendance:punch_out_review",
@@ -813,8 +905,8 @@ export const attendanceService = {
       const longitude = r.type === "in" ? r.punch_in_lng : r.punch_out_lng;
 
       const category = getExceptionCategory(r.comment, r.type);
+      if (category === "early_departure") continue;
       let reviewLabel = r.type === "in" ? "Punch In" : "Punch Out";
-      if (category === "early_departure") reviewLabel = "Early Departure";
       if (category === "overtime") reviewLabel = "Overtime";
 
       records.push({
@@ -903,6 +995,53 @@ export const attendanceService = {
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(q))
       );
+    }
+
+    const cursorPag = parseCursorPagination(query, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: "att_approvals",
+    });
+
+    if (cursorPag.useCursor) {
+      const sorted = [...filteredRecords].sort((a, b) => {
+        const ta = new Date(a.created_at || 0).getTime();
+        const tb = new Date(b.created_at || 0).getTime();
+        if (tb !== ta) return tb - ta;
+        return Number(b.id) - Number(a.id);
+      });
+
+      let slicedSource = sorted;
+      if (cursorPag.cursorValues) {
+        const [cTs, cId] = cursorPag.cursorValues;
+        slicedSource = sorted.filter((r) => {
+          const ts = new Date(r.created_at || 0).getTime();
+          return ts < cTs || (ts === cTs && Number(r.id) < Number(cId));
+        });
+      }
+
+      const overfetched = slicedSource.slice(0, cursorPag.fetchLimit);
+      return formatCursorResponse(overfetched, {
+        limit: cursorPag.limit,
+        scope: "att_approvals",
+        extractCursorValues: (r) => [new Date(r.created_at || 0).getTime(), Number(r.id)],
+        extra: {
+          records: overfetched.slice(0, cursorPag.limit),
+          summary: {
+            scope_label: role === "manager"
+              ? "Direct-report attendance exceptions"
+              : role === "superadmin"
+                ? "All attendance exception approvals"
+                : "Assigned attendance exception approvals",
+            total_items: uniqueRecords.length,
+            pending_items: uniqueRecords.filter((r) => r.approval_status === "pending").length,
+            approved_items: uniqueRecords.filter((r) => r.approval_status === "approved").length,
+            rejected_items: uniqueRecords.filter((r) => r.approval_status === "rejected").length,
+            closed_items: uniqueRecords.filter((r) => r.approval_status === APPROVAL_CLOSED_STATUS).length,
+            actionable_items: uniqueRecords.filter((r) => r.can_approve).length,
+          },
+        },
+      });
     }
 
     const defaultLimit = Number(query.limit) > 0 ? Number(query.limit) : 15;
@@ -1025,6 +1164,7 @@ export const attendanceService = {
           const att = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
           return {
             message: `${category === "early_departure" ? "Early departure" : "Overtime"} rejected successfully`,
+            user_id: ap.employee_id,
             attendance_status: att.status,
             review_type: ap.type,
             review_status: "rejected",
@@ -1051,6 +1191,7 @@ export const attendanceService = {
 
           return {
             message: "Punch In rejected successfully",
+            user_id: ap.employee_id,
             attendance_status: "rejected",
             review_type: "in",
             review_status: "rejected",
@@ -1083,6 +1224,7 @@ export const attendanceService = {
           const updated = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
           return {
             message: "Punch Out rejected and attendance record reset to active punch in successfully",
+            user_id: ap.employee_id,
             attendance_status: updated.status,
             review_type: "out",
             review_status: updated.punch_out_status,
@@ -1129,10 +1271,20 @@ export const attendanceService = {
         );
       }
 
-      // Re-calculate and update overall attendance status
+      // Re-calculate and update overall attendance status (and hours if punch-out/regularization wasn't computed yet)
       const att = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
       const finalStatus = overallAttendanceStatus(att);
-      await attendanceRepository.updateAttendance(ap.attendance_id, { status: finalStatus }, tx);
+      const updateFields = { status: finalStatus };
+      if (ap.type === "out" && att.punch_in_time && att.punch_out_time && (att.total_hours == null || Number(att.total_hours) === 0)) {
+        const outDt = new Date(dbTimeToIso(att.punch_out_time));
+        if (!Number.isNaN(outDt.getTime())) {
+          const outEval = await shiftAttendanceService.evaluatePunchOut(att, outDt, tx);
+          updateFields.total_hours = outEval.totalHours;
+          updateFields.early_departure_minutes = outEval.earlyDepartureMinutes;
+          updateFields.overtime_minutes = outEval.overtimeMinutes;
+        }
+      }
+      await attendanceRepository.updateAttendance(ap.attendance_id, updateFields, tx);
 
       const updated = await attendanceRepository.findAttendanceById(ap.attendance_id, tx);
 
@@ -1146,31 +1298,34 @@ export const attendanceService = {
       };
     });
 
-    realtimeManager.broadcast(
-      "attendance_update",
-      { actorId: actor.id, userId: response.user_id, status: response.attendance_status },
-      { targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [Number(response.user_id)] }
-    );
-    void notificationService.safeNotify(async () => {
-      const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, response.user_id);
-      realtimeService.emitApprovalCountUpdated("attendance", {
-        tenantId,
-        targetUserIds: approverIds,
-        actorId: actor.id,
+    const targetEmployeeId = Number(response.user_id);
+    if (Number.isFinite(targetEmployeeId) && targetEmployeeId > 0) {
+      realtimeManager.broadcast(
+        "attendance_update",
+        { actorId: actor.id, userId: targetEmployeeId, status: response.attendance_status },
+        { tenantId, targetRoles: ["hr", "admin", "superadmin", "manager"], targetUserIds: [targetEmployeeId] }
+      );
+      void notificationService.safeNotify(async () => {
+        const approverIds = await notificationService.resolveApproverIdsForEmployee(tenantId, targetEmployeeId);
+        realtimeService.emitApprovalCountUpdated("attendance", {
+          tenantId,
+          targetUserIds: approverIds,
+          actorId: actor.id,
+        });
+        await notificationService.createNotification({
+          tenantId,
+          recipientId: targetEmployeeId,
+          actorId: actor.id,
+          type: `attendance:${status}`,
+          category: "ATTENDANCE",
+          title: `Attendance ${status === "approved" ? "Approved" : "Rejected"}`,
+          message: response.message,
+          actionUrl: "/history",
+          priority: status === "rejected" ? "HIGH" : "NORMAL",
+          dedupeKey: `att:decision:${approvalId}:${status}`,
+        });
       });
-      await notificationService.createNotification({
-        tenantId,
-        recipientId: Number(response.user_id),
-        actorId: actor.id,
-        type: `attendance:${status}`,
-        category: "ATTENDANCE",
-        title: `Attendance ${status === "approved" ? "Approved" : "Rejected"}`,
-        message: response.message,
-        actionUrl: "/history",
-        priority: status === "rejected" ? "HIGH" : "NORMAL",
-        dedupeKey: `att:decision:${approvalId}:${status}`,
-      });
-    });
+    }
     return response;
   },
 
@@ -1193,7 +1348,7 @@ export const attendanceService = {
     };
   },
 
-  async hrDashboard(userId, role, tenantId = 1) {
+  async hrDashboard(userId, role, tenantId = 1, query = {}) {
     if (role !== "hr" && role !== "admin" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
@@ -1223,15 +1378,29 @@ export const attendanceService = {
       [effectiveTenantId]
     );
 
-    const recentRows = await db.all(
-      `SELECT a.*, u.username as employee, u.role 
-       FROM attendance_attendance a 
-       JOIN accounts_user u ON u.id=a.user_id 
-       JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
-       WHERE a.tenant_id = ? AND u.deleted_at IS NULL AND a.status <> 'rejected'
-       ORDER BY a.date DESC, a.punch_in_time DESC LIMIT 10`,
-      [effectiveTenantId, effectiveTenantId]
-    );
+    const hasPag = Boolean(query && (query.page || query.limit));
+    const { page, limit, offset } = hasPag ? parsePagination(query, 10, 50) : { page: 1, limit: 10, offset: 0 };
+
+    const [recentCountRow, recentRows] = await Promise.all([
+      hasPag
+        ? db.get(
+            `SELECT COUNT(*) c FROM attendance_attendance a
+             JOIN accounts_user u ON u.id=a.user_id
+             JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+             WHERE a.tenant_id = ? AND u.deleted_at IS NULL AND a.status <> 'rejected'`,
+            [effectiveTenantId, effectiveTenantId]
+          )
+        : Promise.resolve(null),
+      db.all(
+        `SELECT a.*, u.username as employee, u.role 
+         FROM attendance_attendance a 
+         JOIN accounts_user u ON u.id=a.user_id 
+         JOIN workforce_user_tenant w ON w.user_id = u.id AND w.tenant_id = ? AND w.is_active = 1
+         WHERE a.tenant_id = ? AND u.deleted_at IS NULL AND a.status <> 'rejected'
+         ORDER BY a.date DESC, a.punch_in_time DESC LIMIT ? OFFSET ?`,
+        [effectiveTenantId, effectiveTenantId, limit, offset]
+      ),
+    ]);
 
     const recentPeopleAttendance = recentRows.map((r) => ({
       employee: r.employee,
@@ -1241,6 +1410,8 @@ export const attendanceService = {
       work_hours: toHours(r.punch_in_time, r.punch_out_time, r.status)
     }));
 
+    const totalRecent = Number(recentCountRow?.c || recentPeopleAttendance.length);
+
     return {
       own_summary: own,
       people_summary: {
@@ -1248,12 +1419,22 @@ export const attendanceService = {
         present_today: Number(presentRow?.c || 0),
         pending_leave_requests: Number(pendingLeaveRow?.c || 0),
         pending_attendance_approvals: Number(pendingAttendanceRow?.c || 0),
-        recent_people_attendance: recentPeopleAttendance
+        recent_people_attendance: recentPeopleAttendance,
+        ...(hasPag
+          ? {
+              recent_people_pagination: {
+                total: totalRecent,
+                page,
+                limit,
+                totalPages: Math.max(1, Math.ceil(totalRecent / limit)),
+              },
+            }
+          : {}),
       }
     };
   },
 
-  async managerDashboard(userId, role, tenantId = 1) {
+  async managerDashboard(userId, role, tenantId = 1, query = {}) {
     if (role !== "manager" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
@@ -1269,7 +1450,10 @@ export const attendanceService = {
     const pendingAttendance = await attendanceRepository.getPendingAttendanceApprovalsCount(userId);
     const pendingLeave = await attendanceRepository.getPendingLeaveApprovalsCount(userId);
 
-    const recentTeamAttendance = teamWeekRows.slice(0, 8).map((r) => ({
+    const hasPag = Boolean(query && (query.page || query.limit));
+    const { page, limit, offset } = hasPag ? parsePagination(query, 8, 50) : { page: 1, limit: 8, offset: 0 };
+
+    const recentTeamAttendance = teamWeekRows.slice(offset, offset + limit).map((r) => ({
       employee: teamUsers.find((u) => u.id === r.user_id)?.username || "--",
       date: r.date,
       status: r.status,
@@ -1285,11 +1469,21 @@ export const attendanceService = {
         pending_attendance_approvals: pendingAttendance,
         pending_leave_approvals: pendingLeave,
         recent_team_attendance: recentTeamAttendance,
+        ...(hasPag
+          ? {
+              recent_team_pagination: {
+                total: teamWeekRows.length,
+                page,
+                limit,
+                totalPages: Math.max(1, Math.ceil(teamWeekRows.length / limit)),
+              },
+            }
+          : {}),
       },
     };
   },
 
-  async teamAnalytics(managerId, daysQuery, role, tenantId = 1, siteFilter = null) {
+  async teamAnalytics(managerId, daysQuery, role, tenantId = 1, siteFilter = null, query = {}) {
     if (role !== "manager" && role !== "hr" && role !== "admin" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
@@ -1515,36 +1709,103 @@ export const attendanceService = {
       };
     });
 
+    const summaryObj = {
+      period_days: days,
+      required_hours_per_day: 8,
+      team_members: records.length,
+      present_today: records.filter((r) => r.today_status === "PRESENT" || r.today_status === "IN_PROGRESS").length,
+      on_leave_today: records.filter((r) => r.today_status === "ON_LEAVE").length,
+      pending_review_today: records.filter((r) => r.today_status === "PENDING_REVIEW").length,
+      absent_today: records.filter((r) => r.today_status === "ABSENT").length,
+      total_present_days: records.reduce((s, r) => s + r.present_days, 0),
+      total_leave_days: records.reduce((s, r) => s + r.leave_days, 0),
+      total_work_hours: Number(records.reduce((s, r) => s + r.total_work_hours, 0).toFixed(2)),
+      average_hours_per_member: records.length ? Number((records.reduce((s, r) => s + r.total_work_hours, 0) / records.length).toFixed(2)) : 0,
+      average_hours_per_present_day: records.reduce((s, r) => s + r.present_days, 0)
+        ? Number((records.reduce((s, r) => s + r.total_work_hours, 0) / records.reduce((s, r) => s + r.present_days, 0)).toFixed(2))
+        : 0,
+      under_target_days: records.reduce((s, r) => s + r.under_target_days, 0),
+      members_below_target: records.filter((r) => r.under_target_days > 0).length,
+      total_shortfall_hours: Number(records.reduce((s, r) => s + r.shortfall_hours, 0).toFixed(2)),
+    };
+    const insightsObj = {
+      highest_hours_member: records.slice().sort((a, b) => b.total_work_hours - a.total_work_hours)[0] || null,
+      highest_leave_member: records.slice().sort((a, b) => b.leave_days - a.leave_days)[0] || null,
+      most_under_target_member: records.slice().sort((a, b) => b.under_target_days - a.under_target_days)[0] || null,
+    };
+
+    const searchQ = String(query?.search || "").trim().toLowerCase();
+    const statusFilterQ = String(query?.statusFilter || query?.status || "all").trim().toLowerCase();
+    const focusFilterQ = String(query?.focusFilter || query?.focus || "all").trim().toLowerCase();
+
+    const filteredRecords = records.filter((item) => {
+      if (searchQ) {
+        const hay = [item.employee_name, item.username, item.email, item.team_name, item.today_status]
+          .filter(Boolean)
+          .map((v) => String(v).toLowerCase());
+        if (!hay.some((v) => v.includes(searchQ))) return false;
+      }
+      if (statusFilterQ && statusFilterQ !== "all") {
+        const norm = String(item.today_status || "").toLowerCase();
+        if (norm !== statusFilterQ) return false;
+      }
+      if (focusFilterQ && focusFilterQ !== "all") {
+        const isAttention =
+          item.under_target_days > 0 ||
+          item.shortfall_hours > 0 ||
+          item.pending_approval_items > 0 ||
+          item.today_status === "ABSENT";
+        if (focusFilterQ === "attention" && !isAttention) return false;
+        if (focusFilterQ === "ontrack" && isAttention) return false;
+        if (focusFilterQ === "pending" && !(item.pending_approval_items > 0 || item.today_status === "PENDING_REVIEW")) return false;
+        if (focusFilterQ === "under_target" && !(item.under_target_days > 0 || item.shortfall_hours > 0)) return false;
+        if (focusFilterQ === "on_leave" && !(item.leave_days > 0 || item.today_status === "ON_LEAVE")) return false;
+      }
+      return true;
+    });
+
+    const cursorPag = parseCursorPagination(query || {}, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `team_analytics:${managerId}`,
+    });
+    if (cursorPag.useCursor) {
+      const sorted = filteredRecords.slice().sort((a, b) => Number(a.user_id) - Number(b.user_id));
+      const afterId = cursorPag.cursorValues ? Number(cursorPag.cursorValues[0]) : 0;
+      const filtered = afterId > 0 ? sorted.filter((r) => Number(r.user_id) > afterId) : sorted;
+      const sliced = filtered.slice(0, cursorPag.fetchLimit);
+      const resp = formatCursorResponse(sliced, {
+        limit: cursorPag.limit,
+        scope: `team_analytics:${managerId}`,
+        extractCursorValues: (r) => [Number(r.user_id)],
+      });
+      return { summary: summaryObj, insights: insightsObj, members: resp.data, data: resp.data, pagination: resp.pagination };
+    }
+
+    if (query && (query.page || query.limit)) {
+      const { page, limit, offset } = parsePagination(query, 10, 100);
+      const pagedMembers = filteredRecords.slice(offset, offset + limit);
+      return {
+        summary: summaryObj,
+        insights: insightsObj,
+        members: pagedMembers,
+        pagination: {
+          total: filteredRecords.length,
+          page,
+          limit,
+          totalPages: Math.max(1, Math.ceil(filteredRecords.length / limit)),
+        },
+      };
+    }
+
     return {
-      summary: {
-        period_days: days,
-        required_hours_per_day: 8,
-        team_members: records.length,
-        present_today: records.filter((r) => r.today_status === "PRESENT" || r.today_status === "IN_PROGRESS").length,
-        on_leave_today: records.filter((r) => r.today_status === "ON_LEAVE").length,
-        pending_review_today: records.filter((r) => r.today_status === "PENDING_REVIEW").length,
-        absent_today: records.filter((r) => r.today_status === "ABSENT").length,
-        total_present_days: records.reduce((s, r) => s + r.present_days, 0),
-        total_leave_days: records.reduce((s, r) => s + r.leave_days, 0),
-        total_work_hours: Number(records.reduce((s, r) => s + r.total_work_hours, 0).toFixed(2)),
-        average_hours_per_member: records.length ? Number((records.reduce((s, r) => s + r.total_work_hours, 0) / records.length).toFixed(2)) : 0,
-        average_hours_per_present_day: records.reduce((s, r) => s + r.present_days, 0)
-          ? Number((records.reduce((s, r) => s + r.total_work_hours, 0) / records.reduce((s, r) => s + r.present_days, 0)).toFixed(2))
-          : 0,
-        under_target_days: records.reduce((s, r) => s + r.under_target_days, 0),
-        members_below_target: records.filter((r) => r.under_target_days > 0).length,
-        total_shortfall_hours: Number(records.reduce((s, r) => s + r.shortfall_hours, 0).toFixed(2)),
-      },
-      insights: {
-        highest_hours_member: records.slice().sort((a, b) => b.total_work_hours - a.total_work_hours)[0] || null,
-        highest_leave_member: records.slice().sort((a, b) => b.leave_days - a.leave_days)[0] || null,
-        most_under_target_member: records.slice().sort((a, b) => b.under_target_days - a.under_target_days)[0] || null,
-      },
-      members: records,
+      summary: summaryObj,
+      insights: insightsObj,
+      members: filteredRecords,
     };
   },
 
-  async teamAttendance(managerId, queryMonth, queryEmployeeId, queryDetailStart, queryDetailEnd, role, queryPage = 1, queryLimit = 50, queryTeam = null, tenantId = 1, siteFilter = null) {
+  async teamAttendance(managerId, queryMonth, queryEmployeeId, queryDetailStart, queryDetailEnd, role, queryPage = 1, queryLimit = 50, queryTeam = null, tenantId = 1, siteFilter = null, query = {}) {
     if (role !== "manager" && role !== "hr" && role !== "admin" && role !== "superadmin") {
       throw new AppError("Not allowed", 403);
     }
@@ -1601,24 +1862,48 @@ export const attendanceService = {
     const totalMembers = Number(countRow?.c || 0);
 
     // Pagination calculations
-    const isAll = queryPage === "all";
+    const cursorPag = parseCursorPagination(query || {}, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `team_att:${managerId}`,
+    });
+    const isAll = !cursorPag.useCursor && queryPage === "all";
     const pageNum = Math.max(1, parseInt(queryPage, 10) || 1);
-    const limitNum = Math.min(200, Math.max(10, parseInt(queryLimit, 10) || 50));
+    const limitNum = cursorPag.useCursor ? cursorPag.limit : Math.min(200, Math.max(10, parseInt(queryLimit, 10) || 50));
     const offsetNum = (pageNum - 1) * limitNum;
 
     let memberQuery = `SELECT u.id, u.username, u.first_name, u.last_name, u.email, ep.team_name
        FROM accounts_user u 
        LEFT JOIN accounts_employeeprofile ep ON ep.user_id = u.id 
-       WHERE ${whereClause} 
-       ORDER BY u.first_name, u.username`;
+       WHERE ${whereClause}`;
 
     const queryParams = [...params];
-    if (!isAll) {
-      memberQuery += ` LIMIT ? OFFSET ?`;
-      queryParams.push(limitNum, offsetNum);
+    if (cursorPag.useCursor) {
+      if (cursorPag.cursorValues) {
+        memberQuery += ` AND u.id > ?`;
+        queryParams.push(Number(cursorPag.cursorValues[0]));
+      }
+      memberQuery += ` ORDER BY u.id ASC LIMIT ?`;
+      queryParams.push(cursorPag.fetchLimit);
+    } else {
+      memberQuery += ` ORDER BY u.first_name, u.username`;
+      if (!isAll) {
+        memberQuery += ` LIMIT ? OFFSET ?`;
+        queryParams.push(limitNum, offsetNum);
+      }
     }
 
-    const members = await db.all(memberQuery, queryParams);
+    const rawMembers = await db.all(memberQuery, queryParams);
+    let cursorResp = null;
+    let members = rawMembers;
+    if (cursorPag.useCursor) {
+      cursorResp = formatCursorResponse(rawMembers, {
+        limit: cursorPag.limit,
+        scope: `team_att:${managerId}`,
+        extractCursorValues: (m) => [Number(m.id)],
+      });
+      members = cursorResp.data;
+    }
     const memberIds = members.map((x) => x.id);
 
     const assignmentRows = memberIds.length ? await db.all(
@@ -1710,7 +1995,7 @@ export const attendanceService = {
             : siteScope.siteIds
               ? siteScope.siteIds.includes(assignedSiteForDay)
               : true;
-          if (!withinSelectedSite) return { date: day.date, code: "--", work_hours: 0, punch_in: "--", punch_out: "--", status: null, holiday_name: null, holiday_optional: null, punch_in_photo: null, punch_out_photo: null };
+          if (!withinSelectedSite) return { date: day.date, code: "--", work_hours: 0, punch_in: "--", punch_out: "--", status: null, holiday_name: null, holiday_optional: null, punch_in_photo: null, punch_out_photo: null, punch_in_lat: null, punch_in_lng: null, punch_out_lat: null, punch_out_lng: null };
           const a = map.get(day.date);
           const holiday = holidayByDate.get(day.date) || null;
           let code = "A";
@@ -1752,6 +2037,10 @@ export const attendanceService = {
             holiday_optional: code === "H" ? Boolean(holiday.is_optional) : null,
             punch_in_photo: storageService.getUrl(a?.punch_in_photo),
             punch_out_photo: storageService.getUrl(a?.punch_out_photo),
+            punch_in_lat: a?.punch_in_lat != null ? Number(a.punch_in_lat) : null,
+            punch_in_lng: a?.punch_in_lng != null ? Number(a.punch_in_lng) : null,
+            punch_out_lat: a?.punch_out_lat != null ? Number(a.punch_out_lat) : null,
+            punch_out_lng: a?.punch_out_lng != null ? Number(a.punch_out_lng) : null,
           };
         });
 
@@ -1913,6 +2202,10 @@ export const attendanceService = {
                 punch_out_status: a.punch_out_status,
                 punch_in_photo: storageService.getUrl(a.punch_in_photo),
                 punch_out_photo: storageService.getUrl(a.punch_out_photo),
+                punch_in_lat: a.punch_in_lat != null ? Number(a.punch_in_lat) : null,
+                punch_in_lng: a.punch_in_lng != null ? Number(a.punch_in_lng) : null,
+                punch_out_lat: a.punch_out_lat != null ? Number(a.punch_out_lat) : null,
+                punch_out_lng: a.punch_out_lng != null ? Number(a.punch_out_lng) : null,
               };
             });
 
@@ -1977,12 +2270,14 @@ export const attendanceService = {
           register_dates: registerDates,
           register_rows: registerRows,
           selected_employee_detail: selectedEmployeeDetail,
-          pagination: {
-            page: isAll ? 1 : pageNum,
-            limit: isAll ? totalMembers : limitNum,
-            total: totalMembers,
-            total_pages: isAll ? 1 : Math.ceil(totalMembers / limitNum),
-          },
+          ...(cursorResp ? { data: registerRows, pagination: cursorResp.pagination } : {
+            pagination: {
+              page: isAll ? 1 : pageNum,
+              limit: isAll ? totalMembers : limitNum,
+              total: totalMembers,
+              total_pages: isAll ? 1 : Math.ceil(totalMembers / limitNum),
+            },
+          }),
         };
       },
 
@@ -2151,6 +2446,10 @@ export const attendanceService = {
         leave_type: leaveRecord?.leave_type || null,
         punch_in_photo: storageService.getUrl(a?.punch_in_photo),
         punch_out_photo: storageService.getUrl(a?.punch_out_photo),
+        punch_in_lat: a?.punch_in_lat != null ? Number(a.punch_in_lat) : null,
+        punch_in_lng: a?.punch_in_lng != null ? Number(a.punch_in_lng) : null,
+        punch_out_lat: a?.punch_out_lat != null ? Number(a.punch_out_lat) : null,
+        punch_out_lng: a?.punch_out_lng != null ? Number(a.punch_out_lng) : null,
         attendance_id: a?.id || null,
       };
     });
@@ -2205,85 +2504,129 @@ export const attendanceService = {
   },
 
   async getHistory(userId, query = {}) {
+    const cursorPag = parseCursorPagination(query, {
+      defaultLimit: 20,
+      maxLimit: 100,
+      scope: `att_history:${userId}`,
+    });
+
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (query.start_date && !dateRegex.test(query.start_date)) {
+      throw new AppError("Invalid start_date format (expected YYYY-MM-DD)", 400);
+    }
+    if (query.end_date && !dateRegex.test(query.end_date)) {
+      throw new AppError("Invalid end_date format (expected YYYY-MM-DD)", 400);
+    }
+    if (query.start_date && query.end_date && query.start_date > query.end_date) {
+      throw new AppError("start_date cannot be after end_date", 400);
+    }
+
+    const whereConditions = ["user_id = ?", "status != 'leave'"];
+    const params = [userId];
+
+    if (query.start_date && query.end_date) {
+      whereConditions.push("date BETWEEN ? AND ?");
+      params.push(query.start_date, query.end_date);
+    } else if (query.start_date) {
+      whereConditions.push("date >= ?");
+      params.push(query.start_date);
+    } else if (query.end_date) {
+      whereConditions.push("date <= ?");
+      params.push(query.end_date);
+    }
+
+    const mapHistoryRow = (att) => {
+      const punchInIso = dbTimeToIso(att.punch_in_time);
+      const punchOutIso = dbTimeToIso(att.punch_out_time);
+      const workHours = toHours(punchInIso, punchOutIso, att.status);
+      return {
+        id: att.id,
+        date: att.date,
+        work_date: att.work_date || att.date,
+        shift_version_id: att.shift_version_id || null,
+        roster_entry_id: att.roster_entry_id || null,
+        is_unscheduled: Boolean(att.is_unscheduled),
+        resolution_source: att.resolution_source || null,
+        punctuality_status: att.punctuality_status || null,
+        late_minutes: Number(att.late_minutes || 0),
+        early_departure_minutes: Number(att.early_departure_minutes || 0),
+        overtime_minutes: Number(att.overtime_minutes || 0),
+        punch_in_time: punchInIso,
+        punch_out_time: punchOutIso,
+        punch_in_status: att.punch_in_status || null,
+        punch_out_status: att.punch_out_status || null,
+        punch_in: att.punch_in_status === "pending"
+          ? "Pending"
+          : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }) : null),
+        punch_out: att.punch_out_status === "pending"
+          ? "Pending"
+          : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }) : (att.punch_in_time && att.status === "pending" ? "Pending" : null)),
+        work_hours: workHours,
+        status: att.status,
+        punch_in_outside: Boolean(att.punch_in_outside),
+        punch_out_outside: Boolean(att.punch_out_outside),
+        punch_in_photo: storageService.getUrl(att.punch_in_photo),
+        punch_out_photo: storageService.getUrl(att.punch_out_photo),
+        punch_in_accuracy: att.punch_in_accuracy != null ? Number(att.punch_in_accuracy) : null,
+        punch_out_accuracy: att.punch_out_accuracy != null ? Number(att.punch_out_accuracy) : null,
+      };
+    };
+
+    if (cursorPag.useCursor) {
+      const keyset = buildKeysetClause({
+        primaryCol: "date",
+        idCol: "id",
+        cursorValues: cursorPag.cursorValues,
+        direction: "DESC",
+      });
+      const cursorWhere = [...whereConditions];
+      const cursorParams = [...params];
+      if (keyset.sql) {
+        cursorWhere.push(keyset.sql);
+        cursorParams.push(...keyset.params);
+      }
+
+      const rows = await db.all(
+        `SELECT id, date, work_date, shift_version_id, roster_entry_id, is_unscheduled, resolution_source,
+                punctuality_status, late_minutes, early_departure_minutes, overtime_minutes,
+                punch_in_time, punch_out_time, punch_in_status, punch_out_status,
+                punch_in_outside, punch_out_outside, punch_in_photo, punch_out_photo,
+                punch_in_accuracy, punch_out_accuracy, status
+         FROM attendance_attendance
+         WHERE ${cursorWhere.join(" AND ")}
+         ORDER BY date DESC, id DESC
+         LIMIT ?`,
+        [...cursorParams, cursorPag.fetchLimit]
+      );
+
+      const resp = formatCursorResponse(rows, {
+        limit: cursorPag.limit,
+        scope: `att_history:${userId}`,
+        extractCursorValues: (r) => [getYYYYMMDD(r.date), Number(r.id)],
+        mapItem: mapHistoryRow,
+      });
+      return { ...resp, records: resp.data };
+    }
+
     const defaultLimit = (query.start_date && query.end_date) ? 500 : 50;
     const { page, limit, offset } = parsePagination(query, defaultLimit, 500);
+    const whereClause = whereConditions.join(" AND ");
 
-        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-        if (query.start_date && !dateRegex.test(query.start_date)) {
-          throw new AppError("Invalid start_date format (expected YYYY-MM-DD)", 400);
-        }
-        if (query.end_date && !dateRegex.test(query.end_date)) {
-          throw new AppError("Invalid end_date format (expected YYYY-MM-DD)", 400);
-        }
-        if (query.start_date && query.end_date && query.start_date > query.end_date) {
-          throw new AppError("start_date cannot be after end_date", 400);
-        }
+    const countRow = await db.get(
+      `SELECT COUNT(*) as c FROM attendance_attendance WHERE ${whereClause}`,
+      params
+    );
+    const total = Number(countRow?.c || 0);
 
-        const whereConditions = ["user_id = ?", "status != 'leave'"];
-        const params = [userId];
-
-        if (query.start_date && query.end_date) {
-          whereConditions.push("date BETWEEN ? AND ?");
-          params.push(query.start_date, query.end_date);
-        } else if (query.start_date) {
-          whereConditions.push("date >= ?");
-          params.push(query.start_date);
-        } else if (query.end_date) {
-          whereConditions.push("date <= ?");
-          params.push(query.end_date);
-        }
-
-        const whereClause = whereConditions.join(" AND ");
-
-        const countRow = await db.get(
-          `SELECT COUNT(*) as c FROM attendance_attendance WHERE ${whereClause}`,
-          params
-        );
-        const total = Number(countRow?.c || 0);
-
-        const rows = await db.all(
-          `SELECT * FROM attendance_attendance 
+    const rows = await db.all(
+      `SELECT * FROM attendance_attendance 
        WHERE ${whereClause} 
-       ORDER BY date DESC, punch_in_time DESC 
+       ORDER BY date DESC, id DESC 
        LIMIT ? OFFSET ?`,
-          [...params, limit, offset]
-        );
+      [...params, limit, offset]
+    );
 
-        const daily = rows.map((att) => {
-          const punchInIso = dbTimeToIso(att.punch_in_time);
-          const punchOutIso = dbTimeToIso(att.punch_out_time);
-          const workHours = toHours(punchInIso, punchOutIso, att.status);
-          return {
-            id: att.id,
-            date: att.date,
-            work_date: att.work_date || att.date,
-            shift_version_id: att.shift_version_id || null,
-            roster_entry_id: att.roster_entry_id || null,
-            is_unscheduled: Boolean(att.is_unscheduled),
-            resolution_source: att.resolution_source || null,
-            punctuality_status: att.punctuality_status || null,
-            late_minutes: Number(att.late_minutes || 0),
-            early_departure_minutes: Number(att.early_departure_minutes || 0),
-            overtime_minutes: Number(att.overtime_minutes || 0),
-            punch_in_time: punchInIso,
-            punch_out_time: punchOutIso,
-            punch_in_status: att.punch_in_status || null,
-            punch_out_status: att.punch_out_status || null,
-            punch_in: att.punch_in_status === "pending"
-              ? "Pending"
-              : (punchInIso ? new Date(punchInIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }) : null),
-            punch_out: att.punch_out_status === "pending"
-              ? "Pending"
-              : (punchOutIso ? new Date(punchOutIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }) : (att.punch_in_time && att.status === "pending" ? "Pending" : null)),
-            work_hours: workHours,
-            status: att.status,
-            punch_in_outside: Boolean(att.punch_in_outside),
-            punch_out_outside: Boolean(att.punch_out_outside),
-            punch_in_photo: storageService.getUrl(att.punch_in_photo),
-            punch_out_photo: storageService.getUrl(att.punch_out_photo),
-          };
-        });
-
+    const daily = rows.map(mapHistoryRow);
     return formatPaginationResponse(daily, total, page, limit, { records: daily });
   },
 

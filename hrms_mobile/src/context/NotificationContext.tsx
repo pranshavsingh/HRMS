@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Platform } from "react-native";
 import * as Notifications from "expo-notifications";
+import { AndroidImportance } from "expo-notifications";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
 import { useRouter } from "expo-router";
@@ -35,9 +36,37 @@ export interface AppNotification {
   createdAt: string;
 }
 
+export interface NotificationPreferences {
+  web_push_enabled: boolean;
+  mobile_push_enabled: boolean;
+  disabled_categories: string[];
+}
+
+export interface NotificationDevice {
+  id: number;
+  platform: string;
+  provider: string;
+  device_id: string | null;
+  device_name: string | null;
+  is_active: number | boolean;
+  last_used_at: string | null;
+  created_at: string | null;
+}
+
 interface NotificationContextType {
   unreadCount: number;
+  preferences: NotificationPreferences | null;
+  devices: NotificationDevice[];
+  pushPermission: string;
+  pushError: string | null;
   fetchUnreadCount: () => Promise<void>;
+  fetchPreferences: () => Promise<NotificationPreferences | null>;
+  updatePreferences: (patch: Partial<NotificationPreferences>) => Promise<NotificationPreferences | null>;
+  fetchDevices: () => Promise<NotificationDevice[]>;
+  removeDevice: (deviceId: number) => Promise<void>;
+  refreshPushStatus: () => Promise<void>;
+  requestMobilePushPermission: () => Promise<boolean>;
+  unregisterMobilePush: () => Promise<void>;
   markAsRead: (id: number) => Promise<void>;
   markAllAsRead: (category?: string | null) => Promise<void>;
   deleteNotification: (id: number) => Promise<void>;
@@ -94,7 +123,7 @@ export function resolveMobileRoute(actionUrl: string | null | undefined, role = 
 
 export const NotificationProvider = ({ children }: { children: React.ReactNode }) => {
   const router = useRouter();
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, registerPreLogoutHook } = useAuth();
 
   const [unreadCount, setUnreadCount] = useState(0);
   const pushTokenRef = useRef<string | null>(null);
@@ -135,6 +164,11 @@ export const NotificationProvider = ({ children }: { children: React.ReactNode }
     }
   }, [isAuthenticated]);
 
+  const [preferences, setPreferences] = useState<NotificationPreferences | null>(null);
+  const [devices, setDevices] = useState<NotificationDevice[]>([]);
+  const [pushPermission, setPushPermission] = useState<string>("undetermined");
+  const [pushError, setPushError] = useState<string | null>(null);
+
   const clearAllNotifications = useCallback(async () => {
     if (!isAuthenticated) return;
     const res = await api.delete("/notifications/clear-all");
@@ -145,27 +179,91 @@ export const NotificationProvider = ({ children }: { children: React.ReactNode }
     }
   }, [isAuthenticated]);
 
-  // Register push token safely (supports Expo dev/prod builds; gracefully skips in Expo Go without projectId)
-  const registerForPushNotifications = useCallback(async () => {
+  const fetchPreferences = useCallback(async (): Promise<NotificationPreferences | null> => {
+    if (!isAuthenticated) return null;
+    try {
+      const res = await api.get("/notifications/preferences");
+      const prefs = res.data?.preferences || res.data || null;
+      setPreferences(prefs);
+      return prefs;
+    } catch {
+      return null;
+    }
+  }, [isAuthenticated]);
+
+  const updatePreferences = useCallback(
+    async (patch: Partial<NotificationPreferences>): Promise<NotificationPreferences | null> => {
+      if (!isAuthenticated) return null;
+      const res = await api.put("/notifications/preferences", patch);
+      const prefs = res.data?.preferences || res.data || null;
+      setPreferences(prefs);
+      return prefs;
+    },
+    [isAuthenticated]
+  );
+
+  const fetchDevices = useCallback(async (): Promise<NotificationDevice[]> => {
+    if (!isAuthenticated) return [];
+    try {
+      const res = await api.get("/notifications/devices");
+      const rows = Array.isArray(res.data?.devices) ? res.data.devices : [];
+      setDevices(rows);
+      return rows;
+    } catch {
+      return [];
+    }
+  }, [isAuthenticated]);
+
+  const removeDevice = useCallback(
+    async (deviceId: number) => {
+      if (!isAuthenticated) return;
+      await api.delete(`/notifications/devices/${deviceId}`);
+      setDevices((prev) => prev.filter((d) => d.id !== deviceId));
+    },
+    [isAuthenticated]
+  );
+
+  // Register push token ONLY when permission is already granted (no unsolicited OS prompt on login)
+  const registerForPushNotifications = useCallback(async ({ allowPrompt = false } = {}) => {
     if (!isAuthenticated || !user?.id) return;
+    setPushError(null);
     try {
       if (Platform.OS === "android") {
-        await Notifications.setNotificationChannelAsync("default", {
-          name: "Default",
-          importance: Notifications.AndroidImportance.MAX,
-          vibrationPattern: [0, 250, 250, 250],
-        });
+        try {
+          await Notifications.setNotificationChannelAsync("default", {
+            name: "Default",
+            importance: AndroidImportance.MAX,
+          });
+        } catch (channelErr: any) {
+          console.warn("[Push] Android notification channel setup skipped:", channelErr?.message);
+        }
       }
-
-      if (!Device.isDevice) return;
 
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
       let finalStatus = existingStatus;
-      if (existingStatus !== "granted") {
+      if (existingStatus !== "granted" && allowPrompt) {
         const { status } = await Notifications.requestPermissionsAsync();
         finalStatus = status;
       }
-      if (finalStatus !== "granted") return;
+      setPushPermission(finalStatus);
+      if (finalStatus !== "granted") {
+        setPushError(
+          finalStatus === "denied"
+            ? "OS notification permission is denied. Enable it in device settings."
+            : "OS notification permission has not been granted yet."
+        );
+        return;
+      }
+
+      if (!Device.isDevice) {
+        setPushError("Push tokens require a physical device (emulator/simulator unsupported).");
+        return;
+      }
+
+      if (Constants?.appOwnership === "expo" || (Constants as any)?.executionEnvironment === "storeClient") {
+        setPushError("Expo Go does not support remote push notifications on SDK 58. Use an EAS development or production build.");
+        return;
+      }
 
       const projectId =
         Constants?.expoConfig?.extra?.eas?.projectId ||
@@ -173,7 +271,7 @@ export const NotificationProvider = ({ children }: { children: React.ReactNode }
         undefined;
 
       if (!projectId) {
-        // Skip remote token fetch when EAS projectId is not configured (e.g. Expo Go local dev)
+        setPushError("EAS projectId is missing in app.json.");
         return;
       }
 
@@ -185,28 +283,61 @@ export const NotificationProvider = ({ children }: { children: React.ReactNode }
           token,
           platform: Platform.OS,
           provider: "expo",
+          deviceId: Device.osInternalBuildId || Device.modelId || undefined,
+          deviceName: Device.modelName || `${Platform.OS} device`,
         });
+        setPushError(null);
       }
     } catch (err: any) {
-      console.warn("[Push] Registration skipped or unavailable:", err?.message);
+      const msg = err?.response?.data?.error || err?.message || "Failed to register mobile push token.";
+      setPushError(msg);
+      console.warn("[Push] Registration skipped or unavailable:", msg);
     }
   }, [isAuthenticated, user?.id]);
 
-  // Unregister token on logout / account switch
+  const unregisterMobilePush = useCallback(async () => {
+    const tokenToRemove = pushTokenRef.current;
+    pushTokenRef.current = null;
+    if (tokenToRemove) {
+      await api.delete("/notifications/push-token", { data: { token: tokenToRemove } }).catch(() => {});
+    }
+  }, []);
+
+  // Pre-logout cleanup: deactivate authenticated device registration before clearing credentials
+  useEffect(() => {
+    if (!registerPreLogoutHook) return undefined;
+    return registerPreLogoutHook(async () => {
+      await unregisterMobilePush();
+      setPreferences(null);
+      setDevices([]);
+    });
+  }, [registerPreLogoutHook, unregisterMobilePush]);
+
+  // Sync unread count, preferences, and silently register token only if already granted & enabled
   useEffect(() => {
     if (!isAuthenticated) {
-      setUnreadCount(0);
-      if (pushTokenRef.current) {
-        const tokenToRemove = pushTokenRef.current;
-        pushTokenRef.current = null;
-        api.delete("/notifications/push-token", { data: { token: tokenToRemove } }).catch(() => {});
-      }
-      return;
+      return undefined;
     }
 
-    void fetchUnreadCount();
-    void registerForPushNotifications();
-  }, [isAuthenticated, user?.id, fetchUnreadCount, registerForPushNotifications]);
+    let active = true;
+    Promise.resolve().then(async () => {
+      if (!active) return;
+      void fetchUnreadCount();
+      const prefs = await fetchPreferences();
+      if (!active) return;
+      const perms = await Notifications.getPermissionsAsync().catch(() => ({ status: "undetermined" }));
+      if (!active) return;
+      setPushPermission(perms.status);
+      if (perms.status === "granted" && prefs?.mobile_push_enabled !== false) {
+        void registerForPushNotifications({ allowPrompt: false });
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [isAuthenticated, user?.id, fetchUnreadCount, fetchPreferences, registerForPushNotifications]);
+
+  const effectiveUnreadCount = isAuthenticated ? unreadCount : 0;
 
   // Real-time Socket.IO sync
   useRealtime(
@@ -270,6 +401,12 @@ export const NotificationProvider = ({ children }: { children: React.ReactNode }
       if (!response) return;
       const data: any = response.notification?.request?.content?.data || {};
       if (data.notificationId) {
+        void api
+          .post(`/notifications/${Number(data.notificationId)}/click`, {
+            channel: data.channel || "mobile_push",
+            deviceTokenId: data.deviceTokenId || null,
+          })
+          .catch(() => {});
         void markAsRead(Number(data.notificationId)).catch(() => {});
       }
       const target = resolveMobileRoute(data.actionUrl, user?.role);
@@ -286,11 +423,52 @@ export const NotificationProvider = ({ children }: { children: React.ReactNode }
     return () => sub.remove();
   }, [isAuthenticated, user?.role, markAsRead, router]);
 
+  const refreshPushStatus = useCallback(async () => {
+    try {
+      const perms = await Notifications.getPermissionsAsync();
+      setPushPermission(perms.status);
+    } catch {
+      // Ignore permission check failure
+    }
+  }, []);
+
+  const requestMobilePushPermission = useCallback(async (): Promise<boolean> => {
+    if (!isAuthenticated) return false;
+    try {
+      const perms = await Notifications.getPermissionsAsync();
+      let status = perms.status;
+      if (status !== "granted") {
+        const req = await Notifications.requestPermissionsAsync();
+        status = req.status;
+      }
+      setPushPermission(status);
+      if (status === "granted") {
+        await registerForPushNotifications({ allowPrompt: true });
+        await fetchDevices();
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, [isAuthenticated, registerForPushNotifications, fetchDevices]);
+
   return (
     <NotificationContext.Provider
       value={{
-        unreadCount,
+        unreadCount: effectiveUnreadCount,
+        preferences: isAuthenticated ? preferences : null,
+        devices: isAuthenticated ? devices : [],
+        pushPermission,
+        pushError,
         fetchUnreadCount,
+        fetchPreferences,
+        updatePreferences,
+        fetchDevices,
+        removeDevice,
+        refreshPushStatus,
+        requestMobilePushPermission,
+        unregisterMobilePush,
         markAsRead,
         markAllAsRead,
         deleteNotification,

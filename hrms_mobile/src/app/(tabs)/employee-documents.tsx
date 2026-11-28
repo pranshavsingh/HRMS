@@ -17,6 +17,8 @@ import * as WebBrowser from "expo-web-browser";
 import { Users, FileText, Search, Eye, ExternalLink, ShieldCheck, FolderOpen, X, ShieldAlert } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCompanyDate } from "../../utils/date";
+import PaginatedFlatList from "../../components/pagination/PaginatedFlatList";
+import { useCursorPagination } from "../../hooks/useCursorPagination";
 
 interface Employee {
   id: number;
@@ -35,98 +37,48 @@ interface DocumentRecord {
 
 export default function EmployeeDocumentsScreen() {
   const { user } = useAuth();
-  const isAuthorized = user && ["hr", "admin", "superadmin"].includes(user.role?.toLowerCase());
+  const isAuthorized = Boolean(user && ["hr", "admin", "superadmin"].includes(user.role?.toLowerCase()));
 
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-
-  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedEmp, setSelectedEmp] = useState<Employee | null>(null);
-  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
-  const [docsLoading, setDocsLoading] = useState(false);
-
-  const fetchEmployees = useCallback(async (showLoader = true) => {
-    if (!isAuthorized) {
-      setLoading(false);
-      return;
-    }
-    if (showLoader) setLoading(true);
-    try {
-      const res = await api.get("/auth/employees/");
-      const empList = Array.isArray(res.data)
-        ? res.data
-        : Array.isArray(res.data?.data)
-        ? res.data.data
-        : Array.isArray(res.data?.records)
-        ? res.data.records
-        : [];
-      setEmployees(empList);
-    } catch (err: any) {
-      console.error("Error fetching employees in documents", err);
-      Alert.alert("Sync Error", "Unable to load employees list.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [isAuthorized]);
-
-  const fetchDocuments = async (userId: number) => {
-    setDocsLoading(true);
-    try {
-      const res = await api.get(`/auth/documents/${userId}/`);
-      const docList = Array.isArray(res.data)
-        ? res.data
-        : Array.isArray(res.data?.data)
-        ? res.data.data
-        : Array.isArray(res.data?.records)
-        ? res.data.records
-        : [];
-      setDocuments(docList);
-    } catch (err: any) {
-      console.error("Error fetching employee docs", err);
-      Alert.alert("Sync Error", "Unable to load files list for this employee.");
-      setDocuments([]);
-    } finally {
-      setDocsLoading(false);
-    }
-  };
-
-  useRealtime("employee_update", () => fetchEmployees(false));
-  useRealtime("document_update", () => {
-    fetchEmployees(false);
-    if (selectedEmp) {
-      fetchDocuments(selectedEmp.id);
-    }
-  });
-  useRealtime("realtime:connected", () => {
-    fetchEmployees(false);
-    if (selectedEmp) {
-      fetchDocuments(selectedEmp.id);
-    }
-  });
 
   useEffect(() => {
-    const t = setTimeout(() => { void fetchEmployees(true); }, 0);
+    const t = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 300);
     return () => clearTimeout(t);
-  }, [fetchEmployees]);
+  }, [searchQuery]);
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchEmployees(false);
-    if (selectedEmp) {
-      fetchDocuments(selectedEmp.id);
-    }
-  };
+  const empPag = useCursorPagination<Employee>({
+    endpoint: "/auth/employees/",
+    limit: 20,
+    enabled: isAuthorized,
+    params: debouncedSearch ? { search: debouncedSearch } : {},
+    getItemKey: (e) => e.id,
+  });
+
+  const docsPag = useCursorPagination<DocumentRecord>({
+    endpoint: selectedEmp ? `/auth/documents/${selectedEmp.id}/` : "/auth/documents/0/",
+    limit: 20,
+    enabled: Boolean(isAuthorized && selectedEmp),
+    getItemKey: (d) => d.id,
+  });
+
+  useRealtime("employee_update", () => void empPag.refresh());
+  useRealtime("document_update", () => {
+    void empPag.refresh();
+    if (selectedEmp) void docsPag.refresh();
+  });
+  useRealtime("realtime:connected", () => {
+    void empPag.refresh();
+    if (selectedEmp) void docsPag.refresh();
+  });
 
   const handleSelectEmployee = (emp: Employee) => {
     setSelectedEmp(emp);
-    fetchDocuments(emp.id);
   };
 
   const handleClearSelection = () => {
     setSelectedEmp(null);
-    setDocuments([]);
   };
 
   const handleOpenDocument = async (url: string) => {
@@ -143,17 +95,6 @@ export default function EmployeeDocumentsScreen() {
       Alert.alert("Error", "Could not open document viewer.");
     }
   };
-
-  const filteredEmployees = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return employees;
-    return employees.filter(
-      (emp) =>
-        emp.username?.toLowerCase().includes(query) ||
-        emp.first_name?.toLowerCase().includes(query) ||
-        emp.last_name?.toLowerCase().includes(query)
-    );
-  }, [employees, searchQuery]);
 
   if (!isAuthorized) {
     return (
@@ -188,44 +129,39 @@ export default function EmployeeDocumentsScreen() {
           </View>
         </View>
 
-        {loading ? (
-          <View style={styles.centeredSpinner}>
-            <ActivityIndicator size="large" color="#2457D6" />
-          </View>
-        ) : (
-          <FlatList
-            data={filteredEmployees}
-            keyExtractor={(item) => String(item.id)}
-            renderItem={({ item }) => (
-              <TouchableOpacity style={styles.empCard} onPress={() => handleSelectEmployee(item)}>
-                <View style={styles.empInfo}>
-                  <View style={styles.empIconBox}>
-                    <Users size={18} color="#2457D6" />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.empName}>
-                      {item.first_name ? `${item.first_name} ${item.last_name || ""}` : item.username}
-                    </Text>
-                    <Text style={styles.empMeta}>
-                      Username: {item.username} | Role: {item.role}
-                    </Text>
-                  </View>
+        <PaginatedFlatList
+          items={empPag.items}
+          loading={empPag.loading}
+          refreshing={empPag.refreshing}
+          loadingMore={empPag.loadingMore}
+          hasMore={empPag.hasMore}
+          error={empPag.error}
+          onRefresh={empPag.refresh}
+          onLoadMore={empPag.loadMore}
+          onRetry={empPag.retry}
+          keyExtractor={(item: Employee) => String(item.id)}
+          renderItem={({ item }: { item: Employee }) => (
+            <TouchableOpacity style={styles.empCard} onPress={() => handleSelectEmployee(item)}>
+              <View style={styles.empInfo}>
+                <View style={styles.empIconBox}>
+                  <Users size={18} color="#2457D6" />
                 </View>
-                <FolderOpen size={18} color="#68758A" />
-              </TouchableOpacity>
-            )}
-            contentContainerStyle={styles.listContent}
-            refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
-            }
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Users size={32} color="#8995A7" />
-                <Text style={styles.emptyText}>No employee records found.</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.empName}>
+                    {item.first_name ? `${item.first_name} ${item.last_name || ""}` : item.username}
+                  </Text>
+                  <Text style={styles.empMeta}>
+                    Username: {item.username} | Role: {item.role}
+                  </Text>
+                </View>
               </View>
-            }
-          />
-        )}
+              <FolderOpen size={18} color="#68758A" />
+            </TouchableOpacity>
+          )}
+          contentContainerStyle={styles.listContent}
+          emptyTitle="No employee records found"
+          emptySubtitle="Try adjusting your search query."
+        />
       </SafeAreaView>
     );
   }
@@ -249,15 +185,18 @@ export default function EmployeeDocumentsScreen() {
         </TouchableOpacity>
       </View>
 
-      {docsLoading ? (
-        <View style={styles.centeredSpinner}>
-          <ActivityIndicator size="large" color="#2457D6" />
-        </View>
-      ) : (
-        <FlatList
-          data={documents}
-          keyExtractor={(item) => String(item.id)}
-          renderItem={({ item }) => (
+      <PaginatedFlatList
+        items={docsPag.items}
+        loading={docsPag.loading}
+        refreshing={docsPag.refreshing}
+        loadingMore={docsPag.loadingMore}
+        hasMore={docsPag.hasMore}
+        error={docsPag.error}
+        onRefresh={docsPag.refresh}
+        onLoadMore={docsPag.loadMore}
+        onRetry={docsPag.retry}
+        keyExtractor={(item: DocumentRecord) => String(item.id)}
+        renderItem={({ item }: { item: DocumentRecord }) => (
             <View style={styles.docCard}>
               <View style={styles.docInfo}>
                 <View style={styles.docIconBox}>
@@ -280,17 +219,9 @@ export default function EmployeeDocumentsScreen() {
             </View>
           )}
           contentContainerStyle={styles.listContent}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2457D6" />
-          }
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <FileText size={32} color="#8995A7" />
-              <Text style={styles.emptyText}>No documents uploaded in this folder yet.</Text>
-            </View>
-          }
+          emptyTitle="No documents uploaded"
+          emptySubtitle="No documents uploaded in this folder yet."
         />
-      )}
     </SafeAreaView>
   );
 }

@@ -19,6 +19,8 @@ import rotationRoutes from "./routes/rotation.routes.js";
 import rosterRoutes from "./routes/roster.routes.js";
 import siteRoutes from "./routes/site.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
+import managerRoutes from "./routes/manager.routes.js";
+import locationRoutes from "./routes/location.routes.js";
 import { errorHandler, AppError } from "./middleware/errorHandler.js";
 import { authenticate } from "./middleware/auth.js";
 import { getDocumentDetailRedirect } from "./controllers/accounts.controller.js";
@@ -153,6 +155,8 @@ export function createApp() {
   app.use("/api/v1/workforce/rosters", rosterRoutes);
   app.use("/api/v1/workforce/sites", siteRoutes);
   app.use("/api/v1/notifications", notificationRoutes);
+  app.use("/api/v1/manager", managerRoutes);
+  app.use("/api/v1/location", locationRoutes);
 
   // Direct and backward compatibility fallback routes
   app.use("/api/v1/assignments", shiftAssignmentRoutes);
@@ -175,6 +179,8 @@ export function createApp() {
   app.use("/api/workforce/sites", siteRoutes);
   app.use("/api/sites", siteRoutes);
   app.use("/api/notifications", notificationRoutes);
+  app.use("/api/manager", managerRoutes);
+  app.use("/api/location", locationRoutes);
 
   // System Liveness check
   app.get("/health", (_req, res) => res.json({ status: "alive", uptime: process.uptime() }));
